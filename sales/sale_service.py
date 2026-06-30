@@ -81,6 +81,13 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         v = entry.get(key)
         return Decimal(str(v)) if v not in (None, "") else None
 
+    def _priced(key, default):
+        """Honour an explicit price/rate override — including 0 (бесплатно) —
+        falling back to ``default`` only when the override is absent. A plain
+        ``override or default`` would discard Decimal('0') as falsy."""
+        v = _override(key)
+        return v if v is not None else default
+
     item_type = entry["type"]
 
     if item_type == TransactionItem.Type.MATERIAL:
@@ -91,11 +98,12 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
             # Опт: при заказе от wholesale_min_qty листов цена за лист сама
             # переключается на оптовую (если её задал админ). Ручной override
             # цены (если есть) всегда в приоритете.
-            price = _override("material_price") or material.piece_price_for_qty(qty)
+            price = _priced("material_price", material.piece_price_for_qty(qty))
         else:
             mode = TransactionItem.SaleMode.SQM
-            price = _override("material_price") or (
-                material.sqm_price if material.is_roll_material else material.price_per_unit
+            price = _priced(
+                "material_price",
+                material.sqm_price if material.is_roll_material else material.price_per_unit,
             )
         return [TransactionItem.objects.create(
             receipt=receipt, type=item_type, material=material,
@@ -116,9 +124,9 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         # Cutting → the material's own cut rate; interior install → service rate.
         # (Both per кв.м; an admin may override the rate at sale time.)
         if service.uses_running_meter:
-            rate = _override("cut_rate") or (material.cut_rate_per_pm if material else Decimal("0"))
+            rate = _priced("cut_rate", material.cut_rate_per_pm if material else Decimal("0"))
         else:
-            rate = _override("cut_rate") or service.rate_flat
+            rate = _priced("cut_rate", service.rate_flat)
         # Резку считаем по погонному метру (длине реза): можно ввести вручную,
         # иначе берём площадь куска. Материал всегда списывается/считается по площади.
         work_qty = area
@@ -138,7 +146,7 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         if service.uses_material and material:
             items.append(TransactionItem.objects.create(
                 receipt=receipt, type=TransactionItem.Type.MATERIAL, material=material,
-                quantity=area, price_per_item=_override("material_price") or material.sqm_price,
+                quantity=area, price_per_item=_priced("material_price", material.sqm_price),
                 sale_mode=TransactionItem.SaleMode.SQM,
             ))
         return items
@@ -278,10 +286,15 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None) -> Receipt:
 
     refunded_total = Decimal("0")
     for item in items:
-        # Reverse the stock movement that the sale performed.
+        # Restore stock AND book the refund only for a settled sale. An unpaid
+        # order (e.g. a pending online invoice) never deducted stock and collected
+        # no money, so refunding it restores nothing and books 0 — not a phantom
+        # refund of money the customer never paid. For settled sales the refund is
+        # the returned line's value, which keeps the debt formula consistent:
+        # (total_price − refunded_amount) stays equal to the value of kept lines.
         if stock_was_deducted:
             _deduct_stock_for_item(item, user, restore=True)
-        refunded_total += item.quantity * item.price_per_item
+            refunded_total += item.quantity * item.price_per_item
         item.is_returned = True
         item.save(update_fields=["is_returned"])
 

@@ -237,3 +237,36 @@ class EdgeRefundTests(APITestCase):
         self.bolt.refresh_from_db()
         self.assertEqual(self.acrylic.quantity, Decimal("98.00"))
         self.assertEqual(self.bolt.quantity, Decimal("48.00"))
+
+    # ---- partial refund of a HIGH-value line must not over-collect ---------
+    def test_partial_refund_high_value_line_not_over_collectable(self):
+        # CASH total 3900 (acrylic 3700 + 2 bolts 200), prepay 1000 → debt 2900.
+        receipt = create_sale(
+            client=self.customer,
+            cashier=self.store,
+            payment_method=Receipt.PaymentMethod.CASH,
+            items_data=[
+                {"type": "MATERIAL", "material": self.acrylic, "quantity": 1, "mode": "PIECE"},
+                {"type": "MATERIAL", "material": self.bolt, "quantity": 2, "mode": "SQM"},
+            ],
+            amount_paid=Decimal("1000"),
+        )
+        self.assertEqual(receipt.debt, Decimal("2900"))
+        acrylic_item = receipt.items.get(material=self.acrylic)
+        # Refund the EXPENSIVE acrylic line (3700); the customer keeps only the
+        # 200 bolt. refunded_amount must reflect the full returned line value so
+        # that (total − refunded) still equals the value of the kept goods.
+        self.assertEqual(
+            self._refund(receipt.id, item_ids=[acrylic_item.id]).status_code, 200
+        )
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.payment_status, Receipt.PaymentStatus.PARTIALLY_REFUNDED)
+        self.assertEqual(receipt.refunded_amount, Decimal("3700"))
+        # The customer prepaid 1000 and kept only 200 of goods → they are NOT in
+        # debt. pay() must refuse to collect (no phantom over-collectable debt).
+        r = self.client.post(
+            f"/api/sales/receipts/{receipt.id}/pay/", {}, format="json"
+        )
+        self.assertEqual(r.status_code, 400, r.data)
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.amount_paid, Decimal("1000"))  # not over-collected

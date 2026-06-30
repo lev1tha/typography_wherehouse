@@ -150,15 +150,37 @@ def consume_area(
 
 @transaction.atomic
 def restore_area(material: Material, area: Decimal, *, user=None, reason: str = "") -> None:
-    """Return `area` кв.м back to stock (refund). Tops up the most recent roll."""
+    """Return `area` кв.м back to stock (refund).
+
+    Mirrors the FIFO drawdown: refills lots oldest-first, each only up to its
+    original capacity (initial_area), so a refund spanning several lots restores
+    them in the same order they were consumed and never inflates a roll past its
+    initial area. Any surplus that no lot can hold (e.g. restoring more than was
+    consumed) lands on the newest roll so material.quantity stays consistent with
+    the sum of roll remainders.
+    """
     locked = Material.objects.select_for_update().get(pk=material.pk)
     add = Decimal(area)
     if add <= 0:
         return
-    roll = Roll.objects.select_for_update().filter(material=locked).order_by("-received_at").first()
-    if roll:
-        roll.remaining_area += add
+    rolls = list(
+        Roll.objects.select_for_update().filter(material=locked).order_by("received_at")
+    )
+    remaining = add
+    for roll in rolls:
+        if remaining <= 0:
+            break
+        headroom = roll.initial_area - roll.remaining_area
+        if headroom <= 0:
+            continue
+        give = min(headroom, remaining)
+        roll.remaining_area += give
         roll.save(update_fields=["remaining_area"])
+        remaining -= give
+    if remaining > 0 and rolls:
+        newest = rolls[-1]
+        newest.remaining_area += remaining
+        newest.save(update_fields=["remaining_area"])
     locked.quantity += add
     locked.save(update_fields=["quantity", "updated_at"])
     if reason:

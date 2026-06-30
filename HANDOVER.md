@@ -3,9 +3,9 @@
 Полное состояние проекта и всё, что реализовано. Этот файл — точка входа для
 продолжения работы в новом чате.
 
-> Бренд: **Storekeeper** (ранее «Cloude»). Стек: **Django 4.2 + DRF + JWT**
+> Бренд: **Storekeeper** (ранее «Cloude»). Стек: **Django 6.0 + DRF + JWT**
 > (бэкенд) + **React 18 + Vite** (фронтенд). БД: SQLite (dev), ORM совместим с
-> PostgreSQL. Python 3.9, Node 18+.
+> PostgreSQL. Python 3.12+, Node 18+.
 
 ---
 

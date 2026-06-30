@@ -175,7 +175,10 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         receipt = self.get_object()
         if receipt.status == Receipt.Status.CANCELLED:
             return Response({"detail": "Чек отменён."}, status=status.HTTP_400_BAD_REQUEST)
-        if receipt.payment_status != Receipt.PaymentStatus.PENDING:
+        if receipt.payment_status not in (
+            Receipt.PaymentStatus.PENDING,
+            Receipt.PaymentStatus.PARTIALLY_REFUNDED,
+        ):
             return Response({"detail": "По этому чеку долга нет."}, status=status.HTTP_400_BAD_REQUEST)
         target = receipt.total_price - receipt.refunded_amount
         owed = target - receipt.amount_paid
@@ -189,6 +192,11 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             try:
                 amount = Decimal(str(raw))
             except (InvalidOperation, ValueError):
+                return Response({"detail": "Некорректная сумма."}, status=status.HTTP_400_BAD_REQUEST)
+            # NaN / ±Infinity parse into a Decimal without raising, but NaN then
+            # crashes the `<= 0` comparison (HTTP 500) and Infinity silently
+            # settles the whole debt — reject any non-finite amount.
+            if not amount.is_finite():
                 return Response({"detail": "Некорректная сумма."}, status=status.HTTP_400_BAD_REQUEST)
         if amount <= 0:
             return Response({"detail": "Сумма должна быть больше 0."}, status=status.HTTP_400_BAD_REQUEST)

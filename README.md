@@ -1,6 +1,6 @@
 # Cloude — складской учёт и продажи для типографии
 
-Бэкенд: **Django 4.2 + DRF + JWT**. Фронтенд: **React 18 + Vite** (`./frontend`).
+Бэкенд: **Django 6.0 + DRF + JWT**. Фронтенд: **React 18 + Vite** (`./frontend`).
 
 ## Запуск бэкенда
 

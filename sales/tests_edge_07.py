@@ -269,8 +269,12 @@ class EdgeFinanceTests(APITestCase):
 
     # ---- expenses feed totals ---------------------------------------------
     def test_variable_expenses_and_profit(self):
-        FinanceSettings.objects.filter(pk=1).update(
-            material_purchase=Decimal("100"), rent=Decimal("50"),
+        # Singleton row is created lazily by FinanceSettings.load(); use
+        # update_or_create so the values persist even on first touch — a bare
+        # filter(pk=1).update() is a no-op when the row does not exist yet.
+        FinanceSettings.objects.update_or_create(
+            pk=1,
+            defaults={"material_purchase": Decimal("100"), "rent": Decimal("50")},
         )
         Expense.objects.create(category=Expense.Category.CUTTER, amount=Decimal("30"))
         Expense.objects.create(category=Expense.Category.OTHER, amount=Decimal("20"))
