@@ -336,7 +336,7 @@ export default function Checkout() {
       return { type: "SERVICE", service: l.id, quantity: l.qty };
     });
     const payload = { payment_method: paymentMethod, items };
-    if (paymentMethod === "CASH" && prepay !== "" && Number(prepay) >= 0)
+    if (paymentMethod !== "ONLINE" && prepay !== "" && Number(prepay) >= 0)
       payload.amount_paid = Number(prepay);
     if (clientId) payload.client_id = clientId;
     else if (client.phone)
@@ -543,15 +543,20 @@ export default function Checkout() {
           )}
 
           <label style={{ marginTop: 10 }}>{t("checkout.paymentMethod")}</label>
-          <div className="row" style={{ gap: 8 }}>
-            {["CASH", "ONLINE"].map((m) => (
-              <button key={m} className={`grow ${paymentMethod === m ? "" : "secondary"}`} onClick={() => setPaymentMethod(m)}>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            {["CASH", "MBANK", "DEMIRBANK", "ONLINE"].map((m) => (
+              <button
+                key={m}
+                className={paymentMethod === m ? "" : "secondary"}
+                style={{ flex: "1 1 45%" }}
+                onClick={() => setPaymentMethod(m)}
+              >
                 {t(`checkout.${m.toLowerCase()}`)}
               </button>
             ))}
           </div>
 
-          {paymentMethod === "CASH" && (
+          {paymentMethod !== "ONLINE" && (
             <div className="field" style={{ marginTop: 10 }}>
               <label>{t("checkout.prepay")}</label>
               <input
@@ -766,7 +771,7 @@ export default function Checkout() {
       )}
 
       {receipt && (
-        <Modal title={`${t("checkout.receipt")} № ${String(receipt.id).slice(0, 8)}`} onClose={() => setReceipt(null)}>
+        <Modal title={`${t("checkout.receipt")} №${receipt.order_number}`} onClose={() => setReceipt(null)}>
           {receipt.items.map((it) => (
             <div className="crow" key={it.id}>
               <span>{(it.type === "SERVICE" ? it.service_name : it.material_name)} × {it.quantity}</span>

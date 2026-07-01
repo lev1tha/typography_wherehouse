@@ -75,9 +75,21 @@ function ReceiptsTab() {
   }, [method, pstatus, search, sort]);
 
   const columns = [
-    { key: "id", label: t("receipts.number"), render: (r) => String(r.id).slice(0, 8) },
+    { key: "order_number", label: t("receipts.number"), render: (r) => `№${r.order_number ?? "—"}` },
     { key: "client_name", label: t("checkout.client"), render: (r) => r.client_name || "—" },
-    { key: "cashier_name", label: t("receipts.cashier") },
+    {
+      key: "cashier_name",
+      label: t("receipts.cashier"),
+      render: (r) =>
+        r.cashier_name ? (
+          <span>
+            {r.cashier_name}
+            {r.cashier_role && <span className="muted"> · {r.cashier_role}</span>}
+          </span>
+        ) : (
+          "—"
+        ),
+    },
     {
       key: "payment_method",
       label: t("receipts.method"),
@@ -182,6 +194,8 @@ function ReceiptsTab() {
         <select value={method} onChange={(e) => setMethod(e.target.value)}>
           <option value="">{t("receipts.method")}: {t("common.all")}</option>
           <option value="CASH">{t("checkout.cash")}</option>
+          <option value="MBANK">{t("checkout.mbank")}</option>
+          <option value="DEMIRBANK">{t("checkout.demirbank")}</option>
           <option value="ONLINE">{t("checkout.online")}</option>
         </select>
         <select value={pstatus} onChange={(e) => setPstatus(e.target.value)}>

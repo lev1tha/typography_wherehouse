@@ -63,7 +63,7 @@ export default function CustomerOrders() {
           {orders.map((o) => (
             <div className="data-card" key={o.id}>
               <div className="crow">
-                <strong>№ {String(o.id).slice(0, 8)}</strong>
+                <strong>№{o.order_number}</strong>
                 <span className="muted">{new Date(o.created_at).toLocaleDateString("ru-RU")}</span>
               </div>
               <div style={{ margin: "8px 0" }}>

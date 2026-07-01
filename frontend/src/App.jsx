@@ -42,10 +42,10 @@ const ADMIN_NAV = [
 const STORE_NAV = [
   {
     items: [
-      { to: "/app", label: "nav.warehouse", end: true, icon: "package" },
       { to: "/app/checkout", label: "nav.checkout", icon: "cart" },
-      { to: "/app/clients", label: "nav.clients", icon: "users" },
       { to: "/app/receipts", label: "nav.receipts", icon: "receipt" },
+      { to: "/app/clients", label: "nav.clients", icon: "users" },
+      { to: "/app", label: "nav.warehouse", end: true, icon: "package" },
     ],
   },
 ];
@@ -59,7 +59,7 @@ const CUSTOMER_NAV = [
 export default function App() {
   const { isAuthenticated, isAdmin, isCustomer } = useAuth();
 
-  const home = !isAuthenticated ? "/login" : isCustomer ? "/me" : isAdmin ? "/admin" : "/app";
+  const home = !isAuthenticated ? "/login" : isCustomer ? "/me" : isAdmin ? "/admin" : "/app/checkout";
 
   return (
     <Routes>

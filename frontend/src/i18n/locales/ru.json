@@ -29,7 +29,9 @@
     "error": "Произошла ошибка",
     "prevMonth": "Предыдущий месяц",
     "nextMonth": "Следующий месяц",
-    "next": "Далее"
+    "next": "Далее",
+    "saved": "Сохранено",
+    "reset": "Сбросить"
   },
   "nav": {
     "dashboard": "Обзор",
@@ -90,7 +92,15 @@
     "masterWage": "ЗП мастера",
     "clientMaterials": "Покупки материала по клиентам",
     "materialSpend": "Сумма материала",
-    "materialQty": "Кол-во (кв.м/шт)"
+    "materialQty": "Кол-во (кв.м/шт)",
+    "from": "С",
+    "to": "По",
+    "period": "Период",
+    "expensesBreakdown": "Расходы по статьям",
+    "otherVariable": "Прочие переменные",
+    "lowStockTitle": "Материалы на исходе",
+    "remaining": "Остаток",
+    "critical": "Критический"
   },
   "warehouse": {
     "title": "Склад",
@@ -204,7 +214,8 @@
     "passNotSet": "Не задан",
     "resetPass": "Сбросить",
     "resetPassConfirm": "Сбросить пароль клиента? Он задаст новый при следующем входе.",
-    "resetPassDone": "Пароль сброшен"
+    "resetPassDone": "Пароль сброшен",
+    "ordersList": "Заказы клиента"
   },
   "checkout": {
     "outOfStock": "Нет в наличии",
@@ -256,7 +267,9 @@
     "outOfStockBlock": "Нет на складе — продать нельзя",
     "addCutting": "Резать лист (по пог. метру)",
     "pieceCutHint": "Длина реза в погонных метрах",
-    "pmShort": "пог.м"
+    "pmShort": "пог.м",
+    "mbank": "MBank",
+    "demirbank": "DemirBank"
   },
   "receipts": {
     "title": "Чеки",
@@ -403,7 +416,15 @@
     "m9": "Сентябрь",
     "m10": "Октябрь",
     "m11": "Ноябрь",
-    "m12": "Декабрь"
+    "m12": "Декабрь",
+    "salary": "Зарплаты",
+    "utilitiesNote": "Что входит в коммуналку",
+    "fixedOtherNote": "Что входит в прочие",
+    "notePlaceholder": "например: свет, вода, вывоз мусора",
+    "investmentsTitle": "Вложения (в прибыль не входят)",
+    "investmentsHint": "Оборудование и улучшение цеха — это инвестиции, прибыль они не уменьшают.",
+    "investmentsTotal": "Всего вложений",
+    "filterMaterial": "Материал"
   },
   "expenses": {
     "title": "Покупки и инвестиции",
@@ -417,7 +438,10 @@
     "confirmDel": "Удалить запись?",
     "totalInvest": "Всего инвестиций",
     "detailLabel": "Что именно",
-    "detailPh": "Напр.: лампочки, кисти, краска"
+    "detailPh": "Напр.: лампочки, кисти, краска",
+    "note": "Комментарий",
+    "notePh": "необязательно",
+    "editTitle": "Изменить покупку"
   },
   "expenseCat": {
     "CUTTER": "Расходники (фреза)",

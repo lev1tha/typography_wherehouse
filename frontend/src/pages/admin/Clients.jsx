@@ -202,6 +202,37 @@ export default function Clients() {
             </span>
           </div>
 
+          {/* Заказы клиента — что покупал */}
+          <div className="field" style={{ marginTop: 14 }}>
+            <label>{t("clients.ordersList")}</label>
+            {detail.orders?.length ? (
+              detail.orders.map((o) => (
+                <div className="card" key={o.id} style={{ background: "var(--canvas)", padding: 10, marginBottom: 6 }}>
+                  <div className="crow">
+                    <strong>№{o.order_number}</strong>
+                    <span className="muted">{new Date(o.created_at).toLocaleDateString("ru-RU")}</span>
+                  </div>
+                  {o.items.map((it, i) => (
+                    <div className="crow" key={i} style={{ fontSize: 13 }}>
+                      <span className="k">{it.title} × {Number(it.quantity)}</span>
+                      <span>{Number(it.line_total).toLocaleString("ru-RU")} сом</span>
+                    </div>
+                  ))}
+                  <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 4, paddingTop: 4 }}>
+                    <strong>{Number(o.total_price).toLocaleString("ru-RU")} сом</strong>
+                    {Number(o.debt) > 0 && (
+                      <span style={{ color: "var(--danger)", fontSize: 13 }}>
+                        {t("receipts.debt")}: {Number(o.debt).toLocaleString("ru-RU")}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <span className="muted">{t("common.empty")}</span>
+            )}
+          </div>
+
           {/* Who referred this client. Free to set once; changing a locked
               referral needs admin override or a moderated change request. */}
           <div className="field" style={{ marginTop: 14 }}>

@@ -27,6 +27,7 @@ export default function Finance({ embedded = false }) {
   const [report, setReport] = useState(null);
   const [settings, setSettings] = useState(null);
   const [matReport, setMatReport] = useState([]);
+  const [matFilter, setMatFilter] = useState("");
 
   const loadReport = () => api.get("/finance/report/").then((r) => setReport(r.data));
   function load() {
@@ -44,6 +45,17 @@ export default function Finance({ embedded = false }) {
       .catch(() => toast(t("common.error"), "error"));
   }
 
+  function saveText(field, value) {
+    api
+      .patch("/finance/settings/", { [field]: value })
+      .then(loadReport)
+      .catch(() => toast(t("common.error"), "error"));
+  }
+
+  const filteredMat = matFilter
+    ? matReport.filter((r) => String(r.id) === matFilter)
+    : matReport;
+
   function downloadCsv() {
     const head = [
       t("common.name"), t("common.category"), t("finance.colOrders"),
@@ -51,7 +63,7 @@ export default function Finance({ embedded = false }) {
       t("finance.colMatSum"), t("finance.colCutSum"), t("finance.colStock"),
     ];
     const lines = [head.join(";")];
-    for (const r of matReport) {
+    for (const r of filteredMat) {
       lines.push([
         r.name,
         CAT[r.category] || r.category,
@@ -96,6 +108,19 @@ export default function Finance({ embedded = false }) {
       />
     </div>
   );
+  const noteRow = (label, field) => (
+    <div className="crow" key={field}>
+      <span className="k" style={{ color: "var(--ink-muted)", fontSize: 13 }}>{label}</span>
+      <input
+        type="text"
+        value={settings[field] ?? ""}
+        onChange={(e) => setSettings({ ...settings, [field]: e.target.value })}
+        onBlur={(e) => saveText(field, e.target.value)}
+        placeholder={t("finance.notePlaceholder")}
+        style={{ width: 220, height: 34 }}
+      />
+    </div>
+  );
   const totalRow = (label, value) => (
     <div
       className="crow"
@@ -131,10 +156,23 @@ export default function Finance({ embedded = false }) {
         <h3>{t("finance.fixed")}</h3>
         {editRow(t("finance.rent"), "rent")}
         {editRow(t("finance.utilities"), "utilities")}
+        {noteRow(t("finance.utilitiesNote"), "utilities_note")}
         {editRow(t("finance.internet"), "internet")}
+        {editRow(t("finance.salary"), "salary")}
         {editRow(t("finance.fixedOther"), "fixed_other")}
+        {noteRow(t("finance.fixedOtherNote"), "fixed_other_note")}
         {totalRow(t("finance.totalFixed"), report.fixed.total)}
       </div>
+
+      {report.investments && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <h3>{t("finance.investmentsTitle")}</h3>
+          <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.investmentsHint")}</p>
+          <div className="crow"><span className="k">{t("expenseCat.EQUIPMENT")}</span><span>{som(report.investments.equipment)}</span></div>
+          <div className="crow"><span className="k">{t("expenseCat.IMPROVEMENT")}</span><span>{som(report.investments.improvement)}</span></div>
+          {totalRow(t("finance.investmentsTotal"), report.investments.total)}
+        </div>
+      )}
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3>{t("finance.cuttingTitle")}</h3>
@@ -151,13 +189,22 @@ export default function Finance({ embedded = false }) {
         <summary style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent-strong)" }}>
           {t("finance.materialReportTitle")}
         </summary>
-        <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
-          <button className="secondary" onClick={downloadCsv} disabled={!matReport.length}>
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end", marginTop: 12, gap: 10, flexWrap: "wrap" }}>
+          <div className="field" style={{ margin: 0, minWidth: 220 }}>
+            <label>{t("finance.filterMaterial")}</label>
+            <select value={matFilter} onChange={(e) => setMatFilter(e.target.value)}>
+              <option value="">{t("common.all")}</option>
+              {matReport.map((r) => (
+                <option key={r.id} value={r.id}>{r.name}</option>
+              ))}
+            </select>
+          </div>
+          <button className="secondary" onClick={downloadCsv} disabled={!filteredMat.length}>
             {t("finance.downloadCsv")}
           </button>
         </div>
         <div style={{ marginTop: 12 }}>
-          <DataTable columns={matColumns} rows={matReport} />
+          <DataTable columns={matColumns} rows={filteredMat} />
         </div>
       </details>
     </>

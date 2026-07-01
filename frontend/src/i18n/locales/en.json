@@ -29,7 +29,9 @@
     "error": "An error occurred",
     "prevMonth": "Previous month",
     "nextMonth": "Next month",
-    "next": "Next"
+    "next": "Next",
+    "saved": "Saved",
+    "reset": "Reset"
   },
   "nav": {
     "dashboard": "Overview",
@@ -90,7 +92,15 @@
     "masterWage": "Master wage",
     "clientMaterials": "Material purchases by client",
     "materialSpend": "Material spend",
-    "materialQty": "Qty (sqm/pc)"
+    "materialQty": "Qty (sqm/pc)",
+    "from": "From",
+    "to": "To",
+    "period": "Period",
+    "expensesBreakdown": "Expenses by item",
+    "otherVariable": "Other variable",
+    "lowStockTitle": "Low-stock materials",
+    "remaining": "Remaining",
+    "critical": "Critical"
   },
   "warehouse": {
     "title": "Warehouse",
@@ -204,7 +214,8 @@
     "passNotSet": "Not set",
     "resetPass": "Reset",
     "resetPassConfirm": "Reset the client's password? They'll set a new one on next login.",
-    "resetPassDone": "Password reset"
+    "resetPassDone": "Password reset",
+    "ordersList": "Client's orders"
   },
   "checkout": {
     "outOfStock": "Out of stock",
@@ -256,7 +267,9 @@
     "outOfStockBlock": "Out of stock — can't sell",
     "addCutting": "Cut the sheet (by running metre)",
     "pieceCutHint": "Cut length in running metres",
-    "pmShort": "rm"
+    "pmShort": "rm",
+    "mbank": "MBank",
+    "demirbank": "DemirBank"
   },
   "receipts": {
     "title": "Receipts",
@@ -403,7 +416,15 @@
     "m9": "September",
     "m10": "October",
     "m11": "November",
-    "m12": "December"
+    "m12": "December",
+    "salary": "Salaries",
+    "utilitiesNote": "What's in utilities",
+    "fixedOtherNote": "What's in other",
+    "notePlaceholder": "e.g. electricity, water, garbage",
+    "investmentsTitle": "Investments (excluded from profit)",
+    "investmentsHint": "Equipment and workshop improvements are investments — they don't reduce profit.",
+    "investmentsTotal": "Total investments",
+    "filterMaterial": "Material"
   },
   "expenses": {
     "title": "Purchases & investments",
@@ -417,7 +438,10 @@
     "confirmDel": "Delete record?",
     "totalInvest": "Total investments",
     "detailLabel": "What exactly",
-    "detailPh": "E.g.: bulbs, brushes, paint"
+    "detailPh": "E.g.: bulbs, brushes, paint",
+    "note": "Comment",
+    "notePh": "optional",
+    "editTitle": "Edit purchase"
   },
   "expenseCat": {
     "CUTTER": "Consumables (cutter)",

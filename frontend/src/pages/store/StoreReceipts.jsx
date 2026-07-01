@@ -103,11 +103,16 @@ export default function StoreReceipts() {
   }
 
   const columns = [
-    { key: "id", label: t("receipts.number"), render: (r) => String(r.id).slice(0, 8) },
+    { key: "order_number", label: t("receipts.number"), render: (r) => `№${r.order_number ?? "—"}` },
     {
       key: "payment_status",
       label: t("receipts.status"),
       render: (r) => <PaymentBadge status={r.payment_status} />,
+    },
+    {
+      key: "payment_method",
+      label: t("receipts.method"),
+      render: (r) => t(`checkout.${r.payment_method.toLowerCase()}`),
     },
     {
       key: "fulfillment",
@@ -218,7 +223,7 @@ export default function StoreReceipts() {
 
       {open && (
         <Modal
-          title={`${t("checkout.receipt")} № ${String(open.id).slice(0, 8)}`}
+          title={`${t("checkout.receipt")} №${open.order_number}`}
           onClose={() => setOpen(null)}
           footer={
             <>
@@ -289,6 +294,10 @@ export default function StoreReceipts() {
           <div className="crow">
             <span className="k">{t("receipts.status")}</span>
             <PaymentBadge status={open.payment_status} />
+          </div>
+          <div className="crow">
+            <span className="k">{t("receipts.method")}</span>
+            <span>{t(`checkout.${open.payment_method.toLowerCase()}`)}</span>
           </div>
           {open.has_service && (
             <div className="crow">
