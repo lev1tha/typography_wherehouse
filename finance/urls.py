@@ -5,6 +5,7 @@ from .views import (
     ExpenseViewSet,
     FinanceReportView,
     FinanceSettingsView,
+    FinanceUnlockView,
     MaterialReportView,
 )
 
@@ -15,4 +16,5 @@ urlpatterns = [
     path("report/", FinanceReportView.as_view(), name="finance-report"),
     path("material-report/", MaterialReportView.as_view(), name="finance-material-report"),
     path("settings/", FinanceSettingsView.as_view(), name="finance-settings"),
+    path("unlock/", FinanceUnlockView.as_view(), name="finance-unlock"),
 ] + router.urls

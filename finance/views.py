@@ -1,9 +1,11 @@
+import secrets
 from collections import defaultdict
 from decimal import Decimal
 
+from django.conf import settings
 from django.db.models import DecimalField, Sum
 from django.db.models.functions import Coalesce
-from rest_framework import viewsets
+from rest_framework import status, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -15,6 +17,22 @@ from .models import Expense, FinanceSettings
 from .serializers import ExpenseSerializer, FinanceSettingsSerializer
 
 _SUM = lambda field: Coalesce(Sum(field), Decimal("0"), output_field=DecimalField())
+
+
+class FinanceUnlockView(APIView):
+    """POST /api/finance/unlock/ — verify the separate password that gates the
+    Finance & detailed-analytics screens (on top of the admin login). Admin-only;
+    the password itself lives in settings (FINANCE_PASSWORD, configured via .env),
+    so it never ships in the frontend bundle."""
+
+    permission_classes = [IsAdmin]
+
+    def post(self, request):
+        supplied = str(request.data.get("password") or "")
+        expected = str(getattr(settings, "FINANCE_PASSWORD", "") or "")
+        if expected and secrets.compare_digest(supplied, expected):
+            return Response({"ok": True})
+        return Response({"detail": "Неверный пароль."}, status=status.HTTP_403_FORBIDDEN)
 
 
 def _material_category(material):

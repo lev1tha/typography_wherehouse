@@ -191,7 +191,9 @@
     "searchHint": "name or phone"
   },
   "checkout": {
-    "title": "New sale",
+    "outOfStock": "Out of stock",
+    "stockLeft": "Stock:",
+    "title":"New sale",
     "items": "Items",
     "addItem": "Add item",
     "material": "Material",
@@ -410,5 +412,12 @@
     "pricesSub": "Cutting and service rates",
     "note": "Sales are made by an employee (log in as “I'm staff”). Customers check their own orders by phone.",
     "analytics": "Detailed analytics"
+  },
+  "financeGate": {
+    "title": "Section locked",
+    "prompt": "Enter the password to open Finance and Detailed analytics.",
+    "placeholder": "Finance password",
+    "submit": "Unlock",
+    "error": "Wrong password"
   }
 }

@@ -107,6 +107,9 @@ export default function Checkout() {
       cut_rate_per_pm: Number(m.cut_rate_per_pm ?? 0),
       is_roll_material: m.is_roll_material,
       unit: m.unit,
+      quantity: Number(m.quantity ?? 0),
+      is_below_critical: !!m.is_below_critical,
+      sheets_remaining: m.sheets_remaining != null ? Number(m.sheets_remaining) : null,
     }));
     return [...svc, ...mat];
   }, [materials, services, t]);
@@ -126,6 +129,21 @@ export default function Checkout() {
   });
 
   const total = useMemo(() => cart.reduce((s, l) => s + lineTotal(l), 0), [cart]);
+
+  // Stock indicator for a material card: out of stock (qty ≤ 0) vs low (qty ≤
+  // critical balance). Returns null for healthy stock and for services.
+  function stockInfo(p) {
+    if (p.kind !== "material") return null;
+    const qty = Number(p.quantity ?? 0);
+    const out = qty <= 0;
+    const low = !out && p.is_below_critical;
+    if (!out && !low) return null;
+    const unitLabel = t(`unit.${p.unit}`) || "";
+    let text = `${+qty.toFixed(2)} ${unitLabel}`.trim();
+    if (low && p.is_roll_material && p.sheets_remaining != null)
+      text += ` · ≈${Math.round(p.sheets_remaining)} ${t("warehouse.sheetsShort")}`;
+    return { out, low, text };
+  }
 
   function tapProduct(p) {
     setError("");
@@ -343,12 +361,24 @@ export default function Checkout() {
           </div>
 
           <div className="pos-grid">
-            {visibleProducts.map((p) => (
-              <button key={p.key} className="pos-product" onClick={() => tapProduct(p)}>
+            {visibleProducts.map((p) => {
+              const st = stockInfo(p);
+              return (
+              <button
+                key={p.key}
+                className={`pos-product${st ? (st.out ? " is-out" : " is-low") : ""}`}
+                onClick={() => tapProduct(p)}
+              >
                 {p.kind === "service" && <span className="p-tag">{t(`serviceKind.${p.serviceKind}`)}</span>}
+                {st && (
+                  <span className={`badge ${st.out ? "red" : "amber"}`} style={{ alignSelf: "flex-start", marginBottom: 6 }}>
+                    {st.out ? t("checkout.outOfStock") : t("warehouse.lowStock")}
+                  </span>
+                )}
                 <div>
                   <div className="p-name">{p.name}</div>
                   <div className="p-cat">{p.category}</div>
+                  {st && <div className="p-stock">{t("checkout.stockLeft")} {st.text}</div>}
                 </div>
                 <div className="p-price">
                   {p.kind === "material"
@@ -362,7 +392,8 @@ export default function Checkout() {
                     : `${p.base_price} сом`}
                 </div>
               </button>
-            ))}
+              );
+            })}
             {!visibleProducts.length && <p className="muted">{t("common.empty")}</p>}
           </div>
         </div>

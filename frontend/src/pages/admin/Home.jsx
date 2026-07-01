@@ -1,11 +1,7 @@
-import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
-import api from "../../api/api.js";
 import Icon from "../../components/Icon.jsx";
-
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
 
 function Action({ to, icon, title, subtitle }) {
   return (
@@ -39,37 +35,11 @@ function Action({ to, icon, title, subtitle }) {
 
 export default function Home() {
   const { t } = useTranslation();
-  const [fin, setFin] = useState(null);
-
-  useEffect(() => {
-    api.get("/finance/report/").then((r) => setFin(r.data)).catch(() => {});
-  }, []);
 
   return (
     <>
       <h1>{t("home.title")}</h1>
       <p className="muted" style={{ marginTop: -6 }}>{t("home.subtitle")}</p>
-
-      {fin && (
-        <div className="stat-grid" style={{ margin: "16px 0 4px" }}>
-          <div className="stat">
-            <div className="label">{t("finance.revenue")}</div>
-            <div className="value">{som(fin.revenue)}</div>
-          </div>
-          <div className="stat">
-            <div className="label">{t("finance.profit")}</div>
-            <div className="value" style={{ color: Number(fin.profit) >= 0 ? "var(--ok)" : "var(--danger)" }}>
-              {som(fin.profit)}
-            </div>
-          </div>
-          <div className="stat">
-            <div className="label">{t("finance.clientDebt")}</div>
-            <div className="value" style={{ color: Number(fin.client_debt) > 0 ? "var(--danger)" : "var(--ink)" }}>
-              {som(fin.client_debt)}
-            </div>
-          </div>
-        </div>
-      )}
 
       <h3 style={{ marginTop: 22 }}>{t("home.whatToDo")}</h3>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>

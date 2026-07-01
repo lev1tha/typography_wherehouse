@@ -822,6 +822,10 @@ label {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
   gap: 10px;
+  /* Size each card to its own content so the low-stock badge + остаток line
+     never get clipped (a stretched grid item contributes only its min-height
+     to row sizing, which would otherwise crop taller marked cards). */
+  align-items: start;
 }
 
 .pos-product {
@@ -832,10 +836,11 @@ label {
   cursor: pointer;
   text-align: left;
   min-height: 104px;
+  height: auto;
+  align-self: start;
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  overflow: hidden;
   transition: border-color 0.12s ease, box-shadow 0.12s ease, transform 0.04s ease;
 }
 
@@ -896,6 +901,28 @@ label {
   font-size: 12px;
   font-weight: 700;
   color: var(--accent-strong);
+}
+
+/* Low / out-of-stock material cards stand out at a glance. */
+.pos-product.is-out {
+  border-color: rgba(217, 53, 53, 0.45);
+  background: rgba(217, 53, 53, 0.05);
+}
+.pos-product.is-low {
+  border-color: rgba(221, 130, 0, 0.4);
+  background: rgba(221, 130, 0, 0.05);
+}
+.pos-product .p-stock {
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 4px;
+  color: var(--ink-faint);
+}
+.pos-product.is-out .p-stock {
+  color: var(--danger);
+}
+.pos-product.is-low .p-stock {
+  color: #b06a00;
 }
 
 .cart-line {

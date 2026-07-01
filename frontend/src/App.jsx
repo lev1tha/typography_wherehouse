@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
+import FinanceGate from "./components/FinanceGate.jsx";
 import Layout from "./components/Layout.jsx";
 import ProtectedRoute from "./components/ProtectedRoute.jsx";
 import { useAuth } from "./auth/AuthContext.jsx";
@@ -73,14 +74,28 @@ export default function App() {
         }
       >
         <Route path="/admin" element={<Home />} />
-        <Route path="/admin/dashboard" element={<Dashboard />} />
+        <Route
+          path="/admin/dashboard"
+          element={
+            <FinanceGate>
+              <Dashboard />
+            </FinanceGate>
+          }
+        />
         <Route path="/admin/catalog" element={<Stock />} />
         <Route path="/admin/supply" element={<Navigate to="/admin/catalog?tab=movement" replace />} />
         <Route path="/admin/pricing" element={<Pricing />} />
         <Route path="/admin/clients" element={<Clients />} />
         <Route path="/admin/referral-requests" element={<ReferralRequests />} />
         <Route path="/admin/receipts" element={<Receipts />} />
-        <Route path="/admin/finance" element={<FinanceSection />} />
+        <Route
+          path="/admin/finance"
+          element={
+            <FinanceGate>
+              <FinanceSection />
+            </FinanceGate>
+          }
+        />
         <Route path="/admin/expenses" element={<Navigate to="/admin/finance?tab=purchases" replace />} />
       </Route>
 

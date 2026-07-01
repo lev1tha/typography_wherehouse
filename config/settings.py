@@ -23,6 +23,8 @@ env = environ.Env(
     PAYMENT_API_SECRET=(str, ""),
     PAYMENT_WEBHOOK_SECRET=(str, ""),
     SITE_BASE_URL=(str, "http://localhost:8000"),
+    # Separate password gating the admin Finance & analytics screens.
+    FINANCE_PASSWORD=(str, "finance123"),
 )
 
 # Load .env if present (keeps real secrets out of source control).
@@ -177,3 +179,7 @@ PAYMENT_API_KEY = env("PAYMENT_API_KEY")
 PAYMENT_API_SECRET = env("PAYMENT_API_SECRET")
 PAYMENT_WEBHOOK_SECRET = env("PAYMENT_WEBHOOK_SECRET")
 SITE_BASE_URL = env("SITE_BASE_URL")
+
+# Extra password protecting the Finance & detailed-analytics screens (on top of
+# the admin login). Change it in .env via FINANCE_PASSWORD=...
+FINANCE_PASSWORD = env("FINANCE_PASSWORD")
