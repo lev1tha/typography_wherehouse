@@ -131,14 +131,45 @@ class ClientDetailSerializer(ClientSerializer):
 
     stats = serializers.SerializerMethodField()
     referrals = serializers.SerializerMethodField()
+    orders = serializers.SerializerMethodField()
     pending_referral_request = serializers.SerializerMethodField()
 
     class Meta(ClientSerializer.Meta):
         fields = ClientSerializer.Meta.fields + [
             "stats",
             "referrals",
+            "orders",
             "pending_referral_request",
         ]
+
+    def get_orders(self, obj):
+        """Заказы клиента (что он покупал) — для карточки CRM: номер, дата, сумма,
+        статусы, долг и позиции. Receipt.Meta уже сортирует по -created_at."""
+        rows = []
+        for r in obj.receipts.all():
+            items = [
+                {
+                    "title": (
+                        i.material.name if i.material_id
+                        else (i.service.name if i.service_id else "—")
+                    ),
+                    "quantity": i.quantity,
+                    "line_total": i.line_total,
+                }
+                for i in r.items.all()
+                if not i.is_returned
+            ]
+            rows.append({
+                "id": r.id,
+                "order_number": r.order_number,
+                "created_at": r.created_at,
+                "total_price": r.total_price,
+                "payment_status": r.payment_status,
+                "fulfillment_status": r.fulfillment_status,
+                "debt": r.debt,
+                "items": items,
+            })
+        return rows
 
     def get_pending_referral_request(self, obj):
         req = obj.referral_requests.filter(

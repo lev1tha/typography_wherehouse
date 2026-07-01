@@ -187,9 +187,10 @@ def create_sale(*, client, cashier, payment_method, items_data, amount_paid=None
 
     total = receipt.recalculate_total()
 
-    if payment_method == Receipt.PaymentMethod.CASH:
-        # No prepayment → full cash settle (legacy behaviour). Otherwise the cashier
-        # collected a prepayment and the remainder stays as debt (receipt stays PENDING).
+    if payment_method != Receipt.PaymentMethod.ONLINE:
+        # Наличные / MBank / DemirBank — оплата принимается на месте (перевод/нал):
+        # деньги получены, склад списывается сразу, предоплата опциональна, а
+        # остаток (если платят частично) остаётся долгом (чек — PENDING).
         paid = total if amount_paid is None else min(max(Decimal(str(amount_paid)), Decimal("0")), total)
         _deduct_all(receipt)
         receipt.stock_deducted = True

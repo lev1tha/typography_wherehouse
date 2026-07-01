@@ -41,7 +41,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     serializer_class = ReceiptSerializer
     permission_classes = [IsAuthenticated]
     filterset_fields = ["payment_method", "payment_status", "status", "cashier", "client"]
-    search_fields = ["id", "client__phone", "client__full_name", "client__company_name"]
+    search_fields = ["order_number", "client__phone", "client__full_name", "client__company_name"]
     # По умолчанию: у кого долг выше — тот вверху, затем по дате (новые выше).
     # Долг — вычисляемое поле, поэтому аннотируем `_debt` в get_queryset.
     ordering = ["-_debt", "-created_at"]
@@ -160,7 +160,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         if client:
             send_customer_receipt(client, receipt, _receipt_lines_text(receipt))
 
-        AuditLog.record(request.user, f"Оформлен чек {receipt.id} на {receipt.total_price} сом")
+        AuditLog.record(request.user, f"Оформлен чек {receipt.order_number} на {receipt.total_price} сом")
         return Response(
             ReceiptSerializer(receipt, context={"request": request}).data,
             status=status.HTTP_201_CREATED,
@@ -180,10 +180,10 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         if receipt.client:
             notify_customer(
                 receipt.client,
-                f"↩️ Оформлен возврат по чеку №{receipt.id}. "
+                f"↩️ Оформлен возврат по чеку №{receipt.order_number}. "
                 f"Сумма возврата: {receipt.refunded_amount} сом.",
             )
-        AuditLog.record(request.user, f"Возврат по чеку {receipt.id}")
+        AuditLog.record(request.user, f"Возврат по чеку {receipt.order_number}")
         return self._fresh_response(receipt)
 
     @action(detail=True, methods=["post"])
@@ -233,9 +233,9 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             )
             notify_customer(
                 receipt.client,
-                f"💰 Принята оплата {amount} сом по чеку №{receipt.id}. {tail}",
+                f"💰 Принята оплата {amount} сом по чеку №{receipt.order_number}. {tail}",
             )
-        AuditLog.record(request.user, f"Оплата долга по чеку {receipt.id}: +{amount} сом")
+        AuditLog.record(request.user, f"Оплата долга по чеку {receipt.order_number}: +{amount} сом")
         return self._fresh_response(receipt)
 
     @action(detail=True, methods=["post"])
@@ -270,7 +270,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         receipt.payment_status = Receipt.PaymentStatus.PENDING
         receipt.save(update_fields=["amount_paid", "payment_status", "updated_at"])
 
-        AuditLog.record(request.user, f"Откат оплаты по чеку {receipt.id}: −{returned} сом")
+        AuditLog.record(request.user, f"Откат оплаты по чеку {receipt.order_number}: −{returned} сом")
         return self._fresh_response(receipt)
 
     @action(detail=True, methods=["post"], url_path="add-items")
@@ -288,10 +288,10 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         if receipt.client and surcharge:
             notify_customer(
                 receipt.client,
-                f"➕ В ваш заказ №{receipt.id} добавлены позиции на {surcharge} сом. "
+                f"➕ В ваш заказ №{receipt.order_number} добавлены позиции на {surcharge} сом. "
                 f"Новый итог: {receipt.total_price} сом.",
             )
-        AuditLog.record(request.user, f"Дозаказ по чеку {receipt.id}: +{surcharge} сом")
+        AuditLog.record(request.user, f"Дозаказ по чеку {receipt.order_number}: +{surcharge} сом")
         return self._fresh_response(receipt)
 
     @action(detail=True, methods=["post"], url_path="mark-ready")
@@ -305,7 +305,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 receipt.client,
                 "✅ Ваш заказ по резке букв успешно выполнен и ждёт вас на складе!",
             )
-        AuditLog.record(request.user, f"Заказ по чеку {receipt.id} готов к выдаче")
+        AuditLog.record(request.user, f"Заказ по чеку {receipt.order_number} готов к выдаче")
         return self._fresh_response(receipt)
 
     @action(detail=True, methods=["post"], url_path="mark-issued")
@@ -318,5 +318,5 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             notify_customer(
                 receipt.client, "📦 Ваш заказ выдан. Спасибо, что выбрали нас!"
             )
-        AuditLog.record(request.user, f"Заказ по чеку {receipt.id} выдан клиенту")
+        AuditLog.record(request.user, f"Заказ по чеку {receipt.order_number} выдан клиенту")
         return self._fresh_response(receipt)

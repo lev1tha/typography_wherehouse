@@ -31,13 +31,21 @@ class ClientViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         # Сортировка по ИМЕНИ (компания или ФИО), с откатом на телефон — не по дате.
+        # На карточке (retrieve) грузим и позиции чеков — для списка заказов клиента.
+        prefetch = ["receipts"]
+        if self.action == "retrieve":
+            prefetch = [
+                "receipts__items__material",
+                "receipts__items__service",
+                "referrals",
+            ]
         qs = (
             Client.objects.annotate(
                 sort_name=Lower(
                     Coalesce(NullIf("company_name", Value("")), NullIf("full_name", Value("")), "phone")
                 )
             )
-            .prefetch_related("receipts")
+            .prefetch_related(*prefetch)
             .order_by("sort_name")
         )
         search = (self.request.query_params.get("search") or "").strip().lower()

@@ -82,6 +82,7 @@ class CustomerOrderSerializer(serializers.ModelSerializer):
         model = Receipt
         fields = [
             "id",
+            "order_number",
             "created_at",
             "payment_status",
             "fulfillment_status",

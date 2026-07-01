@@ -10,6 +10,8 @@ class Receipt(models.Model):
 
     class PaymentMethod(models.TextChoices):
         CASH = "CASH", _("Наличные")
+        MBANK = "MBANK", _("MBank")
+        DEMIRBANK = "DEMIRBANK", _("DemirBank")
         ONLINE = "ONLINE", _("Онлайн-оплата")
 
     class PaymentStatus(models.TextChoices):
@@ -28,6 +30,11 @@ class Receipt(models.Model):
         ISSUED = "ISSUED", _("Выдан")
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # Человеческий сквозной номер заказа (№1, №2, …) — UUID остаётся внутренним
+    # ключом (на него ссылаются позиции), а в чеках/портале показываем этот номер.
+    order_number = models.PositiveIntegerField(
+        _("номер заказа"), unique=True, null=True, blank=True, editable=False
+    )
     client = models.ForeignKey(
         "clients.Client",
         on_delete=models.PROTECT,
@@ -84,6 +91,15 @@ class Receipt(models.Model):
         verbose_name_plural = _("чеки")
         ordering = ["-created_at"]
 
+    def save(self, *args, **kwargs):
+        # Проставляем человеческий сквозной номер при первом сохранении.
+        # Домен маленький (1–2 кассира) — Max+1 достаточно; при равной гонке
+        # unique-ограничение не даст двум чекам получить один номер.
+        if self.order_number is None:
+            last = Receipt.objects.aggregate(m=models.Max("order_number"))["m"] or 0
+            self.order_number = last + 1
+        super().save(*args, **kwargs)
+
     def recalculate_total(self) -> Decimal:
         # Use .filter() (not .all()) to bypass any stale prefetch cache — the
         # view loads receipts with prefetch_related, and дозаказ adds new items.
@@ -109,7 +125,8 @@ class Receipt(models.Model):
         return owed if owed > Decimal("0") else Decimal("0")
 
     def __str__(self) -> str:
-        return f"Чек {self.id} — {self.total_price}"
+        label = f"№{self.order_number}" if self.order_number else str(self.id)
+        return f"Чек {label} — {self.total_price}"
 
 
 class TransactionItem(models.Model):

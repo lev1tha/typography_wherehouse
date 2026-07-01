@@ -31,8 +31,11 @@ class FinanceSettingsSerializer(serializers.ModelSerializer):
             "material_debt",
             "rent",
             "utilities",
+            "utilities_note",
             "internet",
+            "salary",
             "fixed_other",
+            "fixed_other_note",
             "updated_at",
         ]
         read_only_fields = ["updated_at"]

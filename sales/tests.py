@@ -272,11 +272,10 @@ class CuttingPricingAPITests(APITestCase):
         self.assertEqual(receipt.payment_status, "PAID")
         self.assertEqual(receipt.amount_paid, Decimal("3700"))
 
-    def test_dashboard_splits_work_and_material_and_master_wage(self):
-        PricingSettings.objects.update_or_create(
-            pk=1, defaults={"master_commission_percent": Decimal("5")}
-        )
+    def test_dashboard_splits_work_and_material(self):
         # 1×1 cut: work = 1×20 = 20, material = 1×1400 = 1400.
+        # Авто-«ЗП мастера» (4% от работы) убрана из Обзора — зарплата теперь
+        # ручное поле в финансах (решение заказчика).
         self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "1", "length": "1",
@@ -286,7 +285,7 @@ class CuttingPricingAPITests(APITestCase):
         b = data["breakdown"]
         self.assertEqual(Decimal(b["work_revenue"]), Decimal("20"))
         self.assertEqual(Decimal(b["material_revenue"]), Decimal("1400"))
-        self.assertEqual(Decimal(b["master_wage"]), Decimal("1.00"))  # 5% of 20
+        self.assertNotIn("master_wage", b)
 
     def test_client_purchases_endpoint_admin_only(self):
         client = Client.objects.create(

@@ -8,7 +8,6 @@ from rest_framework.views import APIView
 
 from accounts.permissions import IsAdmin
 from sales.models import Receipt, TransactionItem
-from services.models import PricingSettings
 from warehouse.models import InventoryLog, Material
 
 from .models import AuditLog
@@ -38,7 +37,19 @@ class DashboardView(APIView):
     permission_classes = [IsAdmin]
 
     def get(self, request):
-        paid = Receipt.objects.filter(payment_status=Receipt.PaymentStatus.PAID)
+        # Опциональный период фильтрует денежные показатели по дате чека;
+        # складские (актив, материалы на исходе) — всегда «на сейчас».
+        date_from = request.query_params.get("date_from") or None
+        date_to = request.query_params.get("date_to") or None
+
+        def by_period(qs, field="created_at"):
+            if date_from:
+                qs = qs.filter(**{f"{field}__date__gte": date_from})
+            if date_to:
+                qs = qs.filter(**{f"{field}__date__lte": date_to})
+            return qs
+
+        paid = by_period(Receipt.objects.filter(payment_status=Receipt.PaymentStatus.PAID))
 
         # Unrealised asset: sum(quantity * purchase_price) over all materials.
         stock_value = sum(
@@ -46,16 +57,22 @@ class DashboardView(APIView):
             Decimal("0"),
         )
 
-        revenue_cash = paid.filter(payment_method=Receipt.PaymentMethod.CASH).aggregate(
-            v=_ZERO
-        )["v"]
-        revenue_online = paid.filter(
-            payment_method=Receipt.PaymentMethod.ONLINE
-        ).aggregate(v=_ZERO)["v"]
+        # Выручка по способам оплаты (нал / MBank / DemirBank / онлайн).
+        def rev(method):
+            return paid.filter(payment_method=method).aggregate(v=_ZERO)["v"]
+
+        revenue_cash = rev(Receipt.PaymentMethod.CASH)
+        revenue_mbank = rev(Receipt.PaymentMethod.MBANK)
+        revenue_demirbank = rev(Receipt.PaymentMethod.DEMIRBANK)
+        revenue_online = rev(Receipt.PaymentMethod.ONLINE)
+        revenue_total = revenue_cash + revenue_mbank + revenue_demirbank + revenue_online
 
         # Revenue split — work (services) vs material — over paid, non-returned lines.
-        paid_lines = TransactionItem.objects.filter(
-            receipt__payment_status=Receipt.PaymentStatus.PAID, is_returned=False
+        paid_lines = by_period(
+            TransactionItem.objects.filter(
+                receipt__payment_status=Receipt.PaymentStatus.PAID, is_returned=False
+            ),
+            field="receipt__created_at",
         )
         work_revenue = paid_lines.filter(type=TransactionItem.Type.SERVICE).aggregate(
             v=_LINE_SUM
@@ -63,11 +80,12 @@ class DashboardView(APIView):
         material_revenue = paid_lines.filter(
             type=TransactionItem.Type.MATERIAL
         ).aggregate(v=_LINE_SUM)["v"]
-        commission = PricingSettings.load().master_commission_percent
-        master_wage = (work_revenue * commission / Decimal("100")).quantize(Decimal("0.01"))
 
-        service_items = TransactionItem.objects.filter(
-            type=TransactionItem.Type.SERVICE, is_returned=False
+        service_items = by_period(
+            TransactionItem.objects.filter(
+                type=TransactionItem.Type.SERVICE, is_returned=False
+            ),
+            field="receipt__created_at",
         )
         services_count = service_items.count()
 
@@ -79,7 +97,7 @@ class DashboardView(APIView):
             for recipe in item.service.recipes.all():
                 materials_consumed += recipe.consumption_per_unit * item.quantity
 
-        refunded_total = Receipt.objects.aggregate(
+        refunded_total = by_period(Receipt.objects.all()).aggregate(
             v=Coalesce(Sum("refunded_amount"), Decimal("0"), output_field=DecimalField())
         )["v"]
 
@@ -95,19 +113,33 @@ class DashboardView(APIView):
             )["v"]
         )
 
+        # Виды материалов на исходе (остаток ≤ критического) — список, не только счёт.
+        low_stock_items = [
+            {
+                "id": m.id,
+                "name": m.name,
+                "quantity": m.quantity,
+                "unit": m.unit,
+                "critical_balance": m.critical_balance,
+                "sheets_remaining": m.sheets_remaining,
+            }
+            for m in Material.objects.all()
+            if m.is_below_critical
+        ]
+
         return Response(
             {
                 "unrealised_asset": stock_value,
                 "revenue": {
                     "cash": revenue_cash,
+                    "mbank": revenue_mbank,
+                    "demirbank": revenue_demirbank,
                     "online": revenue_online,
-                    "total": revenue_cash + revenue_online,
+                    "total": revenue_total,
                 },
                 "breakdown": {
                     "work_revenue": work_revenue,
                     "material_revenue": material_revenue,
-                    "master_wage": master_wage,
-                    "commission_percent": commission,
                 },
                 "services_performed": services_count,
                 "materials_consumed_by_services": materials_consumed,
@@ -115,9 +147,8 @@ class DashboardView(APIView):
                     "total_refunded": refunded_total,
                     "material_lost_quantity": abs(lost_qty),
                 },
-                "low_stock_count": sum(
-                    1 for m in Material.objects.all() if m.is_below_critical
-                ),
+                "low_stock_count": len(low_stock_items),
+                "low_stock_items": low_stock_items,
             }
         )
 

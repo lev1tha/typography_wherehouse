@@ -50,6 +50,8 @@ class ReceiptSerializer(serializers.ModelSerializer):
     items = TransactionItemSerializer(many=True, read_only=True)
     client_name = serializers.CharField(source="client.display_name", read_only=True)
     cashier_name = serializers.CharField(source="cashier.username", read_only=True)
+    cashier_role = serializers.CharField(source="cashier.get_role_display", read_only=True)
+    payment_method_display = serializers.CharField(source="get_payment_method_display", read_only=True)
     has_service = serializers.BooleanField(read_only=True)
     debt = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     payment_qr = serializers.SerializerMethodField()
@@ -58,11 +60,14 @@ class ReceiptSerializer(serializers.ModelSerializer):
         model = Receipt
         fields = [
             "id",
+            "order_number",
             "client",
             "client_name",
             "cashier",
             "cashier_name",
+            "cashier_role",
             "payment_method",
+            "payment_method_display",
             "payment_status",
             "status",
             "fulfillment_status",

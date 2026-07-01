@@ -48,8 +48,11 @@ class FinanceSettings(models.Model):
     # Постоянные расходы
     rent = models.DecimalField(_("аренда цеха"), max_digits=14, decimal_places=2, default=Decimal("0"))
     utilities = models.DecimalField(_("коммунальные услуги"), max_digits=14, decimal_places=2, default=Decimal("0"))
+    utilities_note = models.CharField(_("что входит в коммуналку"), max_length=500, blank=True, default="")
     internet = models.DecimalField(_("интернет"), max_digits=14, decimal_places=2, default=Decimal("0"))
+    salary = models.DecimalField(_("зарплаты за месяц"), max_digits=14, decimal_places=2, default=Decimal("0"))
     fixed_other = models.DecimalField(_("прочие постоянные расходы"), max_digits=14, decimal_places=2, default=Decimal("0"))
+    fixed_other_note = models.CharField(_("что входит в прочие"), max_length=500, blank=True, default="")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

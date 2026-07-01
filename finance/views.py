@@ -95,7 +95,8 @@ class FinanceReportView(APIView):
 
         # Раздел «Материалы» убран (транспорт и так входит в цену закупки —
         # см. поступление на Складе). Расходы = постоянные + переменные (покупки).
-        total_fixed = s.rent + s.utilities + s.internet + s.fixed_other
+        # Зарплаты — ручное поле (постоянные), FinanceSettings.salary.
+        total_fixed = s.rent + s.utilities + s.internet + s.salary + s.fixed_other
 
         def cat(category):
             return Expense.objects.filter(category=category).aggregate(v=_SUM("amount"))["v"]
@@ -106,8 +107,16 @@ class FinanceReportView(APIView):
             "improvement": cat(Expense.Category.IMPROVEMENT),
             "other": cat(Expense.Category.OTHER),
         }
-        total_variable = sum(var.values(), Decimal("0"))
-        total_expenses = total_fixed + total_variable
+        # Вложения (оборудование + улучшение цеха) — это ИНВЕСТИЦИИ, а не текущие
+        # расходы: в расчёт прибыли не входят, показываются отдельным блоком
+        # (решение заказчика). Операционные переменные = расходники (фреза) + прочие.
+        investments = {
+            "equipment": var["equipment"],
+            "improvement": var["improvement"],
+            "total": var["equipment"] + var["improvement"],
+        }
+        operating_variable = var["cutter"] + var["other"]
+        total_expenses = total_fixed + operating_variable
 
         # Выручка = оплаченные чеки (полная сумма) + предоплаты по открытым заказам.
         live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED)
@@ -167,11 +176,19 @@ class FinanceReportView(APIView):
                 "fixed": {
                     "rent": s.rent,
                     "utilities": s.utilities,
+                    "utilities_note": s.utilities_note,
                     "internet": s.internet,
+                    "salary": s.salary,
                     "other": s.fixed_other,
+                    "other_note": s.fixed_other_note,
                     "total": total_fixed,
                 },
-                "variable": {**var, "total": total_variable},
+                "variable": {
+                    "cutter": var["cutter"],
+                    "other": var["other"],
+                    "total": operating_variable,
+                },
+                "investments": investments,
                 "total_expenses": total_expenses,
                 "revenue": revenue,
                 "client_debt": client_debt,
@@ -209,7 +226,7 @@ class DailyReportView(APIView):
         next_month_first = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
 
         s = FinanceSettings.load()
-        fixed_total = s.rent + s.utilities + s.internet + s.fixed_other
+        fixed_total = s.rent + s.utilities + s.internet + s.salary + s.fixed_other
         fixed_share = fixed_total / days_in_month
 
         live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED).filter(
@@ -236,6 +253,9 @@ class DailyReportView(APIView):
         variable_by_day = defaultdict(lambda: Decimal("0"))
         expense_rows = (
             Expense.objects.filter(spent_at__gte=first_day, spent_at__lt=next_month_first)
+            # Вложения (оборудование/улучшение цеха) в дневную прибыль не входят —
+            # это инвестиции, не операционные расходы (как в общем отчёте).
+            .exclude(category__in=[Expense.Category.EQUIPMENT, Expense.Category.IMPROVEMENT])
             .values("spent_at")
             .annotate(v=_SUM("amount"))
         )
