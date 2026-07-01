@@ -57,6 +57,16 @@ class ClientViewSet(viewsets.ModelViewSet):
             return ClientDetailSerializer
         return ClientSerializer
 
+    @action(detail=True, methods=["post"], url_path="reset-password", permission_classes=[IsAuthenticated])
+    def reset_password(self, request, pk=None):
+        """Сбросить пароль клиентского портала (клиент забыл). Пароль очищается —
+        при следующем входе по телефону клиент задаст новый."""
+        client = self.get_object()
+        client.portal_password = ""
+        client.save(update_fields=["portal_password"])
+        AuditLog.record(request.user, f"Сброс пароля клиента {client.display_name}")
+        return Response({"ok": True, "has_password": False})
+
     @action(
         detail=True,
         methods=["post"],

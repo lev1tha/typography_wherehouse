@@ -56,7 +56,7 @@ export default function Expenses({ embedded = false }) {
   const columns = [
     { key: "spent_at", label: t("expenses.date") },
     { key: "category", label: t("expenses.category"), render: (r) => t(`expenseCat.${r.category}`) },
-    { key: "name", label: t("common.name"), render: (r) => r.name || "—" },
+    { key: "name", label: t("expenses.detailLabel"), render: (r) => r.name || "—" },
     { key: "amount", label: t("expenses.amount"), render: (r) => som(r.amount) },
     {
       key: "actions",
@@ -86,11 +86,11 @@ export default function Expenses({ embedded = false }) {
             </select>
           </div>
           <div className="field grow">
-            <label>{t("common.name")}</label>
+            <label>{t("expenses.detailLabel")}</label>
             <input
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder={t("expenses.namePh")}
+              placeholder={t("expenses.detailPh")}
             />
           </div>
           <div className="field" style={{ width: 160 }}>

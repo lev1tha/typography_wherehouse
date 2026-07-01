@@ -1,5 +1,5 @@
 import uuid
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
 from django.db import models
 from django.utils.translation import gettext_lazy as _
@@ -168,7 +168,9 @@ class TransactionItem(models.Model):
     def line_total(self) -> Decimal:
         if self.is_returned:
             return Decimal("0")
-        return self.quantity * self.price_per_item
+        # Цену строки округляем ВВЕРХ до целого сома (решение заказчика) — без
+        # копеек. Итог чека = сумма таких целых строк, поэтому тоже целый.
+        return (self.quantity * self.price_per_item).quantize(Decimal("1"), rounding=ROUND_CEILING)
 
     def __str__(self) -> str:
         target = self.material or self.service

@@ -6,6 +6,7 @@ import DataTable from "../../components/DataTable.jsx";
 import GalleryModal from "../../components/GalleryModal.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
+import ReceiveStockModal from "../../components/ReceiveStockModal.jsx";
 
 const EMPTY = {
   name: "",
@@ -49,6 +50,7 @@ export default function Catalog({ embedded = false }) {
   const [category, setCategory] = useState("");
   const [gallery, setGallery] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [receiving, setReceiving] = useState(null);
 
   function load() {
     const params = { ordering };
@@ -130,6 +132,14 @@ export default function Catalog({ embedded = false }) {
       label: t("common.actions"),
       render: (m) => (
         <div className="row" style={{ gap: 6 }}>
+          <button
+            className="secondary"
+            style={{ padding: "5px 10px", height: "auto", display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}
+            onClick={() => setReceiving(m)}
+            title={t("supply.intake")}
+          >
+            <Icon name="inbox" size={16} /> {t("supply.intake")}
+          </button>
           <button className="ghost" onClick={() => setGallery(m)} aria-label={t("warehouse.gallery")}>
             <Icon name="image" size={18} />
           </button>
@@ -183,6 +193,14 @@ export default function Catalog({ embedded = false }) {
           manage
           onClose={() => setGallery(null)}
           onChanged={load}
+        />
+      )}
+
+      {receiving && (
+        <ReceiveStockModal
+          material={receiving}
+          onClose={() => setReceiving(null)}
+          onDone={load}
         />
       )}
 

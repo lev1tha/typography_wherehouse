@@ -7,7 +7,6 @@ import { useAuth } from "./auth/AuthContext.jsx";
 
 import Login from "./pages/Login.jsx";
 import Dashboard from "./pages/admin/Dashboard.jsx";
-import Home from "./pages/admin/Home.jsx";
 import Stock from "./pages/admin/Stock.jsx";
 import Pricing from "./pages/admin/Pricing.jsx";
 import Clients from "./pages/admin/Clients.jsx";
@@ -23,7 +22,7 @@ const ADMIN_NAV = [
   {
     section: "nav.sectionDaily",
     items: [
-      { to: "/admin", label: "nav.home", end: true, icon: "dashboard" },
+      { to: "/admin", label: "nav.checkout", end: true, icon: "cart" },
       { to: "/admin/receipts", label: "nav.receipts", icon: "receipt" },
       { to: "/admin/clients", label: "nav.clients", icon: "users" },
       { to: "/admin/catalog", label: "nav.warehouse", icon: "package" },
@@ -33,6 +32,7 @@ const ADMIN_NAV = [
   {
     section: "nav.sectionRare",
     items: [
+      { to: "/admin/dashboard", label: "nav.dashboard", icon: "dashboard" },
       { to: "/admin/pricing", label: "nav.pricing", icon: "tag" },
       { to: "/admin/referral-requests", label: "nav.referralRequests", icon: "shuffle" },
     ],
@@ -73,7 +73,7 @@ export default function App() {
           </ProtectedRoute>
         }
       >
-        <Route path="/admin" element={<Home />} />
+        <Route path="/admin" element={<Checkout />} />
         <Route
           path="/admin/dashboard"
           element={
@@ -96,7 +96,7 @@ export default function App() {
             </FinanceGate>
           }
         />
-        <Route path="/admin/expenses" element={<Navigate to="/admin/finance?tab=purchases" replace />} />
+        <Route path="/admin/expenses" element={<Navigate to="/admin/finance" replace />} />
       </Route>
 
       {/* Storekeeper area */}

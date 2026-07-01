@@ -10,7 +10,7 @@ import { useUI } from "../../components/UIProvider.jsx";
 
 export default function Clients() {
   const { t } = useTranslation();
-  const { toast } = useUI();
+  const { toast, confirm } = useUI();
   const { isAdmin } = useAuth();
   const [clients, setClients] = useState([]);
   const [search, setSearch] = useState("");
@@ -32,6 +32,18 @@ export default function Clients() {
     const { data } = await api.get(`/clients/clients/${c.id}/`);
     setDetail(data);
     setReqForm({ referred_by: "", reason: "" });
+  }
+
+  async function resetPassword() {
+    if (!(await confirm(t("clients.resetPassConfirm")))) return;
+    try {
+      await api.post(`/clients/clients/${detail.id}/reset-password/`, {});
+      const { data } = await api.get(`/clients/clients/${detail.id}/`);
+      setDetail(data);
+      toast(t("clients.resetPassDone"));
+    } catch {
+      toast(t("common.error"), "error");
+    }
   }
 
   function errMsg(e) {
@@ -167,6 +179,25 @@ export default function Clients() {
                 <strong style={{ color: "var(--danger)" }}>{Number(detail.debt).toLocaleString("ru-RU")} сом</strong>
               ) : (
                 <span className="paid">0</span>
+              )}
+            </span>
+          </div>
+          <div className="crow">
+            <span className="k">{t("clients.portalPass")}</span>
+            <span className="row" style={{ gap: 8, alignItems: "center", margin: 0 }}>
+              {detail.has_password ? (
+                <>
+                  <span className="badge ok">{t("clients.passSet")}</span>
+                  <button
+                    className="ghost"
+                    style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-strong)" }}
+                    onClick={resetPassword}
+                  >
+                    {t("clients.resetPass")}
+                  </button>
+                </>
+              ) : (
+                <span className="muted">{t("clients.passNotSet")}</span>
               )}
             </span>
           </div>

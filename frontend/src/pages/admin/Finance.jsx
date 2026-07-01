@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
+import DailyProfitChart from "../../components/DailyProfitChart.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
@@ -95,12 +96,6 @@ export default function Finance({ embedded = false }) {
       />
     </div>
   );
-  const autoRow = (label, value) => (
-    <div className="crow">
-      <span className="k">{label}</span>
-      <span>{som(value)}</span>
-    </div>
-  );
   const totalRow = (label, value) => (
     <div
       className="crow"
@@ -130,35 +125,15 @@ export default function Finance({ embedded = false }) {
         <Stat label={t("finance.clientDebt")} value={som(report.client_debt)} color="accent-strong" />
       </div>
 
-      <div className="chart-row">
-        <div className="card">
-          <h3>{t("finance.materials")}</h3>
-          {editRow(t("finance.stockStart"), "stock_start")}
-          {editRow(t("finance.purchase"), "material_purchase")}
-          {autoRow(t("finance.stockEnd") + " *", report.materials.stock_end)}
-          {editRow(t("finance.transport"), "transport")}
-          {editRow(t("finance.materialDebt"), "material_debt")}
-          {totalRow(t("finance.totalMaterials"), report.materials.total)}
-        </div>
-        <div className="card">
-          <h3>{t("finance.fixed")}</h3>
-          {editRow(t("finance.rent"), "rent")}
-          {editRow(t("finance.utilities"), "utilities")}
-          {editRow(t("finance.internet"), "internet")}
-          {editRow(t("finance.fixedOther"), "fixed_other")}
-          {totalRow(t("finance.totalFixed"), report.fixed.total)}
-        </div>
-        <div className="card">
-          <h3>{t("finance.variable")}</h3>
-          {autoRow(t("finance.cutter"), report.variable.cutter)}
-          {autoRow(t("finance.equipment"), report.variable.equipment)}
-          {autoRow(t("finance.improvement"), report.variable.improvement)}
-          {autoRow(t("finance.varOther"), report.variable.other)}
-          {totalRow(t("finance.totalVariable"), report.variable.total)}
-          <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-            {t("finance.variableHint")}
-          </p>
-        </div>
+      <DailyProfitChart />
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <h3>{t("finance.fixed")}</h3>
+        {editRow(t("finance.rent"), "rent")}
+        {editRow(t("finance.utilities"), "utilities")}
+        {editRow(t("finance.internet"), "internet")}
+        {editRow(t("finance.fixedOther"), "fixed_other")}
+        {totalRow(t("finance.totalFixed"), report.fixed.total)}
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
@@ -172,9 +147,11 @@ export default function Finance({ embedded = false }) {
         </div>
       </div>
 
-      <div className="card" style={{ marginTop: 16 }}>
-        <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
-          <h3 style={{ margin: 0 }}>{t("finance.materialReportTitle")}</h3>
+      <details className="card" style={{ marginTop: 16 }}>
+        <summary style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent-strong)" }}>
+          {t("finance.materialReportTitle")}
+        </summary>
+        <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
           <button className="secondary" onClick={downloadCsv} disabled={!matReport.length}>
             {t("finance.downloadCsv")}
           </button>
@@ -182,11 +159,7 @@ export default function Finance({ embedded = false }) {
         <div style={{ marginTop: 12 }}>
           <DataTable columns={matColumns} rows={matReport} />
         </div>
-      </div>
-
-      <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-        * {t("finance.stockEndHint")}
-      </p>
+      </details>
     </>
   );
 }

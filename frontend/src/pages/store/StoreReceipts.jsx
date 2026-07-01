@@ -21,6 +21,16 @@ export default function StoreReceipts() {
   const [busy, setBusy] = useState(false);
   const [advancingId, setAdvancingId] = useState(null);
   const [paying, setPaying] = useState(null);
+  const [sort, setSort] = useState({ key: "_debt", dir: "desc" });
+
+  function orderingParam() {
+    const tail = sort.key !== "created_at" ? ",-created_at" : "";
+    return (sort.dir === "desc" ? "-" : "") + sort.key + tail;
+  }
+
+  function onSort(key) {
+    setSort((s) => (s.key === key ? { key, dir: s.dir === "desc" ? "asc" : "desc" } : { key, dir: "desc" }));
+  }
 
   const nextShort = (s) => (s === "PROCESSING" ? t("receipts.toReady") : t("receipts.toIssued"));
 
@@ -39,16 +49,29 @@ export default function StoreReceipts() {
     }
   }
 
+  async function undoPay(r, e) {
+    e?.stopPropagation();
+    if (!(await confirm(t("receipts.confirmUnpay")))) return;
+    try {
+      const { data } = await api.post(`/sales/receipts/${r.id}/unpay/`, {});
+      if (open && open.id === data.id) setOpen(data);
+      load();
+      toast(t("receipts.unpayDone"));
+    } catch (err) {
+      toast(err.response?.data?.detail || t("common.error"), "error");
+    }
+  }
+
   function load() {
     const params = search ? { search } : {};
-    api.get("/sales/receipts/", { params }).then((r) => setRows(r.data.results));
+    api.get("/sales/receipts/", { params: { ...params, ordering: orderingParam() } }).then((r) => setRows(r.data.results));
     api.get("/sales/receipts/stats/", { params }).then((r) => setStats(r.data));
   }
   useEffect(() => {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search]);
+  }, [search, sort]);
 
   async function refund() {
     if (!(await confirm(t("receipts.confirmRefund")))) return;
@@ -109,29 +132,48 @@ export default function StoreReceipts() {
           <span className="muted">—</span>
         ),
     },
-    { key: "total_price", label: t("common.total"), render: (r) => `${r.total_price} сом` },
+    { key: "total_price", label: t("common.total"), sortKey: "total_price", render: (r) => `${r.total_price} сом` },
     {
       key: "debt",
       label: t("receipts.debt"),
-      render: (r) =>
-        Number(r.debt) > 0 ? (
+      sortKey: "_debt",
+      render: (r) => {
+        const hasDebt = Number(r.debt) > 0;
+        const canUndo =
+          (r.payment_status === "PAID" || Number(r.amount_paid) > 0) &&
+          !["REFUNDED", "PARTIALLY_REFUNDED"].includes(r.payment_status) &&
+          r.status !== "CANCELLED";
+        if (!hasDebt && !canUndo) return <span className="muted">0</span>;
+        return (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
-            <span style={{ color: "var(--danger)", fontWeight: 600 }}>{r.debt} сом</span>
-            <button
-              className="secondary"
-              style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
-              onClick={(e) => { e.stopPropagation(); setPaying(r); }}
-            >
-              {t("receipts.pay")}
-            </button>
+            {hasDebt && <span style={{ color: "var(--danger)", fontWeight: 600 }}>{r.debt} сом</span>}
+            {hasDebt && (
+              <button
+                className="secondary"
+                style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
+                onClick={(e) => { e.stopPropagation(); setPaying(r); }}
+              >
+                {t("receipts.pay")}
+              </button>
+            )}
+            {canUndo && (
+              <button
+                className="ghost"
+                style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap", color: "var(--ink-muted)" }}
+                onClick={(e) => undoPay(r, e)}
+                title={t("receipts.unpay")}
+              >
+                ↩ {t("receipts.unpayShort")}
+              </button>
+            )}
           </div>
-        ) : (
-          <span className="muted">0</span>
-        ),
+        );
+      },
     },
     {
       key: "created_at",
       label: t("receipts.date"),
+      sortKey: "created_at",
       render: (r) => new Date(r.created_at).toLocaleString("ru-RU"),
     },
     {
@@ -172,7 +214,7 @@ export default function StoreReceipts() {
           onChange={(e) => setSearch(e.target.value)}
         />
       </div>
-      <DataTable columns={columns} rows={rows} />
+      <DataTable columns={columns} rows={rows} sort={sort} onSort={onSort} />
 
       {open && (
         <Modal
@@ -185,6 +227,13 @@ export default function StoreReceipts() {
                   {t("receipts.acceptPayment")}
                 </button>
               )}
+              {(open.payment_status === "PAID" || Number(open.amount_paid) > 0) &&
+                !["REFUNDED", "PARTIALLY_REFUNDED"].includes(open.payment_status) &&
+                open.status !== "CANCELLED" && (
+                  <button className="secondary" onClick={(e) => undoPay(open, e)} disabled={busy}>
+                    ↩ {t("receipts.unpay")}
+                  </button>
+                )}
               {canEdit && (
                 <button className="secondary" onClick={() => setAdding(true)} disabled={busy}>
                   + {t("receipts.addBtn")}

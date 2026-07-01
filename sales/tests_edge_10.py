@@ -175,8 +175,9 @@ class EdgeAddItemsCustomerTests(APITestCase):
             {"phone": "+996 (555) 11-22-33"}, format="json",
         )
         self.assertEqual(r.status_code, 200, r.data)
-        self.assertIn("access", r.data)
-        self.assertEqual(r.data["client"]["id"], self.client_a.id)
+        # Телефон нормализован и клиент найден; пароль ещё не задан → set_password.
+        self.assertEqual(r.data.get("status"), "set_password")
+        self.assertEqual(r.data.get("name"), self.client_a.display_name)
 
     def test_customer_login_plain_digits_match(self):
         # Цифры без '+' тоже должны совпасть с сохранённым +996...
@@ -184,7 +185,7 @@ class EdgeAddItemsCustomerTests(APITestCase):
             "/api/customer/login/", {"phone": "996555112233"}, format="json",
         )
         self.assertEqual(r.status_code, 200, r.data)
-        self.assertEqual(r.data["client"]["id"], self.client_a.id)
+        self.assertEqual(r.data.get("status"), "set_password")
 
     def test_customer_login_empty_phone_400(self):
         r = self.client.post("/api/customer/login/", {"phone": ""}, format="json")

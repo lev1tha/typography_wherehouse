@@ -20,6 +20,7 @@ def client_debt(client) -> Decimal:
 class ClientSerializer(serializers.ModelSerializer):
     display_name = serializers.CharField(read_only=True)
     is_telegram_linked = serializers.BooleanField(read_only=True)
+    has_password = serializers.BooleanField(read_only=True)
     referred_by_name = serializers.CharField(source="referred_by.display_name", read_only=True)
     referrals_count = serializers.SerializerMethodField()
     debt = serializers.SerializerMethodField()
@@ -35,6 +36,7 @@ class ClientSerializer(serializers.ModelSerializer):
             "telegram_chat_id",
             "display_name",
             "is_telegram_linked",
+            "has_password",
             "referred_by",
             "referred_by_name",
             "referrals_count",

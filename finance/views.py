@@ -1,10 +1,13 @@
+import calendar
 import secrets
 from collections import defaultdict
+from datetime import date
 from decimal import Decimal
 
 from django.conf import settings
 from django.db.models import DecimalField, Sum
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, TruncDate
+from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -90,12 +93,8 @@ class FinanceReportView(APIView):
     def get(self, request):
         s = FinanceSettings.load()
 
-        # Остаток на конец = текущая стоимость склада (Σ quantity × purchase_price).
-        stock_end = sum(
-            (m.quantity * m.purchase_price for m in Material.objects.all()), Decimal("0")
-        )
-
-        total_materials = s.material_purchase + s.transport + s.material_debt
+        # Раздел «Материалы» убран (транспорт и так входит в цену закупки —
+        # см. поступление на Складе). Расходы = постоянные + переменные (покупки).
         total_fixed = s.rent + s.utilities + s.internet + s.fixed_other
 
         def cat(category):
@@ -108,7 +107,7 @@ class FinanceReportView(APIView):
             "other": cat(Expense.Category.OTHER),
         }
         total_variable = sum(var.values(), Decimal("0"))
-        total_expenses = total_materials + total_fixed + total_variable
+        total_expenses = total_fixed + total_variable
 
         # Выручка = оплаченные чеки (полная сумма) + предоплаты по открытым заказам.
         live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED)
@@ -165,14 +164,6 @@ class FinanceReportView(APIView):
 
         return Response(
             {
-                "materials": {
-                    "stock_start": s.stock_start,
-                    "material_purchase": s.material_purchase,
-                    "stock_end": stock_end,
-                    "transport": s.transport,
-                    "material_debt": s.material_debt,
-                    "total": total_materials,
-                },
                 "fixed": {
                     "rent": s.rent,
                     "utilities": s.utilities,
@@ -188,6 +179,102 @@ class FinanceReportView(APIView):
                 "cutting": cutting,
             }
         )
+
+
+class DailyReportView(APIView):
+    """GET /api/finance/daily/?year=&month= — day-by-day P&L for one calendar
+    month, so the admin can see which days were profitable and which weren't
+    (a month-end total hides that a single bad day happened).
+
+    Revenue and variable expenses come straight from their dated records
+    (Receipt.created_at, Expense.spent_at). Fixed monthly costs (rent/utilities/
+    internet/other) are a single ongoing manual figure with no date of their
+    own, so they are split evenly across the days of the shown month — a day
+    only counts as profitable once its share of rent is covered too."""
+
+    permission_classes = [IsAdmin]
+
+    def get(self, request):
+        today = timezone.localdate()
+        try:
+            year = int(request.query_params.get("year") or today.year)
+            month = int(request.query_params.get("month") or today.month)
+        except ValueError:
+            return Response({"detail": "Некорректный год/месяц."}, status=status.HTTP_400_BAD_REQUEST)
+        if not (1 <= month <= 12):
+            return Response({"detail": "Некорректный месяц."}, status=status.HTTP_400_BAD_REQUEST)
+
+        days_in_month = calendar.monthrange(year, month)[1]
+        first_day = date(year, month, 1)
+        next_month_first = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+
+        s = FinanceSettings.load()
+        fixed_total = s.rent + s.utilities + s.internet + s.fixed_other
+        fixed_share = fixed_total / days_in_month
+
+        live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED).filter(
+            created_at__date__gte=first_day, created_at__date__lt=next_month_first
+        )
+        revenue_by_day = defaultdict(lambda: Decimal("0"))
+        paid = (
+            live.filter(payment_status=Receipt.PaymentStatus.PAID)
+            .annotate(day=TruncDate("created_at"))
+            .values("day")
+            .annotate(v=_SUM("total_price"))
+        )
+        for row in paid:
+            revenue_by_day[row["day"]] += row["v"]
+        pending = (
+            live.filter(payment_status=Receipt.PaymentStatus.PENDING)
+            .annotate(day=TruncDate("created_at"))
+            .values("day")
+            .annotate(v=_SUM("amount_paid"))
+        )
+        for row in pending:
+            revenue_by_day[row["day"]] += row["v"]
+
+        variable_by_day = defaultdict(lambda: Decimal("0"))
+        expense_rows = (
+            Expense.objects.filter(spent_at__gte=first_day, spent_at__lt=next_month_first)
+            .values("spent_at")
+            .annotate(v=_SUM("amount"))
+        )
+        for row in expense_rows:
+            variable_by_day[row["spent_at"]] += row["v"]
+
+        rows = []
+        for day_num in range(1, days_in_month + 1):
+            d = date(year, month, day_num)
+            revenue = revenue_by_day.get(d, Decimal("0"))
+            variable = variable_by_day.get(d, Decimal("0"))
+            # A day that hasn't happened yet has no profit/loss to show — it
+            # would otherwise always render "in the red" for its unearned share
+            # of rent before any business was even done that day.
+            future = d > today
+            rows.append({
+                "date": d.isoformat(),
+                "day": day_num,
+                "revenue": revenue,
+                "variable": variable,
+                "fixed_share": fixed_share,
+                "profit": None if future else revenue - variable - fixed_share,
+            })
+
+        totals = {
+            "revenue": sum((r["revenue"] for r in rows), Decimal("0")),
+            "variable": sum((r["variable"] for r in rows), Decimal("0")),
+            "fixed": fixed_total,
+            "profit": sum((r["profit"] for r in rows if r["profit"] is not None), Decimal("0")),
+        }
+
+        return Response({
+            "year": year,
+            "month": month,
+            "days_in_month": days_in_month,
+            "today": today.isoformat() if (today.year == year and today.month == month) else None,
+            "rows": rows,
+            "totals": totals,
+        })
 
 
 class MaterialReportView(APIView):

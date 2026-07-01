@@ -46,6 +46,63 @@ class EdgeCuttingTests(APITestCase):
     def _items(self, receipt):
         return list(receipt.items.all())
 
+    # ---- Целый лист + резка (пог.м) ---------------------------------------
+
+    def test_whole_sheet_plus_cutting_bills_sheet_and_work_only(self):
+        # «Весь лист» + резка: материал по цене ЛИСТА (PIECE) + работа реза
+        # (пог.м × ставка). Отдельной MATERIAL-линии по площади быть НЕ должно.
+        r = self._checkout([
+            {"type": "MATERIAL", "material": self.acrylic.id, "quantity": 1, "mode": "PIECE"},
+            {"type": "SERVICE", "service": self.cutting.id, "material": self.acrylic.id, "running_meters": "5"},
+        ])
+        self.assertEqual(r.status_code, 201, r.data)
+        receipt = Receipt.objects.get(pk=r.data["id"])
+        items = self._items(receipt)
+        self.assertEqual(len(items), 2)  # лист + работа, без площади-материала
+        mat = receipt.items.get(type=TransactionItem.Type.MATERIAL)
+        work = receipt.items.get(type=TransactionItem.Type.SERVICE)
+        self.assertEqual(mat.sale_mode, TransactionItem.SaleMode.PIECE)
+        self.assertEqual(mat.quantity, Decimal("1"))
+        self.assertEqual(mat.price_per_item, Decimal("3700"))
+        self.assertEqual(work.quantity, Decimal("5"))
+        self.assertEqual(work.price_per_item, Decimal("20"))  # ставка реза материала
+        self.assertEqual(receipt.total_price, Decimal("3800.00"))
+        # Списание: только площадь листа (2.98), работа склад не трогает.
+        self.acrylic.refresh_from_db()
+        self.assertEqual(self.acrylic.quantity, Decimal("97.02"))  # 100 − 2.98
+
+    def test_whole_sheet_plus_cutting_admin_rate_override(self):
+        self.client.force_authenticate(self.admin)
+        r = self._checkout([
+            {"type": "MATERIAL", "material": self.acrylic.id, "quantity": 2, "mode": "PIECE"},
+            {"type": "SERVICE", "service": self.cutting.id, "material": self.acrylic.id,
+             "running_meters": "10", "cut_rate": "35"},
+        ])
+        self.assertEqual(r.status_code, 201, r.data)
+        receipt = Receipt.objects.get(pk=r.data["id"])
+        work = receipt.items.get(type=TransactionItem.Type.SERVICE)
+        self.assertEqual(work.quantity, Decimal("10"))
+        self.assertEqual(work.price_per_item, Decimal("35"))  # override
+        # 2 листа × 3700 + 10 пог.м × 35 = 7400 + 350 = 7750
+        self.assertEqual(receipt.total_price, Decimal("7750.00"))
+
+    # ---- Округление цены строки вверх до целого сома ----------------------
+
+    def test_line_totals_round_up_to_whole_som(self):
+        # Площадь 0.33×0.33 = 0.109; материал 0.109×1400 = 152.6 → 153;
+        # работа 0.109×20 = 2.18 → 3; итог 156. Округляем ВВЕРХ, без копеек.
+        r = self._checkout([{
+            "type": "SERVICE", "service": self.cutting.id,
+            "material": self.acrylic.id, "width": "0.33", "length": "0.33",
+        }])
+        self.assertEqual(r.status_code, 201, r.data)
+        receipt = Receipt.objects.get(pk=r.data["id"])
+        work = receipt.items.get(type=TransactionItem.Type.SERVICE)
+        mat = receipt.items.get(type=TransactionItem.Type.MATERIAL)
+        self.assertEqual(work.line_total, Decimal("3"))
+        self.assertEqual(mat.line_total, Decimal("153"))
+        self.assertEqual(receipt.total_price, Decimal("156.00"))
+
     # ---- Резка без выбранного материала ----------------------------------
 
     def test_cutting_without_material_makes_only_work_line(self):
@@ -115,18 +172,20 @@ class EdgeCuttingTests(APITestCase):
 
     # ---- Нулевые/пустые width-height -------------------------------------
 
-    def test_zero_dimensions_no_quantity_yields_zero_lines(self):
+    def test_zero_dimensions_yields_only_work_line(self):
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id,
         }])
-        # Должно безопасно создаться (без 500), площадь 0.
+        # Должно безопасно создаться (без 500). Площадь 0 → материал по площади
+        # НЕ добавляется (нечего биллить), остаётся только work-линия с нулём.
         self.assertEqual(r.status_code, 201, r.data)
         receipt = Receipt.objects.get(pk=r.data["id"])
-        work = receipt.items.get(type=TransactionItem.Type.SERVICE)
-        mat = receipt.items.get(type=TransactionItem.Type.MATERIAL)
+        items = self._items(receipt)
+        self.assertEqual(len(items), 1)
+        work = items[0]
+        self.assertEqual(work.type, TransactionItem.Type.SERVICE)
         self.assertEqual(work.quantity, Decimal("0.000"))
-        self.assertEqual(mat.quantity, Decimal("0.000"))
         self.assertEqual(receipt.total_price, Decimal("0.00"))
 
     def test_explicit_zero_width_treated_as_blank(self):

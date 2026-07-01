@@ -142,8 +142,10 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         )
         items = [work]
         # The cut/used material is billed as its own line (area × per-кв.м price,
-        # or a manual per-кв.м override entered at sale time).
-        if service.uses_material and material:
+        # or a manual per-кв.м override entered at sale time). Cutting work on a
+        # whole sheet has no cut dimensions (area=0) — the sheet is billed
+        # separately as a PIECE line, so we bill only the work here.
+        if service.uses_material and material and area > 0:
             items.append(TransactionItem.objects.create(
                 receipt=receipt, type=TransactionItem.Type.MATERIAL, material=material,
                 quantity=area, price_per_item=_priced("material_price", material.sqm_price),

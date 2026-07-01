@@ -20,8 +20,16 @@ export function AuthProvider({ children }) {
     return data.user;
   }
 
-  async function loginCustomer(phone) {
-    const { data } = await api.post("/customer/login/", { phone });
+  async function loginCustomer(phone, password) {
+    const { data } = await api.post("/customer/login/", {
+      phone,
+      ...(password ? { password } : {}),
+    });
+    // Без токена сервер сообщает, что делать дальше: задать пароль (первый вход)
+    // или ввести существующий. Вход завершается только когда пришёл access.
+    if (!data.access) {
+      return { loggedIn: false, status: data.status, name: data.name };
+    }
     const u = {
       role: "CUSTOMER",
       name: data.client.name,
@@ -32,7 +40,7 @@ export function AuthProvider({ children }) {
     localStorage.removeItem("refreshToken");
     localStorage.setItem("user", JSON.stringify(u));
     setUser(u);
-    return u;
+    return { loggedIn: true, user: u };
   }
 
   function logout() {

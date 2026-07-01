@@ -116,11 +116,12 @@ class EdgeFinanceTests(APITestCase):
         # В выручку идёт только предоплата 300, не вся сумма чека.
         self.assertEqual(Decimal(str(data["revenue"])), Decimal("300"))
 
-    # ---- stock_end ---------------------------------------------------------
-    def test_stock_end_is_sum_qty_times_purchase_price(self):
-        # forex: 10 × 50 = 500; acryl: 3 × 100 = 300 → 800.
+    # ---- materials block removed -------------------------------------------
+    def test_report_has_no_materials_block(self):
+        # Раздел «Материалы» убран из отчёта (транспорт входит в цену закупки),
+        # поэтому ключа "materials" в ответе больше нет.
         data = self._report()
-        self.assertEqual(Decimal(str(data["materials"]["stock_end"])), Decimal("800"))
+        self.assertNotIn("materials", data)
 
     # ---- client_debt -------------------------------------------------------
     def test_client_debt_only_positive_pending(self):
@@ -258,7 +259,6 @@ class EdgeFinanceTests(APITestCase):
         data = self._report()
         self.assertEqual(Decimal(str(data["revenue"])), Decimal("0"))
         self.assertEqual(Decimal(str(data["client_debt"])), Decimal("0"))
-        self.assertEqual(Decimal(str(data["materials"]["stock_end"])), Decimal("0"))
         self.assertEqual(Decimal(str(data["cutting"]["total"])), Decimal("0"))
 
     def test_empty_db_material_report_returns_empty_rows(self):
@@ -284,13 +284,13 @@ class EdgeFinanceTests(APITestCase):
         self.assertEqual(Decimal(str(data["variable"]["cutter"])), Decimal("30"))
         self.assertEqual(Decimal(str(data["variable"]["other"])), Decimal("20"))
         self.assertEqual(Decimal(str(data["variable"]["total"])), Decimal("50"))
-        # total_expenses = materials(100 + stock irrelevant) + fixed(50) + variable(50).
-        # materials total = material_purchase + transport + material_debt = 100.
-        self.assertEqual(Decimal(str(data["materials"]["total"])), Decimal("100"))
+        # «Материалы» убраны из расходов: material_purchase=100 в настройках
+        # НЕ должен попадать в total_expenses.
         self.assertEqual(Decimal(str(data["fixed"]["total"])), Decimal("50"))
-        self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("200"))
-        # profit = revenue(1000) - total_expenses(200) = 800.
-        self.assertEqual(Decimal(str(data["profit"])), Decimal("800"))
+        # total_expenses = fixed(50) + variable(50) = 100 (без материалов).
+        self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("100"))
+        # profit = revenue(1000) - total_expenses(100) = 900.
+        self.assertEqual(Decimal(str(data["profit"])), Decimal("900"))
 
     # ---- permissions -------------------------------------------------------
     def test_report_admin_only(self):

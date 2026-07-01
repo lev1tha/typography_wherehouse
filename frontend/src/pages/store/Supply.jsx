@@ -27,29 +27,16 @@ const MaterialSelect = ({ value, onChange, materials, t }) => (
 );
 
 const WRITEOFF_REASONS = ["DAMAGE", "DEFECT", "LOSS", "EXPIRY", "OTHER"];
-const EMPTY_INTAKE = {
-  material: "",
-  form: "ROLL",
-  code: "",
-  width: "",
-  length: "",
-  height: "",
-  sheet_count: "",
-  quantity: "",
-  purchase_cost: "",
-  markup_percent: "20",
-  actual_price: "",
-  reason: "",
-};
 
+// «Движение»: инвентаризация (пересчёт) и списание (порча/брак/утеря). Приём
+// нового прихода вынесен на строку материала в «Материалах» (ReceiveStockModal).
 export default function Supply({ embedded = false }) {
   const { t } = useTranslation();
   const { toast } = useUI();
-  const [tab, setTab] = useState("intake");
+  const [tab, setTab] = useState("inventory");
   const [materials, setMaterials] = useState([]);
   const [busy, setBusy] = useState(false);
 
-  const [intake, setIntake] = useState(EMPTY_INTAKE);
   const [inv, setInv] = useState({ material: "", counted_quantity: "", reason: "" });
   const [writeoff, setWriteoff] = useState({ material: "", quantity: "", reason_code: "DAMAGE", note: "" });
 
@@ -78,47 +65,6 @@ export default function Supply({ embedded = false }) {
     }
   }
 
-  // --- intake area / price preview ---
-  const intakeArea = () => {
-    const w = Number(intake.width);
-    if (intake.form === "ROLL") return w && Number(intake.length) ? w * Number(intake.length) : 0;
-    if (intake.form === "SHEET")
-      return w && Number(intake.height) && Number(intake.sheet_count)
-        ? w * Number(intake.height) * Number(intake.sheet_count)
-        : 0;
-    return 0;
-  };
-  const intakeCostPerSqm = () => {
-    const a = intakeArea();
-    const c = Number(intake.purchase_cost);
-    if (!a || !c) return null;
-    return (c / a).toFixed(2);
-  };
-
-  const submitIntake = () =>
-    run(async () => {
-      if (intake.form === "QTY") {
-        await api.post("/warehouse/materials/supply/", {
-          material: Number(intake.material),
-          quantity: Number(intake.quantity),
-          actual_price: intake.actual_price ? Number(intake.actual_price) : null,
-          reason: intake.reason,
-        });
-      } else {
-        await api.post("/warehouse/materials/receive-roll/", {
-          material: Number(intake.material),
-          form: intake.form,
-          code: intake.code,
-          width: Number(intake.width),
-          length: intake.form === "ROLL" ? Number(intake.length) : null,
-          height: intake.form === "SHEET" ? Number(intake.height) : null,
-          sheet_count: intake.form === "SHEET" ? Number(intake.sheet_count) : null,
-          purchase_cost: Number(intake.purchase_cost),
-        });
-      }
-      setIntake(EMPTY_INTAKE);
-    });
-
   const submitInventory = () =>
     run(async () => {
       await api.post("/warehouse/materials/adjust/", {
@@ -140,24 +86,9 @@ export default function Supply({ embedded = false }) {
       setWriteoff({ material: "", quantity: "", reason_code: "DAMAGE", note: "" });
     });
 
-  const intakeValid =
-    intake.material &&
-    intake.purchase_cost &&
-    (intake.form === "QTY"
-      ? intake.quantity
-      : intake.form === "ROLL"
-      ? intake.width && intake.length
-      : intake.width && intake.height && intake.sheet_count);
-
   const TABS = [
-    ["intake", t("supply.intake")],
     ["inventory", t("supply.inventory")],
     ["writeoff", t("supply.writeoff")],
-  ];
-  const FORMS = [
-    ["ROLL", t("supply.formRoll")],
-    ["SHEET", t("supply.formSheet")],
-    ["QTY", t("supply.formQty")],
   ];
 
   return (
@@ -170,84 +101,6 @@ export default function Supply({ embedded = false }) {
           </button>
         ))}
       </div>
-
-      {tab === "intake" && (
-        <div className="card" style={{ maxWidth: 560 }}>
-          <Field label={t("checkout.material")}>
-            <MaterialSelect value={intake.material} onChange={(e) => setIntake({ ...intake, material: e.target.value })} materials={materials} t={t} />
-          </Field>
-
-          <Field label={t("supply.form")}>
-            <div className="tabs" style={{ margin: 0 }}>
-              {FORMS.map(([key, label]) => (
-                <button
-                  key={key}
-                  className={intake.form === key ? "active" : ""}
-                  onClick={() => setIntake({ ...intake, form: key })}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          {intake.form === "ROLL" && (
-            <div className="row">
-              <Field label={t("supply.width")}><Num value={intake.width} onChange={(v) => setIntake({ ...intake, width: v })} /></Field>
-              <Field label={t("supply.length")}><Num value={intake.length} onChange={(v) => setIntake({ ...intake, length: v })} /></Field>
-            </div>
-          )}
-          {intake.form === "SHEET" && (
-            <div className="row">
-              <Field label={t("supply.width")}><Num value={intake.width} onChange={(v) => setIntake({ ...intake, width: v })} /></Field>
-              <Field label={t("supply.height")}><Num value={intake.height} onChange={(v) => setIntake({ ...intake, height: v })} /></Field>
-              <Field label={t("supply.sheets")}><Num value={intake.sheet_count} onChange={(v) => setIntake({ ...intake, sheet_count: v })} /></Field>
-            </div>
-          )}
-          {intake.form === "QTY" && (
-            <Field label={t("common.quantity")}>
-              <Num value={intake.quantity} onChange={(v) => setIntake({ ...intake, quantity: v })} />
-            </Field>
-          )}
-
-          {intake.form !== "QTY" && (
-            <Field label={t("supply.batchCost")}>
-              <Num value={intake.purchase_cost} onChange={(v) => setIntake({ ...intake, purchase_cost: v })} />
-            </Field>
-          )}
-          {intake.form === "QTY" && (
-            <Field label={t("supply.actualPrice")}>
-              <Num value={intake.actual_price} onChange={(v) => setIntake({ ...intake, actual_price: v })} />
-            </Field>
-          )}
-
-          <Field label={t("supply.rollCode")}>
-            <input value={intake.code} onChange={(e) => setIntake({ ...intake, code: e.target.value })} placeholder="Партия / поставщик" />
-          </Field>
-
-          {/* live preview */}
-          {intake.form !== "QTY" && intakeArea() > 0 && (
-            <div className="card" style={{ background: "var(--canvas)", padding: 12, marginBottom: 14 }}>
-              <div className="crow"><span className="k">{t("supply.area")}</span><strong>{intakeArea().toFixed(2)} кв.м</strong></div>
-              {intakeCostPerSqm() && (
-                <div className="crow"><span className="k">{t("supply.costPerSqm")}</span><strong>{intakeCostPerSqm()} сом/кв.м</strong></div>
-              )}
-              {intake.material && (
-                <div className="crow"><span className="k">{t("supply.becomes")}</span><strong>{stockOf(intake.material)} → {(Number(stockOf(intake.material)) + intakeArea()).toFixed(2)} кв.м</strong></div>
-              )}
-            </div>
-          )}
-          {intake.form === "QTY" && intake.material && intake.quantity && (
-            <div className="card" style={{ background: "var(--canvas)", padding: 12, marginBottom: 14 }}>
-              <div className="crow"><span className="k">{t("supply.becomes")}</span><strong>{stockOf(intake.material)} → {(Number(stockOf(intake.material)) + Number(intake.quantity)).toFixed(2)}</strong></div>
-            </div>
-          )}
-
-          <button style={{ width: "100%", height: 50 }} onClick={submitIntake} disabled={busy || !intakeValid}>
-            {t("supply.intake")}
-          </button>
-        </div>
-      )}
 
       {tab === "inventory" && (
         <div className="card" style={{ maxWidth: 520 }}>

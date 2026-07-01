@@ -1,5 +1,6 @@
 from decimal import Decimal, InvalidOperation
 
+from django.db.models import Case, DecimalField, F, Q, Value, When
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -41,14 +42,31 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     filterset_fields = ["payment_method", "payment_status", "status", "cashier", "client"]
     search_fields = ["id", "client__phone", "client__full_name", "client__company_name"]
-    ordering = ["-created_at"]
+    # По умолчанию: у кого долг выше — тот вверху, затем по дате (новые выше).
+    # Долг — вычисляемое поле, поэтому аннотируем `_debt` в get_queryset.
+    ordering = ["-_debt", "-created_at"]
+    # Разрешённые колонки для сортировки по клику (?ordering=...).
+    ordering_fields = ["_debt", "created_at", "total_price"]
 
     def get_queryset(self):
         qs = super().get_queryset()
         # Storekeepers see only their own receipts; admins see all.
         if not self.request.user.is_admin_role:
             qs = qs.filter(cashier=self.request.user)
-        return qs
+        # Долг = остаток (сумма − оплачено − возвраты) для открытых чеков, иначе 0.
+        # Совпадает с логикой свойства Receipt.debt; используется для сортировки.
+        return qs.annotate(
+            _debt=Case(
+                When(
+                    Q(payment_status=Receipt.PaymentStatus.PENDING)
+                    & ~Q(status=Receipt.Status.CANCELLED)
+                    & Q(total_price__gt=F("amount_paid") + F("refunded_amount")),
+                    then=F("total_price") - F("amount_paid") - F("refunded_amount"),
+                ),
+                default=Value(Decimal("0")),
+                output_field=DecimalField(max_digits=14, decimal_places=2),
+            )
+        )
 
     @action(detail=False, methods=["get"])
     def stats(self, request):
@@ -218,6 +236,41 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 f"💰 Принята оплата {amount} сом по чеку №{receipt.id}. {tail}",
             )
         AuditLog.record(request.user, f"Оплата долга по чеку {receipt.id}: +{amount} сом")
+        return self._fresh_response(receipt)
+
+    @action(detail=True, methods=["post"])
+    def unpay(self, request, pk=None):
+        """POST /receipts/<id>/unpay/ — откат оплаты: вернуть чек в «Не оплачено».
+
+        Нужно, если оплату приняли по ошибке (например, не по тому чеку). Обнуляет
+        принятую оплату и возвращает весь долг; товар/склад не трогаем (он был
+        отгружён при продаже). Недоступно для отменённых и возвращённых чеков.
+        """
+        receipt = self.get_object()
+        if receipt.status == Receipt.Status.CANCELLED:
+            return Response({"detail": "Чек отменён."}, status=status.HTTP_400_BAD_REQUEST)
+        if receipt.payment_status in (
+            Receipt.PaymentStatus.REFUNDED,
+            Receipt.PaymentStatus.PARTIALLY_REFUNDED,
+        ):
+            return Response(
+                {"detail": "По возвращённому чеку откат оплаты недоступен."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Откатывать можно оплаченный чек (в т.ч. старый, где amount_paid=0 —
+        # поле появилось позже) или чек с частичной предоплатой.
+        if receipt.payment_status != Receipt.PaymentStatus.PAID and receipt.amount_paid <= 0:
+            return Response(
+                {"detail": "По этому чеку нет принятой оплаты."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        returned = receipt.amount_paid
+        receipt.amount_paid = Decimal("0")
+        receipt.payment_status = Receipt.PaymentStatus.PENDING
+        receipt.save(update_fields=["amount_paid", "payment_status", "updated_at"])
+
+        AuditLog.record(request.user, f"Откат оплаты по чеку {receipt.id}: −{returned} сом")
         return self._fresh_response(receipt)
 
     @action(detail=True, methods=["post"], url_path="add-items")

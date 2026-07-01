@@ -172,8 +172,11 @@ class CuttingPricingAPITests(APITestCase):
         self.assertEqual(work.price_per_item, Decimal("50"))       # overridden cut rate (/кв.м)
         self.assertEqual(mat.price_per_item, Decimal("1400"))      # overridden material price
         self.assertEqual(mat.quantity, Decimal("0.612"))          # 3-decimal area precision
-        # Total = 0.612×50 + 0.612×1400 = 30.6 + 856.8 = 887.4
-        self.assertEqual(receipt.total_price, Decimal("887.40"))
+        # Каждая строка округляется ВВЕРХ до целого сома:
+        # работа 0.612×50 = 30.6 → 31; материал 0.612×1400 = 856.8 → 857; итог 888.
+        self.assertEqual(work.line_total, Decimal("31"))
+        self.assertEqual(mat.line_total, Decimal("857"))
+        self.assertEqual(receipt.total_price, Decimal("888.00"))
 
     def test_whole_sheet_sale_uses_piece_price_and_area(self):
         r = self._checkout([{

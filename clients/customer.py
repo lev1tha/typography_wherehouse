@@ -96,14 +96,26 @@ class CustomerOrderSerializer(serializers.ModelSerializer):
         return CustomerItemSerializer(rows, many=True).data
 
 
+MIN_PORTAL_PASSWORD = 4
+
+
 class CustomerLoginView(APIView):
-    """POST /api/customer/login/ — log in by phone number (no password)."""
+    """POST /api/customer/login/ — вход клиента по телефону + собственному паролю.
+
+    Шаг 1: клиент присылает только `phone`. Отвечаем, узнан ли он и что делать:
+      - `status=set_password` — пароль ещё не задан, пусть придумает (первый вход);
+      - `status=need_password` — пароль есть, пусть введёт.
+    Шаг 2: `phone` + `password`. Если пароля не было — задаём его; если был —
+    проверяем. Успех → выдаём клиентский токен. Так чужой номер уже не откроет
+    заказы: нужен ещё и пароль, который клиент задал себе сам.
+    """
 
     authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
         phone = _digits(request.data.get("phone"))
+        password = (request.data.get("password") or "").strip()
         if not phone:
             return Response({"detail": "Введите номер телефона"}, status=status.HTTP_400_BAD_REQUEST)
         client = next((c for c in Client.objects.all() if _digits(c.phone) == phone), None)
@@ -112,6 +124,29 @@ class CustomerLoginView(APIView):
                 {"detail": "Клиент с таким номером не найден"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        if not client.has_password:
+            # Первый вход — клиент задаёт себе пароль.
+            if not password:
+                return Response({"status": "set_password", "name": client.display_name})
+            if len(password) < MIN_PORTAL_PASSWORD:
+                return Response(
+                    {"detail": f"Пароль минимум {MIN_PORTAL_PASSWORD} символа."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            client.set_password(password)
+            client.save(update_fields=["portal_password"])
+            return self._token_response(client)
+
+        # Пароль уже задан — просим ввести и проверяем.
+        if not password:
+            return Response({"status": "need_password", "name": client.display_name})
+        if not client.check_password(password):
+            return Response({"detail": "Неверный пароль."}, status=status.HTTP_400_BAD_REQUEST)
+        return self._token_response(client)
+
+    @staticmethod
+    def _token_response(client: Client) -> Response:
         return Response(
             {
                 "access": mint_customer_token(client),

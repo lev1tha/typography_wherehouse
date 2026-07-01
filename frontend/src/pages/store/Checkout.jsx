@@ -7,6 +7,10 @@ import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
 import { PaymentBadge } from "../../components/StatusBadge.jsx";
 
+// Цену округляем ВВЕРХ до целого сома (решение заказчика), как на бэкенде
+// (TransactionItem.line_total). Эпсилон гасит float-шум, чтобы целое не «прыгало».
+const ceilSom = (v) => Math.max(0, Math.ceil((Number(v) || 0) - 1e-6));
+
 // Whole-sheet line where the wholesale price is in effect (qty reached the min).
 function isWholesale(line) {
   return (
@@ -31,11 +35,16 @@ function lineQty(line) {
 function lineTotal(line) {
   // Резка = работа (погонный метр × ставка) + материал (площадь × цена/кв.м).
   // Погонный метр вводится вручную; если пусто — берём площадь куска.
+  // Резка = 2 строки в чеке (работа + материал), каждая округляется вверх
+  // отдельно — как на бэкенде.
   if (line.kind === "cutting") {
     const work = Number(line.rate) * Number(line.runM || line.area || 0);
-    return work + Number(line.materialPrice) * Number(line.area || 0);
+    const material = Number(line.materialPrice) * Number(line.area || 0);
+    return ceilSom(work) + ceilSom(material);
   }
-  return unitPrice(line) * lineQty(line);
+  // Работа реза на целом листе (без материала по площади): пог.м × ставка.
+  if (line.kind === "cut-work") return ceilSom(Number(line.rate) * Number(line.runM || 0));
+  return ceilSom(unitPrice(line) * lineQty(line));
 }
 
 export default function Checkout() {
@@ -130,23 +139,31 @@ export default function Checkout() {
 
   const total = useMemo(() => cart.reduce((s, l) => s + lineTotal(l), 0), [cart]);
 
-  // Stock indicator for a material card: out of stock (qty ≤ 0) vs low (qty ≤
-  // critical balance). Returns null for healthy stock and for services.
-  function stockInfo(p) {
+  // Remaining stock shown on EVERY material card during a sale: quantity in its
+  // unit, plus ≈ whole sheets when the material has a sheet area. Null for services.
+  function stockLabel(p) {
+    if (p.kind !== "material") return null;
+    const qty = Number(p.quantity ?? 0);
+    const unitLabel = t(`unit.${p.unit}`) || "";
+    let text = `${+qty.toFixed(2)} ${unitLabel}`.trim();
+    if (p.sheets_remaining != null)
+      text += ` · ≈${Math.round(p.sheets_remaining)} ${t("warehouse.sheetsShort")}`;
+    return text;
+  }
+
+  // Stock problem state for styling / badge / blocking: out of stock (qty ≤ 0)
+  // vs low (≤ critical balance). Null when healthy or for services.
+  function stockState(p) {
     if (p.kind !== "material") return null;
     const qty = Number(p.quantity ?? 0);
     const out = qty <= 0;
     const low = !out && p.is_below_critical;
-    if (!out && !low) return null;
-    const unitLabel = t(`unit.${p.unit}`) || "";
-    let text = `${+qty.toFixed(2)} ${unitLabel}`.trim();
-    if (low && p.is_roll_material && p.sheets_remaining != null)
-      text += ` · ≈${Math.round(p.sheets_remaining)} ${t("warehouse.sheetsShort")}`;
-    return { out, low, text };
+    return out || low ? { out, low } : null;
   }
 
   function tapProduct(p) {
     setError("");
+    if (stockState(p)?.out) return; // нет на складе — продажа заблокирована
     if (p.kind === "material") {
       // Sheet material → one unified modal (резка toggle + live price).
       if (p.is_roll_material) {
@@ -215,6 +232,16 @@ export default function Checkout() {
         });
         // addOrInc adds qty 1; bump to requested count.
         if (q > 1) setCart((prev) => prev.map((l) => (l.key === `M${m.id}-PIECE` ? { ...l, qty: q } : l)));
+        // Целый лист тоже можно резать: отдельная строка работы (пог.м × ставка).
+        const runM = Number(cut.running_meters) || 0;
+        if (cut.pieceCut && cuttingService && runM > 0) {
+          setCart((prev) => [...prev, {
+            key: `CW${m.id}-${Date.now()}`, kind: "cut-work",
+            serviceId: cuttingService.id, name: cuttingService.name || "Резка",
+            materialId: m.id, materialName: m.name,
+            rate: Number(cut.cutRate || 0), runM, qty: 1,
+          }]);
+        }
         setCut(null);
         return;
       }
@@ -298,6 +325,14 @@ export default function Checkout() {
           width: l.width, length: l.length, running_meters: l.runM,
           ...(isAdmin ? { material_price: l.materialPrice, cut_rate: l.rate } : {}),
         };
+      if (l.kind === "cut-work")
+        // Материал передаём (для ставки реза), но без размеров → площадь 0 →
+        // бэкенд создаёт только строку работы, без материала по площади.
+        return {
+          type: "SERVICE", service: l.serviceId, material: l.materialId,
+          running_meters: l.runM,
+          ...(isAdmin ? { cut_rate: l.rate } : {}),
+        };
       return { type: "SERVICE", service: l.id, quantity: l.qty };
     });
     const payload = { payment_method: paymentMethod, items };
@@ -344,7 +379,14 @@ export default function Checkout() {
   const cutPieceWholesale = cutPiece && cutWholePrice > 0 && cutWholeMin > 0 && cutPieceQty >= cutWholeMin;
   const cutPieceUnit = cutPieceWholesale ? cutWholePrice : Number(cut?.material?.piece_price || 0);
   const cutPieceTotal = cutPiece ? cutPieceQty * cutPieceUnit : 0;
-  const cutTotal = cutPiece ? cutPieceTotal : cutWork + cutMaterialSum;
+  // «Весь лист» тоже можно резать: работа = пог.м × ставка реза материала.
+  const cutPieceRunM = Number(cut?.running_meters) || 0;
+  const cutPieceRate = Number(cut?.cutRate || 0);
+  const cutPieceWork = cutPiece && cut?.pieceCut ? cutPieceRate * cutPieceRunM : 0;
+  // Итог = сумма округлённых вверх строк (как в чеке): лист/материал + работа.
+  const cutTotal = cutPiece
+    ? ceilSom(cutPieceTotal) + ceilSom(cutPieceWork)
+    : ceilSom(cutWork) + ceilSom(cutMaterialSum);
 
   return (
     <>
@@ -362,12 +404,15 @@ export default function Checkout() {
 
           <div className="pos-grid">
             {visibleProducts.map((p) => {
-              const st = stockInfo(p);
+              const st = stockState(p);
+              const stock = stockLabel(p);
               return (
               <button
                 key={p.key}
                 className={`pos-product${st ? (st.out ? " is-out" : " is-low") : ""}`}
                 onClick={() => tapProduct(p)}
+                disabled={!!st?.out}
+                title={st?.out ? t("checkout.outOfStockBlock") : undefined}
               >
                 {p.kind === "service" && <span className="p-tag">{t(`serviceKind.${p.serviceKind}`)}</span>}
                 {st && (
@@ -378,18 +423,18 @@ export default function Checkout() {
                 <div>
                   <div className="p-name">{p.name}</div>
                   <div className="p-cat">{p.category}</div>
-                  {st && <div className="p-stock">{t("checkout.stockLeft")} {st.text}</div>}
+                  {stock && <div className="p-stock">{t("checkout.stockLeft")} {stock}</div>}
                 </div>
                 <div className="p-price">
                   {p.kind === "material"
                     ? p.piece_price > 0
-                      ? `${p.piece_price} сом/${t("checkout.pieceUnit")}`
-                      : `${p.price} сом`
+                      ? `${ceilSom(p.piece_price)} сом/${t("checkout.pieceUnit")}`
+                      : `${ceilSom(p.price)} сом`
                     : p.uses_area
-                    ? `${p.rate_flat} сом/кв.м`
+                    ? `${ceilSom(p.rate_flat)} сом/кв.м`
                     : p.uses_pieces
-                    ? `${p.rate_per_piece} сом/букву`
-                    : `${p.base_price} сом`}
+                    ? `${ceilSom(p.rate_per_piece)} сом/букву`
+                    : `${ceilSom(p.base_price)} сом`}
                 </div>
               </button>
               );
@@ -409,6 +454,10 @@ export default function Checkout() {
                     <div className="cl-sub">
                       {l.width}×{l.length} = {l.area} кв.м · {l.materialName} · {t("checkout.rateWork")} {l.rate}
                     </div>
+                  ) : l.kind === "cut-work" ? (
+                    <div className="cl-sub">
+                      {t("checkout.rateWork")} {l.rate} × {l.runM} {t("checkout.pmShort")} · {l.materialName}
+                    </div>
                   ) : l.kind === "material-area" ? (
                     <div className="cl-sub">{l.width}×{l.length} = {l.area} кв.м · {l.price} сом/кв.м</div>
                   ) : l.mode === "PIECE" ? (
@@ -422,7 +471,7 @@ export default function Checkout() {
                     <div className="cl-sub">{unitPrice(l)} сом / ед.</div>
                   )}
                 </div>
-                {l.kind !== "cutting" && l.kind !== "material-area" && (
+                {l.kind !== "cutting" && l.kind !== "material-area" && l.kind !== "cut-work" && (
                   <div className="stepper">
                     <button onClick={() => changeQty(l.key, -1)}>−</button>
                     <span className="qty">{l.qty}</span>
@@ -588,21 +637,54 @@ export default function Checkout() {
               >
                 <option value="">—</option>
                 {areaMaterials.map((m) => (
-                  <option key={m.id} value={m.id}>
+                  <option key={m.id} value={m.id} disabled={Number(m.quantity) <= 0}>
                     {m.name} ({matSqm(m)} сом/кв.м, ост. {m.quantity} кв.м
                     {m.sheets_remaining != null ? ` ≈${Math.round(Number(m.sheets_remaining))} ${t("warehouse.sheetsShort")}` : ""})
+                    {Number(m.quantity) <= 0 ? ` — ${t("checkout.outOfStock")}` : ""}
                   </option>
                 ))}
               </select>
             </div>
           )}
 
-          {/* Whole-sheet sale: quantity only */}
+          {/* Whole-sheet sale: quantity + optional cutting (running metres) */}
           {cutPiece ? (
-            <div className="field">
-              <label>{t("common.quantity")} ({t("checkout.pieceUnit")})</label>
-              <input type="number" value={cut.qty} onChange={(e) => setCut({ ...cut, qty: e.target.value })} />
-            </div>
+            <>
+              <div className="field">
+                <label>{t("common.quantity")} ({t("checkout.pieceUnit")})</label>
+                <input type="number" value={cut.qty} onChange={(e) => setCut({ ...cut, qty: e.target.value })} />
+              </div>
+              <label className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  style={{ width: 20, height: 20, minHeight: 0 }}
+                  checked={!!cut.pieceCut}
+                  onChange={(e) => setCut({ ...cut, pieceCut: e.target.checked })}
+                />
+                {t("checkout.addCutting")}
+              </label>
+              {cut.pieceCut && (
+                <>
+                  <div className="field">
+                    <label>{t("checkout.runningMeters")}</label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={cut.running_meters}
+                      onChange={(e) => setCut({ ...cut, running_meters: e.target.value })}
+                      autoFocus
+                    />
+                    <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("checkout.pieceCutHint")}</p>
+                  </div>
+                  {isAdmin && (
+                    <div className="field">
+                      <label>{t("checkout.cutRateLabel")}</label>
+                      <input type="number" step="any" value={cut.cutRate ?? ""} onChange={(e) => setCut({ ...cut, cutRate: e.target.value })} />
+                    </div>
+                  )}
+                </>
+              )}
+            </>
           ) : (
             <>
               <div className="row">
@@ -658,14 +740,20 @@ export default function Checkout() {
                       <span />
                     </div>
                   )}
+                  {cut.pieceCut && cutPieceWork > 0 && (
+                    <div className="crow">
+                      <span className="k">{t("checkout.rateWork")}</span>
+                      <span>{cutPieceRate} × {cutPieceRunM} = {ceilSom(cutPieceWork)}</span>
+                    </div>
+                  )}
                 </>
               ) : (
                 <>
                   <div className="crow"><span className="k">{t("supply.area")}</span><strong>{cutArea} кв.м</strong></div>
                   {cutWorkOn && cutWorkRate > 0 && (
-                    <div className="crow"><span className="k">{t("checkout.rateWork")}</span><span>{cutWorkRate} × {cutRunM} = {cutWork.toFixed(0)}</span></div>
+                    <div className="crow"><span className="k">{t("checkout.rateWork")}</span><span>{cutWorkRate} × {cutRunM} = {ceilSom(cutWork)}</span></div>
                   )}
-                  <div className="crow"><span className="k">{t("checkout.rateMaterial")}</span><span>{cutMatSqm} × {cutArea} = {cutMaterialSum.toFixed(0)}</span></div>
+                  <div className="crow"><span className="k">{t("checkout.rateMaterial")}</span><span>{cutMatSqm} × {cutArea} = {ceilSom(cutMaterialSum)}</span></div>
                 </>
               )}
               <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>

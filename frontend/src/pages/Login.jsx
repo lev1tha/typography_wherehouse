@@ -14,6 +14,25 @@ export default function Login() {
   const [phone, setPhone] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // Клиентский вход двухшаговый: сначала телефон, затем пароль (задать/ввести).
+  const [custStep, setCustStep] = useState("phone"); // phone | set | enter
+  const [custName, setCustName] = useState("");
+  const [custPass, setCustPass] = useState("");
+  const [custPass2, setCustPass2] = useState("");
+
+  function switchMode(m) {
+    setMode(m);
+    setError("");
+    setCustStep("phone");
+    setCustPass("");
+    setCustPass2("");
+  }
+  function custBack() {
+    setCustStep("phone");
+    setCustPass("");
+    setCustPass2("");
+    setError("");
+  }
 
   if (isAuthenticated) {
     navigate(isCustomer ? "/me" : isAdmin ? "/admin" : "/app", { replace: true });
@@ -36,10 +55,22 @@ export default function Login() {
   async function onCustomer(e) {
     e.preventDefault();
     setError("");
+    if (custStep === "set" && custPass !== custPass2) {
+      setError(t("login.passMismatch"));
+      return;
+    }
     setBusy(true);
     try {
-      await loginCustomer(phone.trim());
-      navigate("/me", { replace: true });
+      const res =
+        custStep === "phone"
+          ? await loginCustomer(phone.trim())
+          : await loginCustomer(phone.trim(), custPass);
+      if (res.loggedIn) {
+        navigate("/me", { replace: true });
+      } else {
+        setCustName(res.name || "");
+        setCustStep(res.status === "set_password" ? "set" : "enter");
+      }
     } catch (err) {
       setError(err?.response?.data?.detail || t("login.customerError"));
     } finally {
@@ -58,7 +89,7 @@ export default function Login() {
             type="button"
             className={mode === "staff" ? "" : "secondary"}
             style={{ flex: 1 }}
-            onClick={() => { setMode("staff"); setError(""); }}
+            onClick={() => switchMode("staff")}
           >
             {t("login.staffTab")}
           </button>
@@ -66,7 +97,7 @@ export default function Login() {
             type="button"
             className={mode === "customer" ? "" : "secondary"}
             style={{ flex: 1 }}
-            onClick={() => { setMode("customer"); setError(""); }}
+            onClick={() => switchMode("customer")}
           >
             {t("login.clientTab")}
           </button>
@@ -103,20 +134,64 @@ export default function Login() {
           </form>
         ) : (
           <form onSubmit={onCustomer}>
-            <div className="field">
-              <label>{t("clients.phone")}</label>
-              <input
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                autoFocus
-                inputMode="tel"
-                placeholder="+996 700 00 00 00"
-              />
-            </div>
-            <p className="muted" style={{ fontSize: 13, marginTop: -4 }}>{t("login.clientHint")}</p>
+            {custStep === "phone" ? (
+              <>
+                <div className="field">
+                  <label>{t("clients.phone")}</label>
+                  <input
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    autoFocus
+                    inputMode="tel"
+                    placeholder="+996 700 00 00 00"
+                  />
+                </div>
+                <p className="muted" style={{ fontSize: 13, marginTop: -4 }}>{t("login.clientHint")}</p>
+              </>
+            ) : (
+              <>
+                <p style={{ fontWeight: 600, marginBottom: 2 }}>
+                  {custStep === "set"
+                    ? t("login.greetNew", { name: custName })
+                    : t("login.greetBack", { name: custName })}
+                </p>
+                <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
+                  {custStep === "set" ? t("login.setPassHint") : t("login.enterPassHint")}
+                </p>
+                <div className="field">
+                  <label>{t("common.password")}</label>
+                  <input
+                    type="password"
+                    value={custPass}
+                    onChange={(e) => setCustPass(e.target.value)}
+                    autoFocus
+                    autoComplete={custStep === "set" ? "new-password" : "current-password"}
+                  />
+                </div>
+                {custStep === "set" && (
+                  <div className="field">
+                    <label>{t("login.passConfirm")}</label>
+                    <input
+                      type="password"
+                      value={custPass2}
+                      onChange={(e) => setCustPass2(e.target.value)}
+                      autoComplete="new-password"
+                    />
+                  </div>
+                )}
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={custBack}
+                  style={{ padding: 0, fontSize: 13, color: "var(--accent-strong)" }}
+                >
+                  ← {t("login.otherPhone")}
+                </button>
+              </>
+            )}
             {error && <div className="error">{error}</div>}
-            <button type="submit" style={{ width: "100%" }} disabled={busy}>
-              {busy ? t("common.loading") : t("login.clientBtn")}
+            <button type="submit" style={{ width: "100%", marginTop: 12 }} disabled={busy}>
+              {busy ? t("common.loading") : custStep === "phone" ? t("common.next") : t("login.clientBtn")}
             </button>
           </form>
         )}

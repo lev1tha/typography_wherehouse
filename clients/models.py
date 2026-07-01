@@ -1,3 +1,4 @@
+from django.contrib.auth.hashers import check_password, make_password
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
@@ -15,6 +16,9 @@ class Client(models.Model):
         _("название компании"), max_length=255, null=True, blank=True
     )
     phone = models.CharField(_("телефон"), max_length=32, unique=True)
+    # Пароль клиентского портала (хеш). Пусто = ещё не задан: клиент придумает
+    # его при первом входе (вход по телефону). Никогда не хранится в открытом виде.
+    portal_password = models.CharField(_("пароль портала"), max_length=255, blank=True, default="")
     telegram_chat_id = models.CharField(
         _("Telegram chat id"), max_length=64, null=True, blank=True
     )
@@ -43,6 +47,17 @@ class Client(models.Model):
     @property
     def is_telegram_linked(self) -> bool:
         return bool(self.telegram_chat_id)
+
+    @property
+    def has_password(self) -> bool:
+        return bool(self.portal_password)
+
+    def set_password(self, raw: str) -> None:
+        """Store a salted hash of the portal password (never the raw value)."""
+        self.portal_password = make_password(raw)
+
+    def check_password(self, raw: str) -> bool:
+        return bool(self.portal_password) and check_password(raw, self.portal_password)
 
     def __str__(self) -> str:
         return f"{self.display_name} ({self.phone})"

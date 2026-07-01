@@ -10,7 +10,7 @@ import { useUI } from "../../components/UIProvider.jsx";
 
 function ReceiptsTab() {
   const { t } = useTranslation();
-  const { toast } = useUI();
+  const { toast, confirm } = useUI();
   const [rows, setRows] = useState([]);
   const [stats, setStats] = useState(null);
   const [method, setMethod] = useState("");
@@ -18,13 +18,24 @@ function ReceiptsTab() {
   const [search, setSearch] = useState("");
   const [advancingId, setAdvancingId] = useState(null);
   const [paying, setPaying] = useState(null);
+  const [sort, setSort] = useState({ key: "_debt", dir: "desc" });
+
+  function orderingParam() {
+    // Вторичная сортировка по дате (кроме случая, когда уже сортируем по дате).
+    const tail = sort.key !== "created_at" ? ",-created_at" : "";
+    return (sort.dir === "desc" ? "-" : "") + sort.key + tail;
+  }
+
+  function onSort(key) {
+    setSort((s) => (s.key === key ? { key, dir: s.dir === "desc" ? "asc" : "desc" } : { key, dir: "desc" }));
+  }
 
   function load() {
     const params = {};
     if (method) params.payment_method = method;
     if (pstatus) params.payment_status = pstatus;
     if (search) params.search = search;
-    api.get("/sales/receipts/", { params }).then((r) => setRows(r.data.results));
+    api.get("/sales/receipts/", { params: { ...params, ordering: orderingParam() } }).then((r) => setRows(r.data.results));
     api.get("/sales/receipts/stats/", { params }).then((r) => setStats(r.data));
   }
 
@@ -44,11 +55,24 @@ function ReceiptsTab() {
       setAdvancingId(null);
     }
   }
+
+  async function undoPay(r, e) {
+    e?.stopPropagation();
+    if (!(await confirm(t("receipts.confirmUnpay")))) return;
+    try {
+      await api.post(`/sales/receipts/${r.id}/unpay/`, {});
+      load();
+      toast(t("receipts.unpayDone"));
+    } catch (err) {
+      toast(err.response?.data?.detail || t("common.error"), "error");
+    }
+  }
+
   useEffect(() => {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [method, pstatus, search]);
+  }, [method, pstatus, search, sort]);
 
   const columns = [
     { key: "id", label: t("receipts.number"), render: (r) => String(r.id).slice(0, 8) },
@@ -87,29 +111,48 @@ function ReceiptsTab() {
           <span className="muted">—</span>
         ),
     },
-    { key: "total_price", label: t("common.total"), render: (r) => `${r.total_price} сом` },
+    { key: "total_price", label: t("common.total"), sortKey: "total_price", render: (r) => `${r.total_price} сом` },
     {
       key: "debt",
       label: t("receipts.debt"),
-      render: (r) =>
-        Number(r.debt) > 0 ? (
+      sortKey: "_debt",
+      render: (r) => {
+        const hasDebt = Number(r.debt) > 0;
+        const canUndo =
+          (r.payment_status === "PAID" || Number(r.amount_paid) > 0) &&
+          !["REFUNDED", "PARTIALLY_REFUNDED"].includes(r.payment_status) &&
+          r.status !== "CANCELLED";
+        if (!hasDebt && !canUndo) return <span className="muted">0</span>;
+        return (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
-            <span style={{ color: "var(--danger)", fontWeight: 600 }}>{r.debt} сом</span>
-            <button
-              className="secondary"
-              style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
-              onClick={(e) => { e.stopPropagation(); setPaying(r); }}
-            >
-              {t("receipts.pay")}
-            </button>
+            {hasDebt && <span style={{ color: "var(--danger)", fontWeight: 600 }}>{r.debt} сом</span>}
+            {hasDebt && (
+              <button
+                className="secondary"
+                style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
+                onClick={(e) => { e.stopPropagation(); setPaying(r); }}
+              >
+                {t("receipts.pay")}
+              </button>
+            )}
+            {canUndo && (
+              <button
+                className="ghost"
+                style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap", color: "var(--ink-muted)" }}
+                onClick={(e) => undoPay(r, e)}
+                title={t("receipts.unpay")}
+              >
+                ↩ {t("receipts.unpayShort")}
+              </button>
+            )}
           </div>
-        ) : (
-          <span className="muted">0</span>
-        ),
+        );
+      },
     },
     {
       key: "created_at",
       label: t("receipts.date"),
+      sortKey: "created_at",
       render: (r) => new Date(r.created_at).toLocaleString("ru-RU"),
     },
   ];
@@ -150,7 +193,7 @@ function ReceiptsTab() {
           ))}
         </select>
       </div>
-      <DataTable columns={columns} rows={rows} />
+      <DataTable columns={columns} rows={rows} sort={sort} onSort={onSort} />
 
       {paying && (
         <PayDebtModal
