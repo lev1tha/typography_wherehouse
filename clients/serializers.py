@@ -194,10 +194,22 @@ class ClientDetailSerializer(ClientSerializer):
         }
 
     def get_referrals(self, obj):
+        # Реферальный бонус — фикс. сумма за каждого приведённого клиента
+        # (редактируется в Финансах). Считается справочно и только показывается —
+        # в расходы автоматически не списывается (решение заказчика).
+        from finance.models import FinanceSettings
+
+        rate = FinanceSettings.load().referral_bonus
         items = []
         total = Decimal("0")
         for ref in obj.referrals.all():
             ltv = client_ltv(ref)
             total += ltv
             items.append({"id": ref.id, "display_name": ref.display_name, "lifetime_value": ltv})
-        return {"count": len(items), "total_value": total, "list": items}
+        count = len(items)
+        return {
+            "count": count,
+            "total_value": total,
+            "bonus": rate * count,
+            "list": items,
+        }

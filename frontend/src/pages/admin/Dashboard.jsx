@@ -67,11 +67,12 @@ export default function Dashboard() {
     api.get("/audit/dashboard/", { params }).then((r) => setData(r.data)).catch(() => setError(t("common.error")));
     api.get("/audit/client-purchases/", { params: { ordering: "-material_spend" } })
       .then((r) => setClientBuys(r.data)).catch(() => {});
+    // Финотчёт (расходы/вложения/прибыль) тоже слушает период — те же даты.
+    api.get("/finance/report/", { params }).then((r) => setFin(r.data)).catch(() => {});
   }
 
   useEffect(() => {
     api.get("/warehouse/materials/", { params: { ordering: "name" } }).then((r) => setMaterials(r.data.results));
-    api.get("/finance/report/").then((r) => setFin(r.data)).catch(() => {});
   }, []);
 
   useEffect(() => {

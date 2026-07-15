@@ -53,6 +53,12 @@ class FinanceSettings(models.Model):
     salary = models.DecimalField(_("зарплаты за месяц"), max_digits=14, decimal_places=2, default=Decimal("0"))
     fixed_other = models.DecimalField(_("прочие постоянные расходы"), max_digits=14, decimal_places=2, default=Decimal("0"))
     fixed_other_note = models.CharField(_("что входит в прочие"), max_length=500, blank=True, default="")
+    # Реферальная программа
+    referral_bonus = models.DecimalField(
+        _("бонус за приведённого клиента"), max_digits=14, decimal_places=2, default=Decimal("0"),
+        help_text=_("Фикс. сумма за каждого приведённого клиента. Только показывается в "
+                    "карточке клиента — в расходы автоматически НЕ списывается."),
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

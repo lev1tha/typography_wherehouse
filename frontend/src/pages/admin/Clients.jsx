@@ -317,6 +317,22 @@ export default function Clients() {
                 <span className="muted"> · {Number(detail.referrals.total_value).toLocaleString("ru-RU")} сом</span>
               )}
             </label>
+            {Number(detail.referrals?.bonus) > 0 && (
+              <div
+                className="crow"
+                style={{
+                  background: "var(--primary-soft)",
+                  borderRadius: "var(--r-md)",
+                  padding: "8px 12px",
+                  marginBottom: 6,
+                }}
+              >
+                <strong style={{ color: "var(--accent-strong)" }}>{t("clients.referralBonus")}</strong>
+                <strong style={{ color: "var(--accent-strong)" }}>
+                  {Number(detail.referrals.bonus).toLocaleString("ru-RU")} сом
+                </strong>
+              </div>
+            )}
             {detail.referrals?.list?.length ? (
               detail.referrals.list.map((r) => (
                 <div className="crow" key={r.id}>

@@ -103,36 +103,19 @@ class Command(BaseCommand):
         # separate sale line; drop legacy paper/glue recipes.
         cutting.recipes.all().delete()
 
-        # EXTERIOR installation (per letter). Reuse a legacy "Установка" if present
-        # so we don't create a duplicate.
-        exterior = (
-            PrintingService.objects.filter(name="Установка").first()
-            or PrintingService.objects.filter(name="Наружная установка").first()
-            or PrintingService(name="Наружная установка")
-        )
-        exterior.name = "Наружная установка"
-        exterior.kind = PrintingService.Kind.INSTALL_EXTERIOR
-        exterior.rate_per_piece = Decimal("150")
-        exterior.save()
-        # Drop any duplicate exterior installs (deactivate if they have sales).
-        for dup in PrintingService.objects.filter(name="Наружная установка").exclude(pk=exterior.pk):
-            if dup.transaction_items.exists():
-                dup.is_active = False
-                dup.save()
-            else:
-                dup.recipes.all().delete()
-                dup.delete()
+        # Установка (наружная/внутренняя) убрана из системы по решению заказчика.
+        # Существующие услуги установки деактивируем, чтобы они пропали из кассы,
+        # «Цен и услуг» и заявок, но НЕ удаляем — иначе порвём историю чеков
+        # (TransactionItem.service защищён PROTECT).
+        PrintingService.objects.filter(
+            kind__in=[
+                PrintingService.Kind.INSTALL_EXTERIOR,
+                PrintingService.Kind.INSTALL_INTERIOR,
+                PrintingService.Kind.INSTALLATION,
+            ]
+        ).update(is_active=False)
 
-        # INTERIOR installation: priced per кв.м + the chosen material (vinyl/substrate).
-        interior, _ = PrintingService.objects.get_or_create(
-            name="Внутренняя установка",
-            defaults={"kind": PrintingService.Kind.INSTALL_INTERIOR},
-        )
-        interior.kind = PrintingService.Kind.INSTALL_INTERIOR
-        interior.rate_flat = Decimal("100")
-        interior.save()
-
-        # A self-adhesive roll material for interior mounting demos.
+        # A self-adhesive roll material (was used for interior mounting demos).
         film, _ = Material.objects.get_or_create(
             name="Самоклейка",
             defaults={"category": "Плёнка", "unit": Material.Unit.SQM,

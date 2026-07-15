@@ -50,6 +50,31 @@ def _material_category(material):
     return "other"
 
 
+def _parse_date(value):
+    """'YYYY-MM-DD' → date, иначе None (пустой/битый ввод = без фильтра)."""
+    try:
+        return date.fromisoformat(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _prorate_factor(d_from, d_to):
+    """Доля «месяца» в выбранном периоде [d_from, d_to] включительно: за каждый
+    день берём 1/дней_в_его_месяце и суммируем. Полный календарный месяц → 1.0,
+    половина месяца → ~0.5, период из нескольких месяцев → сумма их долей. Нужна,
+    чтобы постоянные (месячные) расходы — аренда/коммуналка/зарплата — за неполный
+    период показывались пропорционально, как в дневном графике, а не целиком."""
+    factor = Decimal("0")
+    y, m = d_from.year, d_from.month
+    while (y, m) <= (d_to.year, d_to.month):
+        dim = calendar.monthrange(y, m)[1]
+        lo = max(d_from, date(y, m, 1))
+        hi = min(d_to, date(y, m, dim))
+        factor += Decimal((hi - lo).days + 1) / Decimal(dim)
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return factor
+
+
 class ExpenseViewSet(viewsets.ModelViewSet):
     """Variable costs / investments (фреза, оборудование, улучшение цеха, прочее).
     Admin-only. Listed on the «Расходники/Инвестиции» page; feeds the report."""
@@ -93,13 +118,49 @@ class FinanceReportView(APIView):
     def get(self, request):
         s = FinanceSettings.load()
 
+        # Необязательный период (date_from/date_to — те же имена, что в
+        # /audit/dashboard/) двигает ВСЕ денежные показатели: выручку, покупки,
+        # вложения, резку, долг, прибыль. Границы включительные.
+        d_from = _parse_date(request.query_params.get("date_from"))
+        d_to = _parse_date(request.query_params.get("date_to"))
+
+        def by_created(qs):
+            if d_from:
+                qs = qs.filter(created_at__date__gte=d_from)
+            if d_to:
+                qs = qs.filter(created_at__date__lte=d_to)
+            return qs
+
+        def by_spent(qs):
+            if d_from:
+                qs = qs.filter(spent_at__gte=d_from)
+            if d_to:
+                qs = qs.filter(spent_at__lte=d_to)
+            return qs
+
         # Раздел «Материалы» убран (транспорт и так входит в цену закупки —
         # см. поступление на Складе). Расходы = постоянные + переменные (покупки).
         # Зарплаты — ручное поле (постоянные), FinanceSettings.salary.
-        total_fixed = s.rent + s.utilities + s.internet + s.salary + s.fixed_other
+        # Постоянные расходы — месячные суммы без даты; за выбранный период берём
+        # их долю (полный месяц = 1.0), иначе — полную месячную сумму.
+        factor = (
+            _prorate_factor(d_from, d_to)
+            if (d_from and d_to and d_to >= d_from)
+            else Decimal("1")
+        )
+        fx = {
+            "rent": s.rent * factor,
+            "utilities": s.utilities * factor,
+            "internet": s.internet * factor,
+            "salary": s.salary * factor,
+            "other": s.fixed_other * factor,
+        }
+        total_fixed = fx["rent"] + fx["utilities"] + fx["internet"] + fx["salary"] + fx["other"]
 
         def cat(category):
-            return Expense.objects.filter(category=category).aggregate(v=_SUM("amount"))["v"]
+            return by_spent(
+                Expense.objects.filter(category=category)
+            ).aggregate(v=_SUM("amount"))["v"]
 
         var = {
             "cutter": cat(Expense.Category.CUTTER),
@@ -119,7 +180,7 @@ class FinanceReportView(APIView):
         total_expenses = total_fixed + operating_variable
 
         # Выручка = оплаченные чеки (полная сумма) + предоплаты по открытым заказам.
-        live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED)
+        live = by_created(Receipt.objects.exclude(status=Receipt.Status.CANCELLED))
         revenue_paid = live.filter(payment_status=Receipt.PaymentStatus.PAID).aggregate(
             v=_SUM("total_price")
         )["v"]
@@ -138,12 +199,13 @@ class FinanceReportView(APIView):
         # к категории материала этого чека (Форекс / Алюкобонд / Акрил / Прочее).
         cutting = {"total": Decimal("0"), "forex": Decimal("0"), "alukobond": Decimal("0"), "acryl": Decimal("0"), "other": Decimal("0")}
         cut_receipts = (
-            Receipt.objects.filter(
-                items__type=TransactionItem.Type.SERVICE,
-                items__service__kind="CUTTING",
-                items__is_returned=False,
+            by_created(
+                Receipt.objects.filter(
+                    items__type=TransactionItem.Type.SERVICE,
+                    items__service__kind="CUTTING",
+                    items__is_returned=False,
+                ).exclude(status=Receipt.Status.CANCELLED)
             )
-            .exclude(status=Receipt.Status.CANCELLED)
             .distinct()
             .prefetch_related("items__material", "items__service")
         )
@@ -174,12 +236,12 @@ class FinanceReportView(APIView):
         return Response(
             {
                 "fixed": {
-                    "rent": s.rent,
-                    "utilities": s.utilities,
+                    "rent": fx["rent"],
+                    "utilities": fx["utilities"],
                     "utilities_note": s.utilities_note,
-                    "internet": s.internet,
-                    "salary": s.salary,
-                    "other": s.fixed_other,
+                    "internet": fx["internet"],
+                    "salary": fx["salary"],
+                    "other": fx["other"],
                     "other_note": s.fixed_other_note,
                     "total": total_fixed,
                 },
@@ -194,6 +256,10 @@ class FinanceReportView(APIView):
                 "client_debt": client_debt,
                 "profit": revenue - total_expenses,
                 "cutting": cutting,
+                "period": {
+                    "from": d_from.isoformat() if d_from else None,
+                    "to": d_to.isoformat() if d_to else None,
+                },
             }
         )
 

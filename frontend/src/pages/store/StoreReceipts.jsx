@@ -299,6 +299,15 @@ export default function StoreReceipts() {
             <span className="k">{t("receipts.method")}</span>
             <span>{t(`checkout.${open.payment_method.toLowerCase()}`)}</span>
           </div>
+          {open.cashier_name && (
+            <div className="crow">
+              <span className="k">{t("receipts.cashier")}</span>
+              <span>
+                {open.cashier_name}
+                {open.cashier_role && <span className="muted"> · {open.cashier_role}</span>}
+              </span>
+            </div>
+          )}
           {open.has_service && (
             <div className="crow">
               <span className="k">{t("receipts.fulfillment")}</span>

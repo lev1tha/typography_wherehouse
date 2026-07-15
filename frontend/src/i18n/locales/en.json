@@ -191,6 +191,7 @@
     "referralsCol": "Referrals",
     "referredByLabel": "Referred by",
     "referrals": "Referred clients",
+    "referralBonus": "Referral bonus",
     "noReferrer": "nobody",
     "referralLocked": "locked, cannot be changed",
     "requestReferralChange": "Request referrer change",
@@ -424,7 +425,10 @@
     "investmentsTitle": "Investments (excluded from profit)",
     "investmentsHint": "Equipment and workshop improvements are investments — they don't reduce profit.",
     "investmentsTotal": "Total investments",
-    "filterMaterial": "Material"
+    "filterMaterial": "Material",
+    "referralTitle": "Referral bonus",
+    "referralHint": "Fixed amount per referred client. Shown in the client card; not added to expenses automatically.",
+    "referralBonus": "Bonus per referral (som)"
   },
   "expenses": {
     "title": "Purchases & investments",

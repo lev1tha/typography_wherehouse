@@ -36,6 +36,7 @@ class FinanceSettingsSerializer(serializers.ModelSerializer):
             "salary",
             "fixed_other",
             "fixed_other_note",
+            "referral_bonus",
             "updated_at",
         ]
         read_only_fields = ["updated_at"]

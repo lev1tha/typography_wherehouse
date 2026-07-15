@@ -175,6 +175,12 @@ export default function Finance({ embedded = false }) {
       )}
 
       <div className="card" style={{ marginTop: 16 }}>
+        <h3>{t("finance.referralTitle")}</h3>
+        <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.referralHint")}</p>
+        {editRow(t("finance.referralBonus"), "referral_bonus")}
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
         <h3>{t("finance.cuttingTitle")}</h3>
         <div className="stat-grid">
           <Stat label={t("finance.cuttingTotal")} value={som(report.cutting?.total)} />
