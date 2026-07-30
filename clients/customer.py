@@ -109,6 +109,11 @@ class CustomerLoginView(APIView):
     Шаг 2: `phone` + `password`. Если пароля не было — задаём его; если был —
     проверяем. Успех → выдаём клиентский токен. Так чужой номер уже не откроет
     заказы: нужен ещё и пароль, который клиент задал себе сам.
+
+    В поле `password` также принимается одноразовый код входа, который
+    персонал выдал клиенту лично у прилавка (см. `ClientViewSet.issue_login_code`) —
+    он работает независимо от того, задан ли уже пароль, и гасится после
+    первого использования.
     """
 
     authentication_classes = []
@@ -126,10 +131,25 @@ class CustomerLoginView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Одноразовый код, который персонал выдал клиенту лично (см.
+        # ClientViewSet.issue_login_code) — работает вместо пароля, независимо
+        # от того, задан ли уже свой пароль. Одноразовый: гасится сразу же.
+        if password and client.check_login_code(password):
+            client.clear_login_code()
+            client.save(update_fields=["login_code_expires_at"])
+            return self._token_response(client)
+
         if not client.has_password:
             # Первый вход — клиент задаёт себе пароль.
             if not password:
                 return Response({"status": "set_password", "name": client.display_name})
+            if client.issued_login_code_matches(password):
+                # Код уже был в ходу (сейчас или раньше) — не даём тихо
+                # превратить одноразовый код в постоянный пароль.
+                return Response(
+                    {"detail": "Этот код уже использован. Попросите новый код или задайте свой пароль."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if len(password) < MIN_PORTAL_PASSWORD:
                 return Response(
                     {"detail": f"Пароль минимум {MIN_PORTAL_PASSWORD} символа."},

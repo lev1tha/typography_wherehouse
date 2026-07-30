@@ -16,6 +16,7 @@ export default function Clients() {
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState(null);
   const [reqForm, setReqForm] = useState({ referred_by: "", reason: "" });
+  const [issuedCode, setIssuedCode] = useState(null); // { code, expires_in_minutes }
 
   function load() {
     const params = search ? { search } : {};
@@ -32,6 +33,15 @@ export default function Clients() {
     const { data } = await api.get(`/clients/clients/${c.id}/`);
     setDetail(data);
     setReqForm({ referred_by: "", reason: "" });
+  }
+
+  async function issueLoginCode() {
+    try {
+      const { data } = await api.post(`/clients/clients/${detail.id}/issue-login-code/`, {});
+      setIssuedCode(data);
+    } catch {
+      toast(t("common.error"), "error");
+    }
   }
 
   async function resetPassword() {
@@ -199,6 +209,13 @@ export default function Clients() {
               ) : (
                 <span className="muted">{t("clients.passNotSet")}</span>
               )}
+              <button
+                className="ghost"
+                style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-strong)" }}
+                onClick={issueLoginCode}
+              >
+                {t("clients.issueCode")}
+              </button>
             </span>
           </div>
 
@@ -346,6 +363,17 @@ export default function Clients() {
               <span className="muted">{t("common.empty")}</span>
             )}
           </div>
+        </Modal>
+      )}
+
+      {issuedCode && (
+        <Modal title={t("clients.codeModalTitle")} onClose={() => setIssuedCode(null)}>
+          <p style={{ fontSize: 40, fontWeight: 700, letterSpacing: 4, textAlign: "center", margin: "8px 0" }}>
+            {issuedCode.code}
+          </p>
+          <p className="muted" style={{ textAlign: "center" }}>
+            {t("clients.codeHint", { min: issuedCode.expires_in_minutes })}
+          </p>
         </Modal>
       )}
     </>

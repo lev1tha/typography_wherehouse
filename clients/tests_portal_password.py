@@ -116,3 +116,97 @@ class CustomerPasswordFlowTests(APITestCase):
         self.assertEqual(r.status_code, 200, r.data)
         self.assertIn("has_password", r.data)
         self.assertFalse(r.data["has_password"])
+
+
+class CustomerLoginCodeTests(APITestCase):
+    """Одноразовый код входа, который персонал выдаёт клиенту лично (у
+    прилавка) — альтернатива паролю, независимо от того, задан ли он."""
+
+    def setUp(self):
+        self.customer = Client.objects.create(
+            type=Client.Type.PHYSICAL, full_name="Нурбек", phone="+996700555666"
+        )
+        self.staff = User.objects.create_user(
+            username="store_code", password="x", role=User.Role.STOREKEEPER
+        )
+
+    def _login(self, phone, password=None):
+        body = {"phone": phone}
+        if password is not None:
+            body["password"] = password
+        return self.client.post(LOGIN, body, format="json")
+
+    def _issue_code(self):
+        self.client.force_authenticate(self.staff)
+        r = self.client.post(
+            f"/api/clients/clients/{self.customer.id}/issue-login-code/", {}, format="json"
+        )
+        self.client.force_authenticate(None)
+        return r
+
+    def test_requires_staff_auth(self):
+        r = self.client.post(
+            f"/api/clients/clients/{self.customer.id}/issue-login-code/", {}, format="json"
+        )
+        self.assertIn(r.status_code, (401, 403))
+
+    def test_issued_code_is_six_digits_and_hashed_in_db(self):
+        r = self._issue_code()
+        self.assertEqual(r.status_code, 200, r.data)
+        code = r.data["code"]
+        self.assertEqual(len(code), 6)
+        self.assertTrue(code.isdigit())
+        self.assertEqual(r.data["expires_in_minutes"], 15)
+        self.customer.refresh_from_db()
+        self.assertNotEqual(self.customer.login_code, code)  # хранится хешем
+        self.assertTrue(self.customer.check_login_code(code))
+
+    def test_login_with_code_succeeds_without_a_password(self):
+        code = self._issue_code().data["code"]
+        r = self._login("+996700555666", code)
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertIn("access", r.data)
+        self.assertEqual(r.data["client"]["id"], self.customer.id)
+        # Клиент по-прежнему без своего пароля — код его не устанавливает.
+        self.customer.refresh_from_db()
+        self.assertFalse(self.customer.has_password)
+
+    def test_login_with_code_works_alongside_existing_password(self):
+        self.customer.set_password("realpass1")
+        self.customer.save()
+        code = self._issue_code().data["code"]
+        r = self._login("+996700555666", code)
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertIn("access", r.data)
+
+    def test_code_is_single_use(self):
+        code = self._issue_code().data["code"]
+        first = self._login("+996700555666", code)
+        self.assertIn("access", first.data)
+        second = self._login("+996700555666", code)
+        self.assertNotIn("access", second.data)
+
+    def test_expired_code_is_rejected(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        code = self._issue_code().data["code"]
+        self.customer.refresh_from_db()
+        self.customer.login_code_expires_at = timezone.now() - timedelta(minutes=1)
+        self.customer.save(update_fields=["login_code_expires_at"])
+        # С паролем клиент уже определился заранее, поэтому истёкший код не
+        # проходит и падает в обычную проверку пароля — не тихий вход.
+        self.customer.set_password("realpass1")
+        self.customer.save()
+        r = self._login("+996700555666", code)
+        self.assertEqual(r.status_code, 400, r.data)
+
+    def test_wrong_code_does_not_grant_access_when_password_already_set(self):
+        self.customer.set_password("realpass1")
+        self.customer.save()
+        issued = self._issue_code().data["code"]
+        wrong = "000000" if issued != "000000" else "111111"
+        r = self._login("+996700555666", wrong)
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertNotIn("access", r.data)

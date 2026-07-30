@@ -216,6 +216,9 @@
     "resetPass": "Reset",
     "resetPassConfirm": "Reset the client's password? They'll set a new one on next login.",
     "resetPassDone": "Password reset",
+    "issueCode": "Issue login code",
+    "codeModalTitle": "Code for the client",
+    "codeHint": "Tell the client this code in person — they'll enter it instead of a password. One-time use, valid for {{min}} min.",
     "ordersList": "Client's orders"
   },
   "checkout": {

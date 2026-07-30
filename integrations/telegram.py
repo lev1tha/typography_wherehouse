@@ -47,7 +47,7 @@ def send_customer_receipt(client, receipt, lines_text: str) -> bool:
     if not client or not client.telegram_chat_id:
         return False
     text = (
-        f"🧾 <b>Ваш чек</b> №{receipt.id}\n\n"
+        f"🧾 <b>Ваш чек</b> №{receipt.order_number or receipt.id}\n\n"
         f"{lines_text}\n\n"
         f"Итого: <b>{receipt.total_price}</b> сом\n"
         f"Оплата: {receipt.get_payment_method_display()} — "

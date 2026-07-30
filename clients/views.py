@@ -1,3 +1,5 @@
+import secrets
+
 from django.db.models import Value
 from django.db.models.functions import Coalesce, Lower, NullIf
 from django.utils import timezone
@@ -9,7 +11,7 @@ from rest_framework.response import Response
 from accounts.permissions import IsAdmin
 from audit.models import AuditLog
 
-from .models import Client, ReferralChangeRequest
+from .models import LOGIN_CODE_TTL_MINUTES, Client, ReferralChangeRequest
 from .serializers import (
     ClientDetailSerializer,
     ClientSerializer,
@@ -74,6 +76,19 @@ class ClientViewSet(viewsets.ModelViewSet):
         client.save(update_fields=["portal_password"])
         AuditLog.record(request.user, f"Сброс пароля клиента {client.display_name}")
         return Response({"ok": True, "has_password": False})
+
+    @action(detail=True, methods=["post"], url_path="issue-login-code", permission_classes=[IsAuthenticated])
+    def issue_login_code(self, request, pk=None):
+        """Выдать клиенту одноразовый код входа в портал — персонал называет его
+        клиенту лично (не через SMS/Telegram), тот вводит код вместо пароля.
+        Полезно, если клиент у прилавка и забыл/не задавал пароль. Код
+        одноразовый и живёт ограниченное время (см. LOGIN_CODE_TTL_MINUTES)."""
+        client = self.get_object()
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        client.set_login_code(code)
+        client.save(update_fields=["login_code", "login_code_expires_at"])
+        AuditLog.record(request.user, f"Выдан код входа клиенту «{client.display_name}»")
+        return Response({"code": code, "expires_in_minutes": LOGIN_CODE_TTL_MINUTES})
 
     @action(
         detail=True,
