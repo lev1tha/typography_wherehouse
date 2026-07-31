@@ -31,7 +31,9 @@
     "nextMonth": "Next month",
     "next": "Next",
     "saved": "Saved",
-    "reset": "Reset"
+    "reset": "Reset",
+    "month": "Month",
+    "allMonths": "All months"
   },
   "nav": {
     "dashboard": "Overview",
@@ -223,7 +225,10 @@
     "filterDay": "Specific day",
     "periodHint": "Showing clients who ordered in the selected period. “Orders” is for that period; debt is current.",
     "ordersShowAll": "Show all ({{count}})",
-    "ordersCollapse": "Collapse"
+    "ordersCollapse": "Collapse",
+    "minOrders": "Orders from",
+    "debtFilter": "Debt",
+    "onlyDebtors": "Debtors only"
   },
   "checkout": {
     "outOfStock": "Out of stock",

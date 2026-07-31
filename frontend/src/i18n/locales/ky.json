@@ -31,7 +31,9 @@
     "nextMonth": "Кийинки ай",
     "next": "Кийинки",
     "saved": "Сакталды",
-    "reset": "Тазалоо"
+    "reset": "Тазалоо",
+    "month": "Ай",
+    "allMonths": "Бардык айлар"
   },
   "nav": {
     "dashboard": "Жалпы көрүнүш",
@@ -223,7 +225,10 @@
     "filterDay": "Тактап күн",
     "periodHint": "Тандалган мезгилде заказ кылган кардарлар. «Заказдар» — ошол мезгил үчүн, карыз — азыркы абал.",
     "ordersShowAll": "Баарын көрсөтүү ({{count}})",
-    "ordersCollapse": "Жыйноо"
+    "ordersCollapse": "Жыйноо",
+    "minOrders": "Заказдар … дан",
+    "debtFilter": "Карыз",
+    "onlyDebtors": "Карызы барлар гана"
   },
   "checkout": {
     "outOfStock": "Складда жок",

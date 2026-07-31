@@ -25,6 +25,8 @@ export default function Clients() {
   const [day, setDay] = useState(""); // конкретный день внутри месяца
   const [sort, setSort] = useState({ key: "sort_name", dir: "asc" });
   const [showAllOrders, setShowAllOrders] = useState(false);
+  const [onlyDebt, setOnlyDebt] = useState(false);
+  const [minOrders, setMinOrders] = useState("");
 
   // День важнее месяца: выбран день — смотрим ровно его, иначе весь месяц.
   function periodParams() {
@@ -42,6 +44,8 @@ export default function Clients() {
     const params = {
       ...(search ? { search } : {}),
       ...periodParams(),
+      ...(onlyDebt ? { has_debt: 1 } : {}),
+      ...(Number(minOrders) > 0 ? { min_orders: Number(minOrders) } : {}),
       ordering: (sort.dir === "desc" ? "-" : "") + sort.key,
     };
     api.get("/clients/clients/", { params }).then((r) => setClients(r.data.results));
@@ -51,7 +55,7 @@ export default function Clients() {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, period.year, period.month, day, sort.key, sort.dir]);
+  }, [search, period.year, period.month, day, onlyDebt, minOrders, sort.key, sort.dir]);
 
   function onSort(key) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "desc" }));
@@ -204,8 +208,36 @@ export default function Clients() {
           <label>{t("clients.filterDay")}</label>
           <input type="date" value={day} onChange={(e) => setDay(e.target.value)} />
         </div>
-        {(day || period.month) && (
-          <button className="ghost" onClick={() => { setDay(""); setPeriod({ ...period, month: null }); }}>
+        <div className="field" style={{ margin: 0, width: 130 }}>
+          <label>{t("clients.minOrders")}</label>
+          <input
+            type="number"
+            min="0"
+            value={minOrders}
+            onChange={(e) => setMinOrders(e.target.value)}
+            placeholder="0"
+          />
+        </div>
+        <div className="field" style={{ margin: 0 }}>
+          <label>{t("clients.debtFilter")}</label>
+          <button
+            type="button"
+            className={onlyDebt ? "" : "secondary"}
+            onClick={() => setOnlyDebt((v) => !v)}
+          >
+            {t("clients.onlyDebtors")}
+          </button>
+        </div>
+        {(day || period.month || onlyDebt || minOrders) && (
+          <button
+            className="ghost"
+            onClick={() => {
+              setDay("");
+              setPeriod({ ...period, month: null });
+              setOnlyDebt(false);
+              setMinOrders("");
+            }}
+          >
             {t("common.reset")}
           </button>
         )}

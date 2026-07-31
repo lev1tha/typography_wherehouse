@@ -141,6 +141,18 @@ class ClientViewSet(viewsets.ModelViewSet):
                 recent = recent.filter(created_at__date__lte=d_to)
             qs = qs.filter(Exists(recent))
 
+        # Фильтр «только должники» — по той же аннотации, что и сортировка.
+        if self.request.query_params.get("has_debt") in ("1", "true", "True"):
+            qs = qs.filter(debt__gt=0)
+
+        # Фильтр «заказов от N». Кривое значение игнорируем, а не роняем список.
+        try:
+            min_orders = int(self.request.query_params.get("min_orders") or 0)
+        except (TypeError, ValueError):
+            min_orders = 0
+        if min_orders > 0:
+            qs = qs.filter(orders_count__gte=min_orders)
+
         search = (self.request.query_params.get("search") or "").strip().lower()
         if search:
             ids = [

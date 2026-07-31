@@ -31,7 +31,9 @@
     "nextMonth": "Следующий месяц",
     "next": "Далее",
     "saved": "Сохранено",
-    "reset": "Сбросить"
+    "reset": "Сбросить",
+    "month": "Месяц",
+    "allMonths": "Все месяцы"
   },
   "nav": {
     "dashboard": "Обзор",
@@ -223,7 +225,10 @@
     "filterDay": "Конкретный день",
     "periodHint": "Показаны клиенты, заказывавшие в выбранный период. «Заказов» — за этот период, долг — на сейчас.",
     "ordersShowAll": "Показать все ({{count}})",
-    "ordersCollapse": "Свернуть"
+    "ordersCollapse": "Свернуть",
+    "minOrders": "Заказов от",
+    "debtFilter": "Долг",
+    "onlyDebtors": "Только должники"
   },
   "checkout": {
     "outOfStock": "Нет в наличии",

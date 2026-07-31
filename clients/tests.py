@@ -274,3 +274,18 @@ class ClientListFilteringTests(APITestCase):
         # Без периода — вся история.
         full = self.client.get(f"{self.URL}{self.a.id}/").data
         self.assertEqual(len(full["orders"]), 2)
+
+    def test_filter_only_debtors(self):
+        rows = self.client.get(self.URL, {"has_debt": 1}).data["results"]
+        self.assertEqual([x["display_name"] for x in rows], ["Анара"])
+
+    def test_filter_min_orders(self):
+        rows = self.client.get(self.URL, {"min_orders": 2}).data["results"]
+        self.assertEqual([x["display_name"] for x in rows], ["Анара"])
+        # Порог выше, чем есть у всех — пусто, но без ошибки.
+        self.assertEqual(self.client.get(self.URL, {"min_orders": 99}).data["results"], [])
+
+    def test_broken_min_orders_ignored_not_500(self):
+        r = self.client.get(self.URL, {"min_orders": "abc"})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(len(r.data["results"]), 2)
