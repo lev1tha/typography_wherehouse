@@ -1,0 +1,62 @@
+# Прод-стек: Django (gunicorn) + PostgreSQL.
+# nginx НЕ здесь — он живёт на хосте (/etc/nginx/sites-available/chpucenter.com)
+# и проксирует на 127.0.0.1:8001, а статику/медиа/фронтенд отдаёт напрямую
+# из /srv/chpucenter/*.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-chpu}
+      POSTGRES_USER: ${POSTGRES_USER:-chpu}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задайте в .env.prod}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Наружу не публикуем: база доступна только контейнеру web по внутренней
+    # сети compose. Для psql заходим через `docker compose exec db psql`.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chpu} -d ${POSTGRES_DB:-chpu}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build: .
+    restart: unless-stopped
+    env_file: .env.prod
+    depends_on:
+      db:
+        condition: service_healthy
+    # Слушаем только localhost — снаружи в контейнер попасть можно лишь через
+    # nginx на хосте.
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      # Хостовые каталоги, из которых nginx раздаёт файлы напрямую.
+      - /srv/chpucenter/static:/app/staticfiles
+      - /srv/chpucenter/media:/app/media
+      - /srv/chpucenter/frontend:/app/frontend_public
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/token/ -o /dev/null -X POST || [ $? -eq 22 ]"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Телеграм-бот клиентов (long polling). Включать, когда появится токен:
+  # docker compose -f docker-compose.prod.yml --profile bot up -d
+  customer-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env.prod
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles: ["bot"]
+    command: ["python", "manage.py", "run_customer_bot"]
+
+volumes:
+  pgdata:

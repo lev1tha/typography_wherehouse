@@ -10,6 +10,8 @@ db.sqlite3
 /media/
 /staticfiles/
 .env
+# Прод-секреты (пароль базы, SECRET_KEY, токены) — только на сервере.
+.env.prod
 
 # Frontend
 node_modules/

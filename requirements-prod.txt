@@ -1,0 +1,10 @@
+# Зависимости, нужные только на проде (локально для разработки не требуются —
+# там SQLite и runserver). Ставится поверх основного файла:
+#     pip install -r requirements-prod.txt
+-r requirements.txt
+
+# WSGI-сервер, которым Django отдаётся наружу вместо runserver.
+gunicorn>=23.0,<24
+
+# Драйвер PostgreSQL (psycopg 3; binary — чтобы не собирать из исходников).
+psycopg[binary]>=3.2,<4

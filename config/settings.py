@@ -14,6 +14,14 @@ env = environ.Env(
     SECRET_KEY=(str, "django-insecure-change-me-in-production"),
     ALLOWED_HOSTS=(list, ["*"]),
     CORS_ALLOWED_ORIGINS=(list, ["http://localhost:5173", "http://127.0.0.1:5173"]),
+    # Прод: домены, которым доверяем CSRF-проверку (со схемой), напр.
+    # https://chpucenter.com,https://www.chpucenter.com
+    CSRF_TRUSTED_ORIGINS=(list, []),
+    # Пусто = SQLite (разработка). В проде — postgres://user:pass@db:5432/имя
+    DATABASE_URL=(str, ""),
+    # Редирект на HTTPS средствами Django. По умолчанию выключен: в нашей схеме
+    # 301 делает nginx, а Django стоит за прокси (двойной редирект = петля).
+    SECURE_SSL_REDIRECT=(bool, False),
     # Integrations — real tokens are read from the environment (.env / shell).
     TELEGRAM_STAFF_BOT_TOKEN=(str, ""),
     TELEGRAM_STAFF_CHAT_IDS=(list, []),
@@ -95,13 +103,20 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 
-# Database
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+# Database — SQLite для разработки; в проде задаём DATABASE_URL (PostgreSQL).
+if env("DATABASE_URL"):
+    DATABASES = {"default": env.db("DATABASE_URL")}
+    # Держим соединение открытым между запросами (иначе на каждый запрос новый
+    # коннект к Postgres) и проверяем его живость перед использованием.
+    DATABASES["default"]["CONN_MAX_AGE"] = 60
+    DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
     }
-}
 
 
 # Custom user model — roles Admin / Storekeeper live here.
@@ -183,3 +198,25 @@ SITE_BASE_URL = env("SITE_BASE_URL")
 # Extra password protecting the Finance & detailed-analytics screens (on top of
 # the admin login). Change it in .env via FINANCE_PASSWORD=...
 FINANCE_PASSWORD = env("FINANCE_PASSWORD")
+
+
+# --- Production hardening (действует только при DEBUG=False) ---
+# Схема запроса приходит от nginx (а до него — от Cloudflare) заголовком
+# X-Forwarded-Proto. Без этого Django считает соединение незащищённым и,
+# например, ставит куки без флага secure и строит http-ссылки.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+CSRF_TRUSTED_ORIGINS = env("CSRF_TRUSTED_ORIGINS")
+
+if not DEBUG:
+    SECURE_SSL_REDIRECT = env("SECURE_SSL_REDIRECT")
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_REFERRER_POLICY = "same-origin"
+    X_FRAME_OPTIONS = "DENY"
+    # HSTS включаем осознанно: браузер запомнит «только https» на год. Ставить
+    # после того, как убедились, что сайт открывается по https без сюрпризов.
+    SECURE_HSTS_SECONDS = env.int("SECURE_HSTS_SECONDS", default=0)
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
