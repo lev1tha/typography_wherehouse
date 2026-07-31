@@ -25,6 +25,20 @@ print("База так и не ответила за 60 секунд — пре�
 sys.exit(1)
 PY
 
+# Каталоги примонтированы с хоста и могли остаться во владении root — тогда
+# collectstatic падает длинным трейсбеком. Проверяем заранее и говорим прямо,
+# что делать.
+for dir in /app/staticfiles /app/media /app/frontend_public; do
+    if [ ! -w "$dir" ]; then
+        echo ""
+        echo "ОШИБКА: нет прав на запись в $dir"
+        echo "Каталоги на хосте принадлежат root, а контейнер работает от uid 1000."
+        echo "Выполните на сервере:  chown -R 1000:1000 /srv/chpucenter"
+        echo ""
+        exit 1
+    fi
+done
+
 echo "→ Миграции…"
 python manage.py migrate --noinput
 

@@ -33,6 +33,11 @@ systemctl enable --now docker nginx
 
 ```bash
 mkdir -p /srv/chpucenter/{static,media,frontend}
+
+# Контейнер работает от непривилегированного пользователя с uid 1000. Каталоги
+# создаются под root, и без chown приложение не сможет в них писать —
+# collectstatic упадёт с «Permission denied».
+chown -R 1000:1000 /srv/chpucenter
 ```
 
 Файрвол — наружу только SSH и веб:
