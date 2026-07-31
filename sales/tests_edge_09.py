@@ -212,7 +212,7 @@ class EdgeRolesTests(APITestCase):
             {"phone": "+996 (700) 00-00-01"}, format="json",
         )
         self.assertEqual(r.status_code, 200, getattr(r, "data", None))
-        # Нормализованный телефон нашёл клиента; пароль ещё не задан → система
-        # просит его придумать (первый вход).
-        self.assertEqual(r.data.get("status"), "set_password")
+        # Нормализованный телефон нашёл клиента; пароль ещё не выдан админом
+        # → система отправляет к администратору.
+        self.assertEqual(r.data.get("status"), "no_password")
         self.assertEqual(r.data.get("name"), self.client_a.display_name)

@@ -20,7 +20,7 @@ export default function Clients() {
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState(null);
   const [reqForm, setReqForm] = useState({ referred_by: "", reason: "" });
-  const [issuedCode, setIssuedCode] = useState(null); // { code, expires_in_minutes }
+  const [issuedPassword, setIssuedPassword] = useState(null); // показывается один раз
   const [period, setPeriod] = useState({ year: new Date().getFullYear(), month: null });
   const [day, setDay] = useState(""); // конкретный день внутри месяца
   const [sort, setSort] = useState({ key: "sort_name", dir: "asc" });
@@ -68,22 +68,15 @@ export default function Clients() {
     setReqForm({ referred_by: "", reason: "" });
   }
 
-  async function issueLoginCode() {
+  // Пароль кабинета выдаёт админ и диктует клиенту. Показывается один раз:
+  // в базе только хеш, посмотреть повторно нельзя — можно выдать новый.
+  async function issuePassword() {
+    if (detail.has_password && !(await confirm(t("clients.reissuePassConfirm")))) return;
     try {
-      const { data } = await api.post(`/clients/clients/${detail.id}/issue-login-code/`, {});
-      setIssuedCode(data);
-    } catch {
-      toast(t("common.error"), "error");
-    }
-  }
-
-  async function resetPassword() {
-    if (!(await confirm(t("clients.resetPassConfirm")))) return;
-    try {
-      await api.post(`/clients/clients/${detail.id}/reset-password/`, {});
-      const { data } = await api.get(`/clients/clients/${detail.id}/`);
-      setDetail(data);
-      toast(t("clients.resetPassDone"));
+      const { data } = await api.post(`/clients/clients/${detail.id}/set-password/`, {});
+      setIssuedPassword(data.password);
+      const fresh = await api.get(`/clients/clients/${detail.id}/`);
+      setDetail(fresh.data);
     } catch {
       toast(t("common.error"), "error");
     }
@@ -284,26 +277,21 @@ export default function Clients() {
             <span className="k">{t("clients.portalPass")}</span>
             <span className="row" style={{ gap: 8, alignItems: "center", margin: 0 }}>
               {detail.has_password ? (
-                <>
-                  <span className="badge ok">{t("clients.passSet")}</span>
-                  <button
-                    className="ghost"
-                    style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-strong)" }}
-                    onClick={resetPassword}
-                  >
-                    {t("clients.resetPass")}
-                  </button>
-                </>
+                <span className="badge ok">{t("clients.passSet")}</span>
               ) : (
                 <span className="muted">{t("clients.passNotSet")}</span>
               )}
-              <button
-                className="ghost"
-                style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-strong)" }}
-                onClick={issueLoginCode}
-              >
-                {t("clients.issueCode")}
-              </button>
+              {/* Выдавать пароль может только админ — складовщик видит статус. */}
+              {isAdmin && (
+                <button
+                  type="button"
+                  className="ghost"
+                  style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-strong)" }}
+                  onClick={issuePassword}
+                >
+                  {detail.has_password ? t("clients.reissuePass") : t("clients.issuePass")}
+                </button>
+              )}
             </span>
           </div>
 
@@ -470,14 +458,12 @@ export default function Clients() {
         </Modal>
       )}
 
-      {issuedCode && (
-        <Modal title={t("clients.codeModalTitle")} onClose={() => setIssuedCode(null)}>
+      {issuedPassword && (
+        <Modal title={t("clients.passModalTitle")} onClose={() => setIssuedPassword(null)}>
           <p style={{ fontSize: 40, fontWeight: 700, letterSpacing: 4, textAlign: "center", margin: "8px 0" }}>
-            {issuedCode.code}
+            {issuedPassword}
           </p>
-          <p className="muted" style={{ textAlign: "center" }}>
-            {t("clients.codeHint", { min: issuedCode.expires_in_minutes })}
-          </p>
+          <p className="muted" style={{ textAlign: "center" }}>{t("clients.passHint")}</p>
         </Modal>
       )}
     </>

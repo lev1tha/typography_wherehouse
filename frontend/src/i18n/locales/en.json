@@ -68,13 +68,10 @@
     "clientBtn": "View my orders",
     "customerError": "No customer with this number",
     "tabsHint": "Ordered from us? Tap “I'm a customer”",
-    "greetNew": "Hello, {{name}}!",
     "greetBack": "Welcome back, {{name}}!",
-    "setPassHint": "First login — create a password. It keeps your orders private.",
     "enterPassHint": "Enter your password.",
-    "passConfirm": "Repeat password",
-    "passMismatch": "Passwords don't match",
-    "otherPhone": "Another phone"
+    "otherPhone": "Another phone",
+    "askAdminHint": "The administrator issues your password. Please contact us and we'll give it to you."
   },
   "dashboard": {
     "title": "Overview",
@@ -215,12 +212,6 @@
     "portalPass": "Portal password",
     "passSet": "Set",
     "passNotSet": "Not set",
-    "resetPass": "Reset",
-    "resetPassConfirm": "Reset the client's password? They'll set a new one on next login.",
-    "resetPassDone": "Password reset",
-    "issueCode": "Issue login code",
-    "codeModalTitle": "Code for the client",
-    "codeHint": "Tell the client this code in person — they'll enter it instead of a password. One-time use, valid for {{min}} min.",
     "ordersList": "Client's orders",
     "filterDay": "Specific day",
     "periodHint": "Showing clients who ordered in the selected period. “Orders” is for that period; debt is current.",
@@ -228,7 +219,12 @@
     "ordersCollapse": "Collapse",
     "minOrders": "Orders from",
     "debtFilter": "Debt",
-    "onlyDebtors": "Debtors only"
+    "onlyDebtors": "Debtors only",
+    "issuePass": "Issue password",
+    "reissuePass": "Issue new one",
+    "passModalTitle": "Password for the client",
+    "passHint": "Tell the client this password. They sign in with their phone number and it. Shown once — after that you can only issue a new one.",
+    "reissuePassConfirm": "Issue a new password? The old one will stop working."
   },
   "checkout": {
     "outOfStock": "Out of stock",

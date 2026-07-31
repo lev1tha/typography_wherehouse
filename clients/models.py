@@ -1,11 +1,6 @@
-from datetime import timedelta
-
 from django.contrib.auth.hashers import check_password, make_password
 from django.db import models
-from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
-
-LOGIN_CODE_TTL_MINUTES = 15
 
 
 class Client(models.Model):
@@ -21,14 +16,11 @@ class Client(models.Model):
         _("название компании"), max_length=255, null=True, blank=True
     )
     phone = models.CharField(_("телефон"), max_length=32, unique=True)
-    # Пароль клиентского портала (хеш). Пусто = ещё не задан: клиент придумает
-    # его при первом входе (вход по телефону). Никогда не хранится в открытом виде.
+    # Пароль клиентского портала (хеш). Пусто = ещё не выдан: пароль выдаёт
+    # АДМИН из карточки клиента и сообщает его лично. Клиент сам себе пароль не
+    # заводит — иначе кабинет захватил бы любой, кто знает чужой номер.
+    # Никогда не хранится в открытом виде.
     portal_password = models.CharField(_("пароль портала"), max_length=255, blank=True, default="")
-    # Одноразовый код входа, который персонал выдаёт клиенту лично (у прилавка) —
-    # альтернатива паролю, если клиент забыл его/ещё не задавал. Хранится хешем,
-    # как и portal_password; одноразовый и коротко живущий (см. set_login_code).
-    login_code = models.CharField(max_length=255, blank=True, default="")
-    login_code_expires_at = models.DateTimeField(null=True, blank=True)
     telegram_chat_id = models.CharField(
         _("Telegram chat id"), max_length=64, null=True, blank=True
     )
@@ -68,30 +60,6 @@ class Client(models.Model):
 
     def check_password(self, raw: str) -> bool:
         return bool(self.portal_password) and check_password(raw, self.portal_password)
-
-    def set_login_code(self, raw: str, ttl_minutes: int = LOGIN_CODE_TTL_MINUTES) -> None:
-        """Store a salted hash of a staff-issued one-time login code."""
-        self.login_code = make_password(raw)
-        self.login_code_expires_at = timezone.now() + timedelta(minutes=ttl_minutes)
-
-    def check_login_code(self, raw: str) -> bool:
-        """True if `raw` matches the CURRENT, still-valid (unused, unexpired) code."""
-        if not self.login_code or not self.login_code_expires_at:
-            return False
-        if timezone.now() > self.login_code_expires_at:
-            return False
-        return check_password(raw, self.login_code)
-
-    def clear_login_code(self) -> None:
-        """Invalidate the current code right after use. Keeps the hash (only
-        backdates the expiry) so a spent code can never later slip through the
-        "first login sets your own password" path as a permanent password —
-        see `issued_login_code_matches` / CustomerLoginView."""
-        self.login_code_expires_at = timezone.now() - timedelta(seconds=1)
-
-    def issued_login_code_matches(self, raw: str) -> bool:
-        """True if `raw` equals the most recently issued code, used or not."""
-        return bool(self.login_code) and check_password(raw, self.login_code)
 
     def __str__(self) -> str:
         return f"{self.display_name} ({self.phone})"

@@ -24,7 +24,8 @@ from rest_framework.response import Response
 from accounts.permissions import IsAdmin
 from audit.models import AuditLog
 
-from .models import LOGIN_CODE_TTL_MINUTES, Client, ReferralChangeRequest
+from .customer import MIN_PORTAL_PASSWORD
+from .models import Client, ReferralChangeRequest
 from .serializers import (
     ClientDetailSerializer,
     ClientSerializer,
@@ -177,28 +178,29 @@ class ClientViewSet(viewsets.ModelViewSet):
             return ClientDetailSerializer
         return ClientSerializer
 
-    @action(detail=True, methods=["post"], url_path="reset-password", permission_classes=[IsAuthenticated])
-    def reset_password(self, request, pk=None):
-        """Сбросить пароль клиентского портала (клиент забыл). Пароль очищается —
-        при следующем входе по телефону клиент задаст новый."""
-        client = self.get_object()
-        client.portal_password = ""
-        client.save(update_fields=["portal_password"])
-        AuditLog.record(request.user, f"Сброс пароля клиента {client.display_name}")
-        return Response({"ok": True, "has_password": False})
+    @action(detail=True, methods=["post"], url_path="set-password", permission_classes=[IsAdmin])
+    def set_password(self, request, pk=None):
+        """Выдать клиенту пароль от кабинета. Только администратор.
 
-    @action(detail=True, methods=["post"], url_path="issue-login-code", permission_classes=[IsAuthenticated])
-    def issue_login_code(self, request, pk=None):
-        """Выдать клиенту одноразовый код входа в портал — персонал называет его
-        клиенту лично (не через SMS/Telegram), тот вводит код вместо пароля.
-        Полезно, если клиент у прилавка и забыл/не задавал пароль. Код
-        одноразовый и живёт ограниченное время (см. LOGIN_CODE_TTL_MINUTES)."""
+        Пароль можно передать в `password`, иначе генерируем. Возвращаем его
+        ОДИН раз — в базе лежит только хеш, посмотреть повторно нельзя, можно
+        лишь выдать новый. Сюда же сводится и «клиент забыл пароль».
+        """
         client = self.get_object()
-        code = f"{secrets.randbelow(1_000_000):06d}"
-        client.set_login_code(code)
-        client.save(update_fields=["login_code", "login_code_expires_at"])
-        AuditLog.record(request.user, f"Выдан код входа клиенту «{client.display_name}»")
-        return Response({"code": code, "expires_in_minutes": LOGIN_CODE_TTL_MINUTES})
+        raw = (request.data.get("password") or "").strip()
+        if raw and len(raw) < MIN_PORTAL_PASSWORD:
+            return Response(
+                {"detail": f"Пароль минимум {MIN_PORTAL_PASSWORD} символа."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not raw:
+            # 6 цифр: админ диктует пароль голосом, буквы и регистр тут только
+            # мешают. secrets, а не random — пароль всё-таки.
+            raw = f"{secrets.randbelow(1_000_000):06d}"
+        client.set_password(raw)
+        client.save(update_fields=["portal_password"])
+        AuditLog.record(request.user, f"Выдан пароль кабинета клиенту «{client.display_name}»")
+        return Response({"password": raw})
 
     @action(
         detail=True,

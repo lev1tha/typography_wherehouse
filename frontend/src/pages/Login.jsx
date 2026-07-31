@@ -55,10 +55,6 @@ export default function Login() {
   async function onCustomer(e) {
     e.preventDefault();
     setError("");
-    if (custStep === "set" && custPass !== custPass2) {
-      setError(t("login.passMismatch"));
-      return;
-    }
     setBusy(true);
     try {
       const res =
@@ -69,7 +65,8 @@ export default function Login() {
         navigate("/me", { replace: true });
       } else {
         setCustName(res.name || "");
-        setCustStep(res.status === "set_password" ? "set" : "enter");
+        // Пароль выдаёт админ: сам клиент его больше не заводит.
+        setCustStep(res.status === "no_password" ? "ask_admin" : "enter");
       }
     } catch (err) {
       setError(err?.response?.data?.detail || t("login.customerError"));
@@ -151,31 +148,23 @@ export default function Login() {
             ) : (
               <>
                 <p style={{ fontWeight: 600, marginBottom: 2 }}>
-                  {custStep === "set"
-                    ? t("login.greetNew", { name: custName })
-                    : t("login.greetBack", { name: custName })}
+                  {t("login.greetBack", { name: custName })}
                 </p>
                 <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
-                  {custStep === "set" ? t("login.setPassHint") : t("login.enterPassHint")}
+                  {custStep === "ask_admin"
+                    ? t("login.askAdminHint")
+                    : t("login.enterPassHint")}
                 </p>
-                <div className="field">
-                  <label>{t("common.password")}</label>
-                  <input
-                    type="password"
-                    value={custPass}
-                    onChange={(e) => setCustPass(e.target.value)}
-                    autoFocus
-                    autoComplete={custStep === "set" ? "new-password" : "current-password"}
-                  />
-                </div>
-                {custStep === "set" && (
+                {/* Пароля ещё нет — вводить нечего, клиент идёт к администратору. */}
+                {custStep !== "ask_admin" && (
                   <div className="field">
-                    <label>{t("login.passConfirm")}</label>
+                    <label>{t("common.password")}</label>
                     <input
                       type="password"
-                      value={custPass2}
-                      onChange={(e) => setCustPass2(e.target.value)}
-                      autoComplete="new-password"
+                      value={custPass}
+                      onChange={(e) => setCustPass(e.target.value)}
+                      autoFocus
+                      autoComplete="current-password"
                     />
                   </div>
                 )}
@@ -190,9 +179,12 @@ export default function Login() {
               </>
             )}
             {error && <div className="error">{error}</div>}
-            <button type="submit" style={{ width: "100%", marginTop: 12 }} disabled={busy}>
-              {busy ? t("common.loading") : custStep === "phone" ? t("common.next") : t("login.clientBtn")}
-            </button>
+            {/* Без выданного пароля отправлять нечего — кнопку прячем. */}
+            {custStep !== "ask_admin" && (
+              <button type="submit" style={{ width: "100%", marginTop: 12 }} disabled={busy}>
+                {busy ? t("common.loading") : custStep === "phone" ? t("common.next") : t("login.clientBtn")}
+              </button>
+            )}
           </form>
         )}
       </div>
