@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import models
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 
@@ -34,6 +35,68 @@ class Expense(models.Model):
         return f"{self.get_category_display()}: {self.name} — {self.amount}"
 
 
+class FixedExpense(models.Model):
+    """Постоянный расход отдельной записью: «Аренда за июль», «Коммуналка».
+
+    Раньше это была одна сумма на каждый вид в настройках, которую отчёт
+    пропорционально резал под период. Теперь это записи с датами — видно
+    историю по месяцам и что именно входило в каждую трату.
+    """
+
+    class Category(models.TextChoices):
+        RENT = "RENT", _("Аренда цеха")
+        UTILITIES = "UTILITIES", _("Коммунальные услуги")
+        INTERNET = "INTERNET", _("Интернет")
+        OTHER = "OTHER", _("Прочие постоянные")
+
+    category = models.CharField(max_length=20, choices=Category.choices)
+    name = models.CharField(_("за что / период"), max_length=255, blank=True)
+    amount = models.DecimalField(_("сумма"), max_digits=14, decimal_places=2, default=Decimal("0"))
+    # Дату ставит пользователь (в отличие от Expense.spent_at): постоянные
+    # расходы часто вносят задним числом — «аренда за прошлый месяц».
+    spent_at = models.DateField(_("дата"), default=timezone.localdate)
+    note = models.TextField(_("примечание"), blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="fixed_expenses",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("постоянный расход")
+        verbose_name_plural = _("постоянные расходы")
+        ordering = ["-spent_at", "-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.get_category_display()}: {self.name} — {self.amount}"
+
+
+class SalaryPayment(models.Model):
+    """Выплата зарплаты конкретному человеку.
+
+    Имя — свободный текст, а не ссылка на User: зарплату получают мастера и
+    резчики, у которых нет учётной записи в системе.
+    """
+
+    employee = models.CharField(_("сотрудник"), max_length=255)
+    amount = models.DecimalField(_("сумма"), max_digits=14, decimal_places=2, default=Decimal("0"))
+    paid_at = models.DateField(_("дата выплаты"), default=timezone.localdate)
+    note = models.TextField(_("примечание"), blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="salary_payments",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("выплата зарплаты")
+        verbose_name_plural = _("зарплаты")
+        ordering = ["-paid_at", "-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.employee}: {self.amount} ({self.paid_at})"
+
+
 class FinanceSettings(models.Model):
     """Singleton of manual P&L inputs that are not itemised expenses: material
     balances / purchase / transport / supplier-debt and fixed monthly costs.
@@ -45,14 +108,8 @@ class FinanceSettings(models.Model):
     material_purchase = models.DecimalField(_("закуп материала"), max_digits=14, decimal_places=2, default=Decimal("0"))
     transport = models.DecimalField(_("транспортные расходы"), max_digits=14, decimal_places=2, default=Decimal("0"))
     material_debt = models.DecimalField(_("долг материала"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    # Постоянные расходы
-    rent = models.DecimalField(_("аренда цеха"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    utilities = models.DecimalField(_("коммунальные услуги"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    utilities_note = models.CharField(_("что входит в коммуналку"), max_length=500, blank=True, default="")
-    internet = models.DecimalField(_("интернет"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    salary = models.DecimalField(_("зарплаты за месяц"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    fixed_other = models.DecimalField(_("прочие постоянные расходы"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    fixed_other_note = models.CharField(_("что входит в прочие"), max_length=500, blank=True, default="")
+    # Постоянные расходы и зарплата переехали в модели FixedExpense и
+    # SalaryPayment (записи с датами) — здесь их больше нет.
     # Реферальная программа
     referral_bonus = models.DecimalField(
         _("бонус за приведённого клиента"), max_digits=14, decimal_places=2, default=Decimal("0"),

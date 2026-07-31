@@ -103,7 +103,16 @@ export default function StoreReceipts() {
   }
 
   const columns = [
-    { key: "order_number", label: t("receipts.number"), render: (r) => `№${r.order_number ?? "—"}` },
+    {
+      key: "order_number",
+      label: t("receipts.number"),
+      render: (r) => (
+        <>
+          <strong>№{r.order_number ?? "—"}</strong>
+          {r.title ? <div className="muted" style={{ fontSize: 12 }}>{r.title}</div> : null}
+        </>
+      ),
+    },
     {
       key: "payment_status",
       label: t("receipts.status"),

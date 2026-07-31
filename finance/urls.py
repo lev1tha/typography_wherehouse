@@ -7,11 +7,15 @@ from .views import (
     FinanceReportView,
     FinanceSettingsView,
     FinanceUnlockView,
+    FixedExpenseViewSet,
     MaterialReportView,
+    SalaryPaymentViewSet,
 )
 
 router = DefaultRouter()
 router.register("expenses", ExpenseViewSet, basename="expense")
+router.register("fixed-expenses", FixedExpenseViewSet, basename="fixed-expense")
+router.register("salaries", SalaryPaymentViewSet, basename="salary")
 
 urlpatterns = [
     path("report/", FinanceReportView.as_view(), name="finance-report"),

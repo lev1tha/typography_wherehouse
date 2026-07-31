@@ -57,6 +57,7 @@ export default function Checkout() {
   const [category, setCategory] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("CASH");
   const [prepay, setPrepay] = useState("");
+  const [orderTitle, setOrderTitle] = useState(""); // наименование заказа
   const [client, setClient] = useState({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" });
   const [clientId, setClientId] = useState(null);
   const [referredBy, setReferredBy] = useState("");
@@ -336,6 +337,7 @@ export default function Checkout() {
       return { type: "SERVICE", service: l.id, quantity: l.qty };
     });
     const payload = { payment_method: paymentMethod, items };
+    if (orderTitle.trim()) payload.title = orderTitle.trim();
     if (paymentMethod !== "ONLINE" && prepay !== "" && Number(prepay) >= 0)
       payload.amount_paid = Number(prepay);
     if (clientId) payload.client_id = clientId;
@@ -349,6 +351,7 @@ export default function Checkout() {
       setClientId(null);
       setReferredBy("");
       setPrepay("");
+      setOrderTitle("");
       api.get("/clients/clients/").then((r) => setClientsList(r.data.results));
     } catch (e) {
       setError(e.response?.data?.detail || t("common.error"));
@@ -487,6 +490,17 @@ export default function Checkout() {
           )}
 
           <div className="pos-total"><span>{t("common.total")}</span><span>{total.toFixed(0)} сом</span></div>
+
+          {/* Название заказа — чтобы потом в чеках узнавать работу, а не гадать
+              по номеру. Необязательное. */}
+          <div className="field" style={{ marginTop: 10 }}>
+            <label>{t("checkout.orderTitle")}</label>
+            <input
+              value={orderTitle}
+              onChange={(e) => setOrderTitle(e.target.value)}
+              placeholder={t("checkout.orderTitlePh")}
+            />
+          </div>
 
           <div className="row">
             <div className="field" style={{ width: 120, margin: 0 }}>

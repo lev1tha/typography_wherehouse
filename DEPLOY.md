@@ -181,8 +181,8 @@ docker compose -f docker-compose.prod.yml up -d --build
 База живёт в docker-томе `pgdata`. Дамп:
 
 ```bash
-docker compose -f docker-compose.prod.yml exec -T db \
-    pg_dump -U chpu chpu | gzip > /root/backup-$(date +%F).sql.gz
+    docker compose -f docker-compose.prod.yml exec -T db \
+        pg_dump -U chpu chpu | gzip > /root/backup-$(date +%F).sql.gz
 ```
 
 Автоматизировать (ежедневно в 3 ночи, хранить 14 дней) — `crontab -e`:

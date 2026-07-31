@@ -4,7 +4,7 @@ from rest_framework.test import APITestCase
 
 from accounts.models import User
 from clients.models import Client
-from finance.models import Expense, FinanceSettings
+from finance.models import Expense, FinanceSettings, FixedExpense
 from sales.models import Receipt, TransactionItem
 from services.models import PrintingService
 from warehouse.models import Material
@@ -273,8 +273,11 @@ class EdgeFinanceTests(APITestCase):
         # update_or_create so the values persist even on first touch — a bare
         # filter(pk=1).update() is a no-op when the row does not exist yet.
         FinanceSettings.objects.update_or_create(
-            pk=1,
-            defaults={"material_purchase": Decimal("100"), "rent": Decimal("50")},
+            pk=1, defaults={"material_purchase": Decimal("100")},
+        )
+        # Постоянные расходы теперь записи с датами, а не поле настроек.
+        FixedExpense.objects.create(
+            category=FixedExpense.Category.RENT, amount=Decimal("50"),
         )
         Expense.objects.create(category=Expense.Category.CUTTER, amount=Decimal("30"))
         Expense.objects.create(category=Expense.Category.OTHER, amount=Decimal("20"))

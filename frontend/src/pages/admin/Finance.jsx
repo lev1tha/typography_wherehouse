@@ -45,13 +45,6 @@ export default function Finance({ embedded = false }) {
       .catch(() => toast(t("common.error"), "error"));
   }
 
-  function saveText(field, value) {
-    api
-      .patch("/finance/settings/", { [field]: value })
-      .then(loadReport)
-      .catch(() => toast(t("common.error"), "error"));
-  }
-
   const filteredMat = matFilter
     ? matReport.filter((r) => String(r.id) === matFilter)
     : matReport;
@@ -108,19 +101,6 @@ export default function Finance({ embedded = false }) {
       />
     </div>
   );
-  const noteRow = (label, field) => (
-    <div className="crow" key={field}>
-      <span className="k" style={{ color: "var(--ink-muted)", fontSize: 13 }}>{label}</span>
-      <input
-        type="text"
-        value={settings[field] ?? ""}
-        onChange={(e) => setSettings({ ...settings, [field]: e.target.value })}
-        onBlur={(e) => saveText(field, e.target.value)}
-        placeholder={t("finance.notePlaceholder")}
-        style={{ width: 220, height: 34 }}
-      />
-    </div>
-  );
   const totalRow = (label, value) => (
     <div
       className="crow"
@@ -152,15 +132,15 @@ export default function Finance({ embedded = false }) {
 
       <DailyProfitChart />
 
+      {/* Сводка по постоянным расходам: сами записи ведутся ниже, отдельными
+          разделами «Постоянные расходы» и «Зарплаты». */}
       <div className="card" style={{ marginTop: 16 }}>
         <h3>{t("finance.fixed")}</h3>
-        {editRow(t("finance.rent"), "rent")}
-        {editRow(t("finance.utilities"), "utilities")}
-        {noteRow(t("finance.utilitiesNote"), "utilities_note")}
-        {editRow(t("finance.internet"), "internet")}
-        {editRow(t("finance.salary"), "salary")}
-        {editRow(t("finance.fixedOther"), "fixed_other")}
-        {noteRow(t("finance.fixedOtherNote"), "fixed_other_note")}
+        <div className="crow"><span className="k">{t("fixedCat.RENT")}</span><span>{som(report.fixed.rent)}</span></div>
+        <div className="crow"><span className="k">{t("fixedCat.UTILITIES")}</span><span>{som(report.fixed.utilities)}</span></div>
+        <div className="crow"><span className="k">{t("fixedCat.INTERNET")}</span><span>{som(report.fixed.internet)}</span></div>
+        <div className="crow"><span className="k">{t("finance.salary")}</span><span>{som(report.fixed.salary)}</span></div>
+        <div className="crow"><span className="k">{t("fixedCat.OTHER")}</span><span>{som(report.fixed.other)}</span></div>
         {totalRow(t("finance.totalFixed"), report.fixed.total)}
       </div>
 

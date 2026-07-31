@@ -35,6 +35,9 @@ class Receipt(models.Model):
     order_number = models.PositiveIntegerField(
         _("номер заказа"), unique=True, null=True, blank=True, editable=False
     )
+    # Человеческое название заказа («Вывеска для кафе») — чтобы в списке чеков
+    # узнавать работу не только по номеру. Необязательное.
+    title = models.CharField(_("наименование заказа"), max_length=255, blank=True)
     client = models.ForeignKey(
         "clients.Client",
         on_delete=models.PROTECT,

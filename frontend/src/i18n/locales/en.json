@@ -273,7 +273,9 @@
     "pieceCutHint": "Cut length in running metres",
     "pmShort": "rm",
     "mbank": "MBank",
-    "demirbank": "DemirBank"
+    "demirbank": "DemirBank",
+    "orderTitle": "Order name",
+    "orderTitlePh": "e.g. Sign for a cafe (optional)"
   },
   "receipts": {
     "title": "Receipts",
@@ -492,5 +494,45 @@
     "placeholder": "Finance password",
     "submit": "Unlock",
     "error": "Wrong password"
+  },
+  "months": [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December"
+  ],
+  "fixedCat": {
+    "RENT": "Workshop rent",
+    "UTILITIES": "Utilities",
+    "INTERNET": "Internet",
+    "OTHER": "Other fixed"
+  },
+  "fixed": {
+    "title": "Fixed costs",
+    "subtitle": "Rent, utilities, internet and the rest — dated records, just like purchases.",
+    "forWhat": "What for / period",
+    "forWhatPh": "e.g. Rent for July",
+    "notePh": "what's included: power 3000, gas 1200",
+    "totalForPeriod": "Total for period",
+    "editTitle": "Edit cost"
+  },
+  "salary": {
+    "title": "Salaries",
+    "subtitle": "Who was paid, how much and when.",
+    "employee": "Employee",
+    "employeePh": "employee name",
+    "notePh": "e.g. advance for July",
+    "totalForPeriod": "Total for period",
+    "editTitle": "Edit payment",
+    "needEmployee": "Enter the employee",
+    "added": "Payment added"
   }
 }

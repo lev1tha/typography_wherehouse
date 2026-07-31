@@ -168,7 +168,7 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
 
 
 @transaction.atomic
-def create_sale(*, client, cashier, payment_method, items_data, amount_paid=None) -> Receipt:
+def create_sale(*, client, cashier, payment_method, items_data, amount_paid=None, title="") -> Receipt:
     """Create a receipt with its line items.
 
     Cash sales are settled immediately (PAID + stock deducted). Online sales are
@@ -180,6 +180,7 @@ def create_sale(*, client, cashier, payment_method, items_data, amount_paid=None
         cashier=cashier,
         payment_method=payment_method,
         payment_status=Receipt.PaymentStatus.PENDING,
+        title=(title or "").strip(),
     )
 
     for entry in items_data:

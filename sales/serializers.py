@@ -61,6 +61,7 @@ class ReceiptSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "order_number",
+            "title",
             "client",
             "client_name",
             "cashier",
@@ -143,6 +144,8 @@ class SaleCreateSerializer(serializers.Serializer):
     )
     client = serializers.DictField(required=False)
     payment_method = serializers.ChoiceField(choices=Receipt.PaymentMethod.choices)
+    # Необязательное название заказа — показывается в списке чеков.
+    title = serializers.CharField(required=False, allow_blank=True, max_length=255)
     amount_paid = serializers.DecimalField(
         max_digits=14, decimal_places=2, min_value=0, required=False, allow_null=True
     )

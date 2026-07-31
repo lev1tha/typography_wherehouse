@@ -16,8 +16,13 @@ from accounts.permissions import IsAdmin
 from sales.models import Receipt, TransactionItem
 from warehouse.models import Material
 
-from .models import Expense, FinanceSettings
-from .serializers import ExpenseSerializer, FinanceSettingsSerializer
+from .models import Expense, FinanceSettings, FixedExpense, SalaryPayment
+from .serializers import (
+    ExpenseSerializer,
+    FinanceSettingsSerializer,
+    FixedExpenseSerializer,
+    SalaryPaymentSerializer,
+)
 
 _SUM = lambda field: Coalesce(Sum(field), Decimal("0"), output_field=DecimalField())
 
@@ -58,6 +63,21 @@ def _parse_date(value):
         return None
 
 
+def _filter_by_month(qs, request, field):
+    """Месячный фильтр ?year=&month= по указанному полю-дате.
+
+    Оба параметра нужны вместе; кривые значения просто игнорируем, чтобы
+    список не падал с 500 из-за опечатки в адресе."""
+    try:
+        year = int(request.query_params.get("year") or 0)
+        month = int(request.query_params.get("month") or 0)
+    except (TypeError, ValueError):
+        return qs
+    if not year or not (1 <= month <= 12):
+        return qs
+    return qs.filter(**{f"{field}__year": year, f"{field}__month": month})
+
+
 def _prorate_factor(d_from, d_to):
     """Доля «месяца» в выбранном периоде [d_from, d_to] включительно: за каждый
     день берём 1/дней_в_его_месяце и суммируем. Полный календарный месяц → 1.0,
@@ -84,6 +104,40 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdmin]
     filterset_fields = ["category"]
     ordering = ["-spent_at", "-created_at"]
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+
+class FixedExpenseViewSet(viewsets.ModelViewSet):
+    """Постоянные расходы записями (аренда, коммуналка, интернет, прочие).
+    Фильтры: ?category=, ?year=&month= (месячный) и ?spent_at=<дата> (по дню)."""
+
+    queryset = FixedExpense.objects.all()
+    serializer_class = FixedExpenseSerializer
+    permission_classes = [IsAdmin]
+    filterset_fields = ["category", "spent_at"]
+    ordering = ["-spent_at", "-created_at"]
+
+    def get_queryset(self):
+        return _filter_by_month(super().get_queryset(), self.request, "spent_at")
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+
+class SalaryPaymentViewSet(viewsets.ModelViewSet):
+    """Зарплаты по сотрудникам: кому, сколько, когда."""
+
+    queryset = SalaryPayment.objects.all()
+    serializer_class = SalaryPaymentSerializer
+    permission_classes = [IsAdmin]
+    filterset_fields = ["employee", "paid_at"]
+    search_fields = ["employee"]
+    ordering = ["-paid_at", "-created_at"]
+
+    def get_queryset(self):
+        return _filter_by_month(super().get_queryset(), self.request, "paid_at")
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -140,20 +194,26 @@ class FinanceReportView(APIView):
 
         # Раздел «Материалы» убран (транспорт и так входит в цену закупки —
         # см. поступление на Складе). Расходы = постоянные + переменные (покупки).
-        # Зарплаты — ручное поле (постоянные), FinanceSettings.salary.
-        # Постоянные расходы — месячные суммы без даты; за выбранный период берём
-        # их долю (полный месяц = 1.0), иначе — полную месячную сумму.
-        factor = (
-            _prorate_factor(d_from, d_to)
-            if (d_from and d_to and d_to >= d_from)
-            else Decimal("1")
-        )
+        # Постоянные расходы и зарплаты — теперь записи с датами, поэтому просто
+        # суммируем попавшие в период (раньше месячную сумму приходилось резать
+        # пропорционально — см. _prorate_factor, больше не нужен здесь).
+        def fixed_cat(category):
+            return by_spent(
+                FixedExpense.objects.filter(category=category)
+            ).aggregate(v=_SUM("amount"))["v"]
+
+        salary_qs = SalaryPayment.objects.all()
+        if d_from:
+            salary_qs = salary_qs.filter(paid_at__gte=d_from)
+        if d_to:
+            salary_qs = salary_qs.filter(paid_at__lte=d_to)
+
         fx = {
-            "rent": s.rent * factor,
-            "utilities": s.utilities * factor,
-            "internet": s.internet * factor,
-            "salary": s.salary * factor,
-            "other": s.fixed_other * factor,
+            "rent": fixed_cat(FixedExpense.Category.RENT),
+            "utilities": fixed_cat(FixedExpense.Category.UTILITIES),
+            "internet": fixed_cat(FixedExpense.Category.INTERNET),
+            "salary": salary_qs.aggregate(v=_SUM("amount"))["v"],
+            "other": fixed_cat(FixedExpense.Category.OTHER),
         }
         total_fixed = fx["rent"] + fx["utilities"] + fx["internet"] + fx["salary"] + fx["other"]
 
@@ -235,14 +295,14 @@ class FinanceReportView(APIView):
 
         return Response(
             {
+                # Пояснения «что входит» больше не отдельные поля настроек: они
+                # живут примечанием у каждой записи постоянного расхода.
                 "fixed": {
                     "rent": fx["rent"],
                     "utilities": fx["utilities"],
-                    "utilities_note": s.utilities_note,
                     "internet": fx["internet"],
                     "salary": fx["salary"],
                     "other": fx["other"],
-                    "other_note": s.fixed_other_note,
                     "total": total_fixed,
                 },
                 "variable": {
@@ -291,8 +351,18 @@ class DailyReportView(APIView):
         first_day = date(year, month, 1)
         next_month_first = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
 
-        s = FinanceSettings.load()
-        fixed_total = s.rent + s.utilities + s.internet + s.salary + s.fixed_other
+        # Постоянные расходы и зарплаты этого месяца берём записями и, как и
+        # раньше, размазываем поровну по дням: аренда платится один раз, но
+        # «зарабатывать на неё» нужно каждый день, иначе один день месяца
+        # выглядел бы катастрофой, а остальные — незаслуженно прибыльными.
+        fixed_total = (
+            FixedExpense.objects.filter(
+                spent_at__gte=first_day, spent_at__lt=next_month_first
+            ).aggregate(v=_SUM("amount"))["v"]
+            + SalaryPayment.objects.filter(
+                paid_at__gte=first_day, paid_at__lt=next_month_first
+            ).aggregate(v=_SUM("amount"))["v"]
+        )
         fixed_share = fixed_total / days_in_month
 
         live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED).filter(

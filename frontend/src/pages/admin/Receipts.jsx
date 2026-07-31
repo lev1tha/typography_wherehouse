@@ -75,7 +75,16 @@ function ReceiptsTab() {
   }, [method, pstatus, search, sort]);
 
   const columns = [
-    { key: "order_number", label: t("receipts.number"), render: (r) => `№${r.order_number ?? "—"}` },
+    {
+      key: "order_number",
+      label: t("receipts.number"),
+      render: (r) => (
+        <>
+          <strong>№{r.order_number ?? "—"}</strong>
+          {r.title ? <div className="muted" style={{ fontSize: 12 }}>{r.title}</div> : null}
+        </>
+      ),
+    },
     { key: "client_name", label: t("checkout.client"), render: (r) => r.client_name || "—" },
     {
       key: "cashier_name",

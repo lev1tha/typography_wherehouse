@@ -7,7 +7,7 @@ from rest_framework.test import APITestCase
 from accounts.models import User
 from sales.models import Receipt
 
-from .models import Expense, FinanceSettings
+from .models import Expense, FixedExpense, SalaryPayment
 
 
 class DailyReportTests(APITestCase):
@@ -42,6 +42,13 @@ class DailyReportTests(APITestCase):
         e = Expense.objects.create(category=category, amount=Decimal(amount))
         Expense.objects.filter(pk=e.pk).update(spent_at=day)
         return e
+
+    def _fixed(self, *, day, amount, category=FixedExpense.Category.RENT):
+        """Постоянный расход записью — с переходом на FixedExpense месячная
+        сумма берётся из записей, попавших в показываемый месяц."""
+        return FixedExpense.objects.create(
+            category=category, amount=Decimal(amount), spent_at=day,
+        )
 
     def _rows(self, year, month):
         r = self.client.get(self.URL, {"year": year, "month": month})
@@ -79,7 +86,7 @@ class DailyReportTests(APITestCase):
     # ---- fixed-cost proration --------------------------------------------
     def test_fixed_costs_split_evenly_across_month(self):
         # June has 30 days. rent 300, everything else 0 -> 10/day.
-        FinanceSettings.objects.update_or_create(pk=1, defaults={"rent": Decimal("300")})
+        self._fixed(day=date(2026, 6, 1), amount="300")
         data, rows = self._rows(2026, 6)
         self.assertEqual(data["days_in_month"], 30)
         for row in data["rows"]:
@@ -89,7 +96,7 @@ class DailyReportTests(APITestCase):
         self.assertEqual(Decimal(str(data["totals"]["fixed"])), Decimal("300"))
 
     def test_profit_positive_and_negative_days(self):
-        FinanceSettings.objects.update_or_create(pk=1, defaults={"rent": Decimal("300")})  # 10/day in June
+        self._fixed(day=date(2026, 6, 1), amount="300")  # 10/day in June
         self._receipt(day=date(2026, 6, 1), payment_status=Receipt.PaymentStatus.PAID,
                       total="100", amount_paid="100")
         self._expense(day=date(2026, 6, 2), amount="50")
@@ -99,7 +106,7 @@ class DailyReportTests(APITestCase):
         self.assertEqual(Decimal(str(rows[3]["profit"])), Decimal("-10"))   # 0 - 0 - 10
 
     def test_totals_match_sum_of_rows(self):
-        FinanceSettings.objects.update_or_create(pk=1, defaults={"rent": Decimal("300")})
+        self._fixed(day=date(2026, 6, 1), amount="300")
         self._receipt(day=date(2026, 6, 1), payment_status=Receipt.PaymentStatus.PAID,
                       total="1000", amount_paid="1000")
         data, _ = self._rows(2026, 6)
@@ -113,7 +120,7 @@ class DailyReportTests(APITestCase):
         # A day that hasn't happened yet must not show as "in the red" just
         # because it hasn't earned back its (unlived) share of rent yet.
         now = timezone.localdate()
-        FinanceSettings.objects.update_or_create(pk=1, defaults={"rent": Decimal("310")})
+        self._fixed(day=now.replace(day=1), amount="310")
         data, rows = self._rows(now.year, now.month)
         for day_num, row in rows.items():
             if day_num > now.day:
@@ -169,3 +176,81 @@ class DailyReportTests(APITestCase):
         self.client.force_authenticate(self.store)
         r = self.client.get(self.URL, {"year": 2026, "month": 6})
         self.assertEqual(r.status_code, 403)
+
+    # ---- зарплаты тоже размазываются по дням --------------------------------
+    def test_salary_counts_towards_daily_fixed_share(self):
+        self._fixed(day=date(2026, 6, 1), amount="300")
+        SalaryPayment.objects.create(
+            employee="Мастер", amount=Decimal("600"), paid_at=date(2026, 6, 15),
+        )
+        data, _ = self._rows(2026, 6)
+        # (300 + 600) / 30 дней = 30 в день, независимо от даты самой выплаты.
+        self.assertEqual(Decimal(str(data["totals"]["fixed"])), Decimal("900"))
+        for row in data["rows"]:
+            self.assertEqual(Decimal(str(row["fixed_share"])), Decimal("30"))
+
+    def test_fixed_expense_of_other_month_not_counted(self):
+        self._fixed(day=date(2026, 5, 31), amount="3000")
+        data, _ = self._rows(2026, 6)
+        self.assertEqual(Decimal(str(data["totals"]["fixed"])), Decimal("0"))
+
+
+class FixedExpenseAndSalaryAPITests(APITestCase):
+    """Постоянные расходы и зарплаты записями + месячный фильтр."""
+
+    FIXED_URL = "/api/finance/fixed-expenses/"
+    SALARY_URL = "/api/finance/salaries/"
+
+    def setUp(self):
+        self.admin = User.objects.create_user(username="f_admin", password="x", role=User.Role.ADMIN)
+        self.store = User.objects.create_user(username="f_store", password="x", role=User.Role.STOREKEEPER)
+        self.client.force_authenticate(self.admin)
+
+    def test_create_fixed_expense_records_author(self):
+        r = self.client.post(self.FIXED_URL, {
+            "category": "RENT", "name": "Аренда за июль",
+            "amount": "30000", "spent_at": "2026-07-01",
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["category_display"], "Аренда цеха")
+        self.assertEqual(FixedExpense.objects.get().created_by, self.admin)
+
+    def test_month_filter_selects_only_that_month(self):
+        FixedExpense.objects.create(category="RENT", amount=Decimal("100"), spent_at=date(2026, 6, 1))
+        FixedExpense.objects.create(category="RENT", amount=Decimal("200"), spent_at=date(2026, 7, 1))
+        r = self.client.get(self.FIXED_URL, {"year": 2026, "month": 7})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(len(r.data["results"]), 1)
+        self.assertEqual(Decimal(r.data["results"][0]["amount"]), Decimal("200"))
+
+    def test_broken_month_filter_is_ignored_not_500(self):
+        FixedExpense.objects.create(category="RENT", amount=Decimal("100"), spent_at=date(2026, 6, 1))
+        r = self.client.get(self.FIXED_URL, {"year": "abc", "month": "99"})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(len(r.data["results"]), 1)
+
+    def test_salary_is_per_employee(self):
+        r = self.client.post(self.SALARY_URL, {
+            "employee": "Азамат", "amount": "25000", "paid_at": "2026-07-05",
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(SalaryPayment.objects.get().employee, "Азамат")
+
+    def test_storekeeper_cannot_see_or_add(self):
+        self.client.force_authenticate(self.store)
+        self.assertEqual(self.client.get(self.FIXED_URL).status_code, 403)
+        self.assertEqual(self.client.get(self.SALARY_URL).status_code, 403)
+
+    def test_report_sums_records_within_period(self):
+        FixedExpense.objects.create(category="RENT", amount=Decimal("100"), spent_at=date(2026, 6, 10))
+        FixedExpense.objects.create(category="INTERNET", amount=Decimal("30"), spent_at=date(2026, 6, 12))
+        FixedExpense.objects.create(category="RENT", amount=Decimal("999"), spent_at=date(2026, 8, 1))
+        SalaryPayment.objects.create(employee="Мастер", amount=Decimal("70"), paid_at=date(2026, 6, 20))
+        r = self.client.get("/api/finance/report/", {"date_from": "2026-06-01", "date_to": "2026-06-30"})
+        self.assertEqual(r.status_code, 200, r.data)
+        fixed = r.data["fixed"]
+        self.assertEqual(Decimal(str(fixed["rent"])), Decimal("100"))
+        self.assertEqual(Decimal(str(fixed["internet"])), Decimal("30"))
+        self.assertEqual(Decimal(str(fixed["salary"])), Decimal("70"))
+        # Августовская аренда в июньский период не попадает.
+        self.assertEqual(Decimal(str(fixed["total"])), Decimal("200"))

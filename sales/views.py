@@ -41,7 +41,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     serializer_class = ReceiptSerializer
     permission_classes = [IsAuthenticated]
     filterset_fields = ["payment_method", "payment_status", "status", "cashier", "client"]
-    search_fields = ["order_number", "client__phone", "client__full_name", "client__company_name"]
+    search_fields = ["order_number", "title", "client__phone", "client__full_name", "client__company_name"]
     # По умолчанию: у кого долг выше — тот вверху, затем по дате (новые выше).
     # Долг — вычисляемое поле, поэтому аннотируем `_debt` в get_queryset.
     ordering = ["-_debt", "-created_at"]
@@ -152,6 +152,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 payment_method=data["payment_method"],
                 items_data=data["items"],
                 amount_paid=data.get("amount_paid"),
+                title=data.get("title", ""),
             )
         except InsufficientStock as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)

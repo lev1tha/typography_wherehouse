@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Expense, FinanceSettings
+from .models import Expense, FinanceSettings, FixedExpense, SalaryPayment
 
 
 class ExpenseSerializer(serializers.ModelSerializer):
@@ -21,6 +21,31 @@ class ExpenseSerializer(serializers.ModelSerializer):
         read_only_fields = ["spent_at", "created_at"]
 
 
+class FixedExpenseSerializer(serializers.ModelSerializer):
+    category_display = serializers.CharField(source="get_category_display", read_only=True)
+
+    class Meta:
+        model = FixedExpense
+        fields = [
+            "id",
+            "category",
+            "category_display",
+            "name",
+            "amount",
+            "spent_at",
+            "note",
+            "created_at",
+        ]
+        read_only_fields = ["created_at"]
+
+
+class SalaryPaymentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SalaryPayment
+        fields = ["id", "employee", "amount", "paid_at", "note", "created_at"]
+        read_only_fields = ["created_at"]
+
+
 class FinanceSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = FinanceSettings
@@ -29,13 +54,6 @@ class FinanceSettingsSerializer(serializers.ModelSerializer):
             "material_purchase",
             "transport",
             "material_debt",
-            "rent",
-            "utilities",
-            "utilities_note",
-            "internet",
-            "salary",
-            "fixed_other",
-            "fixed_other_note",
             "referral_bonus",
             "updated_at",
         ]
