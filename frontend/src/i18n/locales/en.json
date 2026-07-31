@@ -219,7 +219,11 @@
     "issueCode": "Issue login code",
     "codeModalTitle": "Code for the client",
     "codeHint": "Tell the client this code in person — they'll enter it instead of a password. One-time use, valid for {{min}} min.",
-    "ordersList": "Client's orders"
+    "ordersList": "Client's orders",
+    "filterDay": "Specific day",
+    "periodHint": "Showing clients who ordered in the selected period. “Orders” is for that period; debt is current.",
+    "ordersShowAll": "Show all ({{count}})",
+    "ordersCollapse": "Collapse"
   },
   "checkout": {
     "outOfStock": "Out of stock",

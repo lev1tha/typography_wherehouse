@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db.models import Count, Sum
+from django.utils import timezone
 from rest_framework import serializers
 
 from .models import Client, ReferralChangeRequest
@@ -24,6 +25,7 @@ class ClientSerializer(serializers.ModelSerializer):
     referred_by_name = serializers.CharField(source="referred_by.display_name", read_only=True)
     referrals_count = serializers.SerializerMethodField()
     debt = serializers.SerializerMethodField()
+    orders_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Client
@@ -41,6 +43,7 @@ class ClientSerializer(serializers.ModelSerializer):
             "referred_by_name",
             "referrals_count",
             "debt",
+            "orders_count",
             "created_at",
         ]
         read_only_fields = ["telegram_chat_id", "created_at"]
@@ -49,7 +52,17 @@ class ClientSerializer(serializers.ModelSerializer):
         return obj.referrals.count()
 
     def get_debt(self, obj):
-        return client_debt(obj)
+        # Вьюсет считает долг аннотацией (её же использует сортировка по клику).
+        # Fallback на Python нужен там, где клиент пришёл без аннотации —
+        # например из вложенных сериализаторов.
+        annotated = getattr(obj, "debt", None)
+        return annotated if annotated is not None else client_debt(obj)
+
+    def get_orders_count(self, obj):
+        annotated = getattr(obj, "orders_count", None)
+        if annotated is not None:
+            return annotated
+        return obj.receipts.exclude(status="CANCELLED").count()
 
     def validate_referred_by(self, value):
         if value and self.instance and value.pk == self.instance.pk:
@@ -144,9 +157,17 @@ class ClientDetailSerializer(ClientSerializer):
 
     def get_orders(self, obj):
         """Заказы клиента (что он покупал) — для карточки CRM: номер, дата, сумма,
-        статусы, долг и позиции. Receipt.Meta уже сортирует по -created_at."""
+        статусы, долг и позиции. Receipt.Meta уже сортирует по -created_at.
+
+        Если в списке выбран период, карточка показывает заказы того же периода —
+        иначе фильтр «июль» открывал бы карточку со всей историей за год."""
+        d_from = self.context.get("date_from")
+        d_to = self.context.get("date_to")
         rows = []
         for r in obj.receipts.all():
+            created = timezone.localtime(r.created_at).date()
+            if (d_from and created < d_from) or (d_to and created > d_to):
+                continue
             items = [
                 {
                     "title": (
@@ -162,6 +183,7 @@ class ClientDetailSerializer(ClientSerializer):
             rows.append({
                 "id": r.id,
                 "order_number": r.order_number,
+                "title": r.title,
                 "created_at": r.created_at,
                 "total_price": r.total_price,
                 "payment_status": r.payment_status,

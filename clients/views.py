@@ -1,6 +1,19 @@
 import secrets
+from datetime import date
+from decimal import Decimal
 
-from django.db.models import Value
+from django.db.models import (
+    Case,
+    Count,
+    DecimalField,
+    Exists,
+    F,
+    OuterRef,
+    Q,
+    Sum,
+    Value,
+    When,
+)
 from django.db.models.functions import Coalesce, Lower, NullIf
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
@@ -19,10 +32,23 @@ from .serializers import (
 )
 
 
+def _parse_date(value):
+    """'YYYY-MM-DD' → date, иначе None (пустой/битый ввод = без фильтра)."""
+    try:
+        return date.fromisoformat(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
 class ClientViewSet(viewsets.ModelViewSet):
-    """CRM. Live ?search= lookup (по ИМЕНИ или телефону) для быстрого автозаполнения
-    в кассе. Поиск регистронезависимый на любой БД (фильтрация в Python — SQLite не
-    умеет регистронезависимый LIKE для кириллицы)."""
+    """CRM. Live ?search= lookup (по имени, телефону или НОМЕРУ ЗАКАЗА) для
+    быстрого автозаполнения в кассе. Поиск регистронезависимый на любой БД
+    (фильтрация в Python — SQLite не умеет регистронезависимый LIKE для кириллицы).
+
+    Фильтр периода ?date_from=&date_to= оставляет клиентов, у которых были заказы
+    в эти дни; «Заказов» тогда считается за тот же период. Сортировка по клику —
+    ?ordering=orders_count|-orders_count|debt|-debt|sort_name.
+    """
 
     queryset = Client.objects.all()
     permission_classes = [IsAuthenticated]
@@ -30,8 +56,24 @@ class ClientViewSet(viewsets.ModelViewSet):
     # search_fields НЕ задаём: DRF SearchFilter использует icontains, который на
     # SQLite не находит кириллицу в другом регистре. Ищем сами в get_queryset.
     ordering = ["sort_name"]
+    ordering_fields = ["sort_name", "orders_count", "debt", "created_at"]
+
+    def _period(self):
+        return (
+            _parse_date(self.request.query_params.get("date_from")),
+            _parse_date(self.request.query_params.get("date_to")),
+        )
+
+    def get_serializer_context(self):
+        # Карточка клиента показывает заказы за тот же период, что и список.
+        ctx = super().get_serializer_context()
+        d_from, d_to = self._period()
+        ctx["date_from"], ctx["date_to"] = d_from, d_to
+        return ctx
 
     def get_queryset(self):
+        from sales.models import Receipt
+
         # Сортировка по ИМЕНИ (компания или ФИО), с откатом на телефон — не по дате.
         # На карточке (retrieve) грузим и позиции чеков — для списка заказов клиента.
         prefetch = ["receipts"]
@@ -41,15 +83,64 @@ class ClientViewSet(viewsets.ModelViewSet):
                 "receipts__items__service",
                 "referrals",
             ]
+
+        d_from, d_to = self._period()
+        live = ~Q(receipts__status=Receipt.Status.CANCELLED)
+        in_period = Q()
+        if d_from:
+            in_period &= Q(receipts__created_at__date__gte=d_from)
+        if d_to:
+            in_period &= Q(receipts__created_at__date__lte=d_to)
+
+        # Долг — «на сейчас», период его не двигает: клиент должен независимо от
+        # того, за какой месяц мы смотрим заказы. Формула та же, что в
+        # Receipt.debt и в сортировке чеков.
+        debt_case = Case(
+            When(
+                Q(receipts__payment_status=Receipt.PaymentStatus.PENDING)
+                & ~Q(receipts__status=Receipt.Status.CANCELLED)
+                & Q(
+                    receipts__total_price__gt=F("receipts__amount_paid")
+                    + F("receipts__refunded_amount")
+                ),
+                then=F("receipts__total_price")
+                - F("receipts__amount_paid")
+                - F("receipts__refunded_amount"),
+            ),
+            default=Value(Decimal("0")),
+            output_field=DecimalField(max_digits=14, decimal_places=2),
+        )
+
         qs = (
             Client.objects.annotate(
                 sort_name=Lower(
                     Coalesce(NullIf("company_name", Value("")), NullIf("full_name", Value("")), "phone")
-                )
+                ),
+                # distinct — иначе join по позициям чеков посчитал бы заказы по разу
+                # на каждую строку чека.
+                orders_count=Count("receipts", filter=live & in_period, distinct=True),
+                debt=Coalesce(
+                    Sum(debt_case),
+                    Value(Decimal("0")),
+                    output_field=DecimalField(max_digits=14, decimal_places=2),
+                ),
             )
             .prefetch_related(*prefetch)
             .order_by("sort_name")
         )
+
+        # Период сужает СПИСОК клиентов через отдельный подзапрос, а не через тот
+        # же join — иначе он обрезал бы и долг, который должен быть «на сейчас».
+        if d_from or d_to:
+            recent = Receipt.objects.filter(client=OuterRef("pk")).exclude(
+                status=Receipt.Status.CANCELLED
+            )
+            if d_from:
+                recent = recent.filter(created_at__date__gte=d_from)
+            if d_to:
+                recent = recent.filter(created_at__date__lte=d_to)
+            qs = qs.filter(Exists(recent))
+
         search = (self.request.query_params.get("search") or "").strip().lower()
         if search:
             ids = [
@@ -59,7 +150,14 @@ class ClientViewSet(viewsets.ModelViewSet):
                 or search in (c.company_name or "").lower()
                 or search in (c.phone or "").lower()
             ]
-            qs = qs.filter(id__in=ids)
+            # Поиск по номеру чека: «5» находит клиента, у которого заказ №5.
+            if search.lstrip("№").isdigit():
+                ids += list(
+                    Receipt.objects.filter(order_number=int(search.lstrip("№")))
+                    .exclude(client__isnull=True)
+                    .values_list("client_id", flat=True)
+                )
+            qs = qs.filter(id__in=set(ids))
         return qs
 
     def get_serializer_class(self):

@@ -6,7 +6,11 @@ import { useAuth } from "../../auth/AuthContext.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
+import MonthPicker from "../../components/MonthPicker.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
+
+// Сколько заказов показывать в карточке сразу — остальные под кнопкой.
+const ORDERS_PREVIEW = 5;
 
 export default function Clients() {
   const { t } = useTranslation();
@@ -17,9 +21,29 @@ export default function Clients() {
   const [detail, setDetail] = useState(null);
   const [reqForm, setReqForm] = useState({ referred_by: "", reason: "" });
   const [issuedCode, setIssuedCode] = useState(null); // { code, expires_in_minutes }
+  const [period, setPeriod] = useState({ year: new Date().getFullYear(), month: null });
+  const [day, setDay] = useState(""); // конкретный день внутри месяца
+  const [sort, setSort] = useState({ key: "sort_name", dir: "asc" });
+  const [showAllOrders, setShowAllOrders] = useState(false);
+
+  // День важнее месяца: выбран день — смотрим ровно его, иначе весь месяц.
+  function periodParams() {
+    if (day) return { date_from: day, date_to: day };
+    if (!period.month) return {};
+    const last = new Date(period.year, period.month, 0).getDate();
+    const mm = String(period.month).padStart(2, "0");
+    return {
+      date_from: `${period.year}-${mm}-01`,
+      date_to: `${period.year}-${mm}-${String(last).padStart(2, "0")}`,
+    };
+  }
 
   function load() {
-    const params = search ? { search } : {};
+    const params = {
+      ...(search ? { search } : {}),
+      ...periodParams(),
+      ordering: (sort.dir === "desc" ? "-" : "") + sort.key,
+    };
     api.get("/clients/clients/", { params }).then((r) => setClients(r.data.results));
   }
 
@@ -27,11 +51,16 @@ export default function Clients() {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search]);
+  }, [search, period.year, period.month, day, sort.key, sort.dir]);
+
+  function onSort(key) {
+    setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "desc" }));
+  }
 
   async function openDetail(c) {
-    const { data } = await api.get(`/clients/clients/${c.id}/`);
+    const { data } = await api.get(`/clients/clients/${c.id}/`, { params: periodParams() });
     setDetail(data);
+    setShowAllOrders(false);
     setReqForm({ referred_by: "", reason: "" });
   }
 
@@ -96,13 +125,20 @@ export default function Clients() {
   }
 
   const columns = [
-    { key: "display_name", label: t("common.name"), render: (c) => <strong>{c.display_name}</strong> },
+    { key: "display_name", label: t("common.name"), sortKey: "sort_name", render: (c) => <strong>{c.display_name}</strong> },
     {
       key: "type",
       label: t("clients.type"),
       render: (c) => <span className="chip">{c.type === "OSOO" ? t("clients.osoo") : t("clients.physical")}</span>,
     },
     { key: "phone", label: t("clients.phone") },
+    {
+      key: "orders_count",
+      label: t("clients.orders"),
+      sortKey: "orders_count",
+      render: (c) =>
+        c.orders_count > 0 ? <strong>{c.orders_count}</strong> : <span className="muted">—</span>,
+    },
     {
       key: "referrals_count",
       label: t("clients.referralsCol"),
@@ -118,6 +154,7 @@ export default function Clients() {
     {
       key: "debt",
       label: t("receipts.debt"),
+      sortKey: "debt",
       render: (c) =>
         Number(c.debt) > 0 ? (
           <span style={{ color: "var(--danger)", fontWeight: 600 }}>
@@ -158,7 +195,26 @@ export default function Clients() {
           onChange={(e) => setSearch(e.target.value)}
         />
       </div>
-      <DataTable columns={columns} rows={clients} />
+
+      {/* Период: месяц стрелками или конкретный день. Показываем клиентов,
+          которые заказывали в это время; «Заказов» тогда — за этот же период. */}
+      <div className="toolbar" style={{ alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
+        <MonthPicker value={period} onChange={(v) => { setPeriod(v); setDay(""); }} />
+        <div className="field" style={{ margin: 0 }}>
+          <label>{t("clients.filterDay")}</label>
+          <input type="date" value={day} onChange={(e) => setDay(e.target.value)} />
+        </div>
+        {(day || period.month) && (
+          <button className="ghost" onClick={() => { setDay(""); setPeriod({ ...period, month: null }); }}>
+            {t("common.reset")}
+          </button>
+        )}
+      </div>
+      {(day || period.month) && (
+        <p className="muted" style={{ fontSize: 13, marginTop: -4 }}>{t("clients.periodHint")}</p>
+      )}
+
+      <DataTable columns={columns} rows={clients} sort={sort} onSort={onSort} />
 
       {detail && (
         <Modal title={detail.display_name} onClose={() => setDetail(null)}>
@@ -223,10 +279,15 @@ export default function Clients() {
           <div className="field" style={{ marginTop: 14 }}>
             <label>{t("clients.ordersList")}</label>
             {detail.orders?.length ? (
-              detail.orders.map((o) => (
+              // При десятках заказов карточка превращалась в бесконечную ленту:
+              // показываем последние ORDERS_PREVIEW, остальное — по кнопке.
+              (showAllOrders ? detail.orders : detail.orders.slice(0, ORDERS_PREVIEW)).map((o) => (
                 <div className="card" key={o.id} style={{ background: "var(--canvas)", padding: 10, marginBottom: 6 }}>
                   <div className="crow">
-                    <strong>№{o.order_number}</strong>
+                    <strong>
+                      №{o.order_number}
+                      {o.title ? <span className="muted" style={{ fontWeight: 400 }}> · {o.title}</span> : null}
+                    </strong>
                     <span className="muted">{new Date(o.created_at).toLocaleDateString("ru-RU")}</span>
                   </div>
                   {o.items.map((it, i) => (
@@ -247,6 +308,17 @@ export default function Clients() {
               ))
             ) : (
               <span className="muted">{t("common.empty")}</span>
+            )}
+            {detail.orders?.length > ORDERS_PREVIEW && (
+              <button
+                className="ghost"
+                style={{ color: "var(--accent-strong)" }}
+                onClick={() => setShowAllOrders((v) => !v)}
+              >
+                {showAllOrders
+                  ? t("clients.ordersCollapse")
+                  : t("clients.ordersShowAll", { count: detail.orders.length })}
+              </button>
             )}
           </div>
 

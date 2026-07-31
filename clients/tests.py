@@ -163,3 +163,114 @@ class ReferralChangeRequestTests(APITestCase):
         self.assertEqual(
             detail["pending_referral_request"]["new_referred_by"], self.carol.id
         )
+
+
+class ClientListFilteringTests(APITestCase):
+    """Список клиентов: счётчик заказов, долг, период и поиск по номеру чека.
+
+    Отдельно закрываем классическую ловушку агрегации: если считать заказы и
+    долг одним join'ом без distinct, чек с несколькими позициями задваивает
+    и то и другое.
+    """
+
+    URL = "/api/clients/clients/"
+
+    def setUp(self):
+        from decimal import Decimal
+
+        from django.utils import timezone
+        from sales.models import Receipt, TransactionItem
+        from warehouse.models import Material
+
+        self.staff = User.objects.create_user(
+            username="cl_store", password="x", role=User.Role.STOREKEEPER
+        )
+        self.client.force_authenticate(self.staff)
+
+        self.mat = Material.objects.create(name="М", category="К", quantity=Decimal("100"))
+        self.a = Client.objects.create(
+            type=Client.Type.PHYSICAL, full_name="Анара", phone="+996700111000"
+        )
+        self.b = Client.objects.create(
+            type=Client.Type.PHYSICAL, full_name="Бакыт", phone="+996700222000"
+        )
+
+        def receipt(client, *, day, total, paid, items=1, status=Receipt.Status.COMPLETED,
+                    pay=Receipt.PaymentStatus.PENDING):
+            r = Receipt.objects.create(
+                client=client, total_price=Decimal(total), amount_paid=Decimal(paid),
+                payment_status=pay, status=status,
+            )
+            for _ in range(items):
+                TransactionItem.objects.create(
+                    receipt=r, type=TransactionItem.Type.MATERIAL, material=self.mat,
+                    quantity=Decimal("1"), price_per_item=Decimal("1"),
+                )
+            Receipt.objects.filter(pk=r.pk).update(
+                created_at=timezone.make_aware(
+                    timezone.datetime.combine(day, timezone.datetime.min.time())
+                )
+            )
+            return r
+
+        from datetime import date
+
+        # Анара: июньский чек на 3 позиции с долгом 100 + июльский без долга.
+        self.june = receipt(self.a, day=date(2026, 6, 10), total="100", paid="0", items=3)
+        receipt(self.a, day=date(2026, 7, 10), total="50", paid="50",
+                pay=Receipt.PaymentStatus.PAID)
+        # Бакыт: только отменённый — не должен считаться заказом.
+        receipt(self.b, day=date(2026, 6, 12), total="900", paid="0",
+                status=Receipt.Status.CANCELLED)
+
+    def _by_name(self, rows, name):
+        return next(r for r in rows if r["display_name"] == name)
+
+    def test_orders_count_ignores_item_rows_and_cancelled(self):
+        rows = self.client.get(self.URL).data["results"]
+        # У Анары 2 заказа, а не 4 (первый чек — из трёх позиций).
+        self.assertEqual(self._by_name(rows, "Анара")["orders_count"], 2)
+        # Отменённый чек Бакыта не считается.
+        self.assertEqual(self._by_name(rows, "Бакыт")["orders_count"], 0)
+
+    def test_debt_not_multiplied_by_item_count(self):
+        from decimal import Decimal
+
+        rows = self.client.get(self.URL).data["results"]
+        self.assertEqual(Decimal(str(self._by_name(rows, "Анара")["debt"])), Decimal("100"))
+        # Долг по отменённому чеку не висит.
+        self.assertEqual(Decimal(str(self._by_name(rows, "Бакыт")["debt"])), Decimal("0"))
+
+    def test_period_filters_clients_and_counts(self):
+        r = self.client.get(self.URL, {"date_from": "2026-07-01", "date_to": "2026-07-31"})
+        rows = r.data["results"]
+        names = [x["display_name"] for x in rows]
+        self.assertIn("Анара", names)
+        self.assertNotIn("Бакыт", names)  # в июле не заказывал
+        # За июль у Анары один заказ…
+        self.assertEqual(self._by_name(rows, "Анара")["orders_count"], 1)
+
+    def test_debt_stays_current_even_with_period(self):
+        from decimal import Decimal
+
+        # …но долг остаётся «на сейчас», хотя должный чек — июньский.
+        r = self.client.get(self.URL, {"date_from": "2026-07-01", "date_to": "2026-07-31"})
+        anara = self._by_name(r.data["results"], "Анара")
+        self.assertEqual(Decimal(str(anara["debt"])), Decimal("100"))
+
+    def test_search_by_receipt_number(self):
+        rows = self.client.get(self.URL, {"search": str(self.june.order_number)}).data["results"]
+        self.assertEqual([x["display_name"] for x in rows], ["Анара"])
+
+    def test_ordering_by_orders_count(self):
+        rows = self.client.get(self.URL, {"ordering": "-orders_count"}).data["results"]
+        self.assertEqual(rows[0]["display_name"], "Анара")
+
+    def test_card_orders_follow_the_period(self):
+        detail = self.client.get(
+            f"{self.URL}{self.a.id}/", {"date_from": "2026-07-01", "date_to": "2026-07-31"}
+        ).data
+        self.assertEqual(len(detail["orders"]), 1)
+        # Без периода — вся история.
+        full = self.client.get(f"{self.URL}{self.a.id}/").data
+        self.assertEqual(len(full["orders"]), 2)
