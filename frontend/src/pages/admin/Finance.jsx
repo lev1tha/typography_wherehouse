@@ -132,6 +132,19 @@ export default function Finance({ embedded = false }) {
 
       <DailyProfitChart />
 
+      {/* Себестоимость проданного и маржа: сколько осталось от выручки после
+          закупочной стоимости материала, ещё до аренды и прочих расходов. */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <h3>{t("finance.cogsTitle")}</h3>
+        <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.cogsHint")}</p>
+        <div className="crow"><span className="k">{t("finance.revenue")}</span><span>{som(report.revenue)}</span></div>
+        <div className="crow">
+          <span className="k">{t("finance.cogs")}</span>
+          <span style={{ color: "var(--danger)" }}>− {som(report.cogs)}</span>
+        </div>
+        {totalRow(t("finance.grossMargin"), report.gross_margin)}
+      </div>
+
       {/* Сводка по постоянным расходам: сами записи ведутся ниже, отдельными
           разделами «Постоянные расходы» и «Зарплаты». */}
       <div className="card" style={{ marginTop: 16 }}>

@@ -442,7 +442,11 @@
     "filterMaterial": "Material",
     "referralTitle": "Referral bonus",
     "referralHint": "Fixed amount per referred client. Shown in the client card; not added to expenses automatically.",
-    "referralBonus": "Bonus per referral (som)"
+    "referralBonus": "Bonus per referral (som)",
+    "cogsTitle": "Cost of goods & margin",
+    "cogs": "Cost of goods sold",
+    "grossMargin": "Gross margin",
+    "cogsHint": "Purchase cost of the material consumed by orders in the period. Taken from the lots it was actually drawn from and frozen at sale time."
   },
   "expenses": {
     "title": "Purchases & investments",

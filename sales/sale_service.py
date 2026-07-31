@@ -15,25 +15,39 @@ from warehouse.stock import apply_stock_change
 from .models import Receipt, TransactionItem
 
 
-def _deduct(material, qty, user, reason="") -> None:
-    """Deduct stock, routing roll-materials through FIFO area consumption."""
+def _money(value: Decimal) -> Decimal:
+    """До копеек. Без этого SQLite сохранил бы «сырой» результат умножения, а
+    PostgreSQL округлил бы его сам — и цифры на dev и на проде разошлись бы."""
+    return Decimal(value).quantize(Decimal("0.01"))
+
+
+def _deduct(material, qty, user, reason="") -> Decimal:
+    """Deduct stock, routing roll-materials through FIFO area consumption.
+
+    Возвращает СЕБЕСТОИМОСТЬ списанного — её мы фиксируем на строке чека, чтобы
+    прибыль считалась «выручка − себестоимость проданного», а не только за
+    вычетом накладных расходов.
+    """
     if qty <= 0:
-        return
+        return Decimal("0")
     if material.is_roll_material:
-        consume_area(material, qty, user=user, reason=reason)
-    else:
-        apply_stock_change(material, -qty, user=user)
+        # FIFO знает, из каких именно партий ушёл материал и почём.
+        return consume_area(material, qty, user=user, reason=reason)
+    apply_stock_change(material, -qty, user=user)
+    # У штучных материалов партий нет — берём текущую закупочную цену.
+    return qty * (material.purchase_price or Decimal("0"))
 
 
-def _restore(material, qty, user, reason="") -> None:
+def _restore(material, qty, user, reason="") -> Decimal:
     if qty <= 0:
-        return
+        return Decimal("0")
     if material.is_roll_material:
         restore_area(material, qty, user=user, reason=reason)
     else:
         apply_stock_change(
             material, qty, log_type=InventoryLog.Type.ADJUSTMENT, reason=reason, user=user
         )
+    return Decimal("0")
 
 
 def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> None:
@@ -51,18 +65,26 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> Non
         qty = item.quantity
         if item.sale_mode == TransactionItem.SaleMode.PIECE and item.material.piece_area:
             qty = item.material.piece_area * item.quantity
-        fn(item.material, qty, user)
+        cost = fn(item.material, qty, user)
+        if not restore:
+            item.cost_total = _money(cost)
+            item.save(update_fields=["cost_total"])
         return
     if item.type != TransactionItem.Type.SERVICE or not item.service_id:
         return
 
-    # Extra recipe materials (e.g. fasteners for installation, glue, …).
+    # Extra recipe materials (e.g. fasteners for installation, glue, …) — их
+    # себестоимость тоже относим на строку услуги.
+    cost = Decimal("0")
     for recipe in item.service.recipes.select_related("material").all():
         if recipe.consumption_mode == ServiceRecipe.Mode.PER_SQM:
             consumed = recipe.consumption_per_unit * item.quantity
         else:  # FIXED per order
             consumed = recipe.consumption_per_unit
-        fn(recipe.material, consumed, user)
+        cost += fn(recipe.material, consumed, user)
+    if not restore and cost:
+        item.cost_total = _money(cost)
+        item.save(update_fields=["cost_total"])
 
 
 def _build_item(receipt, entry) -> list[TransactionItem]:

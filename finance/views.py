@@ -178,11 +178,12 @@ class FinanceReportView(APIView):
         d_from = _parse_date(request.query_params.get("date_from"))
         d_to = _parse_date(request.query_params.get("date_to"))
 
-        def by_created(qs):
+        def by_created(qs, field="created_at"):
+            # field — чтобы фильтровать и позиции чеков (там дата у самого чека).
             if d_from:
-                qs = qs.filter(created_at__date__gte=d_from)
+                qs = qs.filter(**{f"{field}__date__gte": d_from})
             if d_to:
-                qs = qs.filter(created_at__date__lte=d_to)
+                qs = qs.filter(**{f"{field}__date__lte": d_to})
             return qs
 
         def by_spent(qs):
@@ -237,7 +238,20 @@ class FinanceReportView(APIView):
             "total": var["equipment"] + var["improvement"],
         }
         operating_variable = var["cutter"] + var["other"]
-        total_expenses = total_fixed + operating_variable
+
+        # Себестоимость проданного: закупочная стоимость материала, ушедшего в
+        # заказы за период. Зафиксирована на строках чека в момент списания
+        # (FIFO по партиям), поэтому переоценка склада задним числом её не
+        # двигает. Возвращённые строки и отменённые чеки не считаем — товар
+        # вернулся на склад.
+        cogs = by_created(
+            TransactionItem.objects.filter(is_returned=False).exclude(
+                receipt__status=Receipt.Status.CANCELLED
+            ),
+            field="receipt__created_at",
+        ).aggregate(v=_SUM("cost_total"))["v"]
+
+        total_expenses = total_fixed + operating_variable + cogs
 
         # Выручка = оплаченные чеки (полная сумма) + предоплаты по открытым заказам.
         live = by_created(Receipt.objects.exclude(status=Receipt.Status.CANCELLED))
@@ -310,6 +324,11 @@ class FinanceReportView(APIView):
                     "other": var["other"],
                     "total": operating_variable,
                 },
+                # Себестоимость проданного материала — отдельной строкой, чтобы
+                # было видно маржу: выручка − себестоимость = сколько заработали
+                # на материале до накладных расходов.
+                "cogs": cogs,
+                "gross_margin": revenue - cogs,
                 "investments": investments,
                 "total_expenses": total_expenses,
                 "revenue": revenue,
@@ -397,6 +416,22 @@ class DailyReportView(APIView):
         )
         for row in expense_rows:
             variable_by_day[row["spent_at"]] += row["v"]
+
+        # Себестоимость проданного падает на день заказа — иначе день с крупной
+        # продажей выглядел бы сверхприбыльным, а материал под неё «бесплатным».
+        cogs_rows = (
+            TransactionItem.objects.filter(
+                is_returned=False,
+                receipt__created_at__date__gte=first_day,
+                receipt__created_at__date__lt=next_month_first,
+            )
+            .exclude(receipt__status=Receipt.Status.CANCELLED)
+            .annotate(day=TruncDate("receipt__created_at"))
+            .values("day")
+            .annotate(v=_SUM("cost_total"))
+        )
+        for row in cogs_rows:
+            variable_by_day[row["day"]] += row["v"]
 
         rows = []
         for day_num in range(1, days_in_month + 1):

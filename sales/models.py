@@ -174,6 +174,13 @@ class TransactionItem(models.Model):
     sale_mode = models.CharField(
         max_length=10, choices=SaleMode.choices, default=SaleMode.SQM, blank=True
     )
+    # Себестоимость этой строки, зафиксированная В МОМЕНТ списания со склада
+    # (для рулонных — по FIFO-партиям, откуда реально ушёл материал). Снимок,
+    # как и price_per_item: последующая переоценка закупки не должна менять
+    # прибыль уже закрытых заказов.
+    cost_total = models.DecimalField(
+        _("себестоимость строки"), max_digits=14, decimal_places=2, default=Decimal("0")
+    )
     # Cutting-specific: dimensions of the cut. `letter_type` kept for history only.
     letter_type = models.CharField(max_length=20, blank=True)  # legacy, unused
     width = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)

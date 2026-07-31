@@ -254,3 +254,91 @@ class FixedExpenseAndSalaryAPITests(APITestCase):
         self.assertEqual(Decimal(str(fixed["salary"])), Decimal("70"))
         # Августовская аренда в июньский период не попадает.
         self.assertEqual(Decimal(str(fixed["total"])), Decimal("200"))
+
+
+class CogsTests(APITestCase):
+    """Себестоимость проданного: фиксируется при списании (FIFO) и уменьшает прибыль."""
+
+    REPORT = "/api/finance/report/"
+
+    def setUp(self):
+        from warehouse.models import Material
+        from warehouse.rolls import receive_lot
+
+        self.admin = User.objects.create_user(username="c_admin", password="x", role=User.Role.ADMIN)
+        self.client.force_authenticate(self.admin)
+
+        self.mat = Material.objects.create(
+            name="Акрил", category="Акрил", unit=Material.Unit.SQM,
+            is_roll_material=True, price_per_sqm=Decimal("1000"),
+        )
+        # Партия: 10 кв.м за 2000 → 200 сом/кв.м себестоимость.
+        receive_lot(self.mat, form="ROLL", width=Decimal("1"), length=Decimal("10"),
+                    purchase_cost=Decimal("2000"), markup_percent=Decimal("0"))
+
+    def _sell(self, area="2", price="1000"):
+        from sales.sale_service import create_sale
+        return create_sale(
+            client=None, cashier=self.admin, payment_method="CASH",
+            items_data=[{
+                "type": "MATERIAL", "material": self.mat,
+                "quantity": Decimal(area), "mode": "SQM",
+                "material_price": Decimal(price),
+            }],
+        )
+
+    def _report(self):
+        r = self.client.get(self.REPORT)
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.data
+
+    def test_cost_recorded_from_fifo_lot(self):
+        receipt = self._sell(area="2")
+        item = receipt.items.get()
+        # 2 кв.м × 200 сом/кв.м = 400.
+        self.assertEqual(Decimal(str(item.cost_total)), Decimal("400"))
+
+    def test_profit_now_accounts_for_material_cost(self):
+        self._sell(area="2", price="1000")   # выручка 2000, себестоимость 400
+        data = self._report()
+        self.assertEqual(Decimal(str(data["revenue"])), Decimal("2000"))
+        self.assertEqual(Decimal(str(data["cogs"])), Decimal("400"))
+        self.assertEqual(Decimal(str(data["gross_margin"])), Decimal("1600"))
+        # Прибыль = выручка − (постоянные + переменные + себестоимость).
+        self.assertEqual(Decimal(str(data["profit"])), Decimal("1600"))
+
+    def test_returned_line_drops_out_of_cogs(self):
+        from sales.sale_service import refund_receipt
+
+        receipt = self._sell(area="2")
+        self.assertEqual(Decimal(str(self._report()["cogs"])), Decimal("400"))
+        refund_receipt(receipt, user=self.admin)
+        # Материал вернулся на склад — его себестоимость больше не расход.
+        self.assertEqual(Decimal(str(self._report()["cogs"])), Decimal("0"))
+
+    def test_cost_is_a_snapshot_not_current_price(self):
+        from warehouse.rolls import receive_lot
+
+        self._sell(area="2")  # по 200 сом/кв.м
+        # Новая партия ВДВОЕ дороже — прошлые продажи это не должно двигать.
+        receive_lot(self.mat, form="ROLL", width=Decimal("1"), length=Decimal("10"),
+                    purchase_cost=Decimal("4000"), markup_percent=Decimal("0"))
+        self.assertEqual(Decimal(str(self._report()["cogs"])), Decimal("400"))
+
+    def test_fifo_spans_two_lots(self):
+        from warehouse.rolls import receive_lot
+
+        # Вторая партия дороже; продаём больше, чем осталось в первой.
+        receive_lot(self.mat, form="ROLL", width=Decimal("1"), length=Decimal("10"),
+                    purchase_cost=Decimal("5000"), markup_percent=Decimal("0"))  # 500/кв.м
+        receipt = self._sell(area="12")
+        # 10 кв.м из первой (×200) + 2 из второй (×500) = 2000 + 1000 = 3000.
+        self.assertEqual(Decimal(str(receipt.items.get().cost_total)), Decimal("3000"))
+
+    def test_daily_report_puts_cost_on_sale_day(self):
+        self._sell(area="2")
+        today = timezone.localdate()
+        r = self.client.get("/api/finance/daily/", {"year": today.year, "month": today.month})
+        self.assertEqual(r.status_code, 200, r.data)
+        row = next(x for x in r.data["rows"] if x["day"] == today.day)
+        self.assertEqual(Decimal(str(row["variable"])), Decimal("400"))
