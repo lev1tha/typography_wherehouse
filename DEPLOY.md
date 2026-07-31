@@ -127,9 +127,12 @@ docker compose -f docker-compose.prod.yml up -d --build
 Проверить:
 
 ```bash
-docker compose -f docker-compose.prod.yml ps      # оба сервиса healthy/running
-docker compose -f docker-compose.prod.yml logs -f web
-curl -I http://127.0.0.1:8001/admin/              # ожидаем 301/302, не connection refused
+docker compose -f docker-compose.prod.yml ps      # оба сервиса Up (healthy)
+docker compose -f docker-compose.prod.yml logs web | tail -20
+
+# Заголовок Host обязателен: ALLOWED_HOSTS разрешает только chpucenter.com,
+# поэтому запрос «просто на 127.0.0.1» вернёт 400 — это не поломка, а защита.
+curl -I -H 'Host: chpucenter.com' http://127.0.0.1:8001/admin/login/   # ожидаем 200
 ```
 
 Создать рабочие аккаунты (каталог + услуги + 2 пользователя):
