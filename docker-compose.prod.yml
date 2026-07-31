@@ -9,16 +9,18 @@ services:
   db:
     image: postgres:17-alpine
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-chpu}
-      POSTGRES_USER: ${POSTGRES_USER:-chpu}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD обязателен — задайте в .env.prod}
+    # Именно env_file, а не environment с ${...}: подстановка в compose-файле
+    # читает только шелл и файл с именем ровно «.env», про .env.prod она не
+    # знает. env_file же отдаёт переменные прямо в контейнер — то, что нужно
+    # образу postgres (POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD).
+    env_file: .env.prod
     volumes:
       - pgdata:/var/lib/postgresql/data
     # Наружу не публикуем: база доступна только контейнеру web по внутренней
     # сети compose. Для psql заходим через `docker compose exec db psql`.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chpu} -d ${POSTGRES_DB:-chpu}"]
+      # $$ — экранирование: подставит не compose, а шелл внутри контейнера.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -40,7 +42,9 @@ services:
       - /srv/chpucenter/media:/app/media
       - /srv/chpucenter/frontend:/app/frontend_public
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/token/ -o /dev/null -X POST || [ $? -eq 22 ]"]
+      # Обычная страница входа в админку: 200 = Django жив и отвечает.
+      # Хост подставляем явно, иначе ALLOWED_HOSTS отдаст 400 на 127.0.0.1.
+      test: ["CMD-SHELL", "curl -fsS -H 'Host: chpucenter.com' http://127.0.0.1:8000/admin/login/ -o /dev/null"]
       interval: 30s
       timeout: 10s
       retries: 3
