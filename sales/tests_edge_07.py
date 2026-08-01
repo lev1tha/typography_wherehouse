@@ -117,11 +117,13 @@ class EdgeFinanceTests(APITestCase):
         self.assertEqual(Decimal(str(data["revenue"])), Decimal("300"))
 
     # ---- materials block removed -------------------------------------------
-    def test_report_has_no_materials_block(self):
-        # Раздел «Материалы» убран из отчёта (транспорт входит в цену закупки),
-        # поэтому ключа "materials" в ответе больше нет.
+    def test_report_has_materials_block(self):
+        """Блок «Материалы» вернули по структуре Excel заказчика: остаток на
+        начало, закуп, остаток на конец, транспорт, долг + подытог."""
         data = self._report()
-        self.assertNotIn("materials", data)
+        self.assertIn("materials", data)
+        for key in ("stock_start", "purchase", "stock_end", "transport", "debt", "total"):
+            self.assertIn(key, data["materials"], key)
 
     # ---- client_debt -------------------------------------------------------
     def test_client_debt_only_positive_pending(self):
@@ -287,13 +289,19 @@ class EdgeFinanceTests(APITestCase):
         self.assertEqual(Decimal(str(data["variable"]["cutter"])), Decimal("30"))
         self.assertEqual(Decimal(str(data["variable"]["other"])), Decimal("20"))
         self.assertEqual(Decimal(str(data["variable"]["total"])), Decimal("50"))
-        # «Материалы» убраны из расходов: material_purchase=100 в настройках
-        # НЕ должен попадать в total_expenses.
         self.assertEqual(Decimal(str(data["fixed"]["total"])), Decimal("50"))
-        # total_expenses = fixed(50) + variable(50) = 100 (без материалов).
-        self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("100"))
-        # profit = revenue(1000) - total_expenses(100) = 900.
-        self.assertEqual(Decimal(str(data["profit"])), Decimal("900"))
+        # Блок «Материалы» вернулся в расходы: закуп 100 из настроек участвует,
+        # но пока «остаток на начало» пуст, формула ушла бы в минус на стоимость
+        # склада — такой итог в прибыль не пускаем (он обнуляется).
+        materials_total = Decimal(str(data["materials"]["total"]))
+        self.assertEqual(
+            Decimal(str(data["total_expenses"])),
+            materials_total + Decimal("50") + Decimal("50"),
+        )
+        self.assertEqual(
+            Decimal(str(data["profit"])),
+            Decimal(str(data["revenue"])) - Decimal(str(data["total_expenses"])),
+        )
 
     # ---- permissions -------------------------------------------------------
     def test_report_admin_only(self):

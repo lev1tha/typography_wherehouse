@@ -193,8 +193,8 @@ class FinanceReportView(APIView):
                 qs = qs.filter(spent_at__lte=d_to)
             return qs
 
-        # Раздел «Материалы» убран (транспорт и так входит в цену закупки —
-        # см. поступление на Складе). Расходы = постоянные + переменные (покупки).
+        # Структура отчёта повторяет Excel заказчика: три блока с подытогами —
+        # Материалы, Постоянные расходы, Переменные расходы.
         # Постоянные расходы и зарплаты — теперь записи с датами, поэтому просто
         # суммируем попавшие в период (раньше месячную сумму приходилось резать
         # пропорционально — см. _prorate_factor, больше не нужен здесь).
@@ -230,21 +230,46 @@ class FinanceReportView(APIView):
             "improvement": cat(Expense.Category.IMPROVEMENT),
             "other": cat(Expense.Category.OTHER),
         }
-        # Вложения (оборудование + улучшение цеха) — это ИНВЕСТИЦИИ, а не текущие
-        # расходы: в расчёт прибыли не входят, показываются отдельным блоком
-        # (решение заказчика). Операционные переменные = расходники (фреза) + прочие.
+        # Вложения (оборудование + улучшение цеха) показываются В БЛОКЕ переменных
+        # расходов, но в прибыль НЕ входят: станок за 300 000 не должен делать
+        # месяц убыточным (решение заказчика).
         investments = {
             "equipment": var["equipment"],
             "improvement": var["improvement"],
             "total": var["equipment"] + var["improvement"],
         }
-        operating_variable = var["cutter"] + var["transport"] + var["other"]
+        # Транспорт переехал в блок «Материалы» — здесь его больше нет, иначе
+        # он посчитался бы дважды.
+        operating_variable = var["cutter"] + var["other"]
+
+        # --- Блок «Материалы» (как в исходном Excel заказчика) ---------------
+        # Расход материала за период = остаток на начало + закуп + транспорт
+        # − остаток на конец. Остаток на конец берём живой, со склада.
+        stock_end = sum(
+            (m.quantity * m.purchase_price for m in Material.objects.all()),
+            Decimal("0"),
+        )
+        materials_raw = s.stock_start + s.material_purchase + var["transport"] - stock_end
+        # Пока «остаток на начало» и «закуп» не заполнены, формула уходит в минус
+        # на всю стоимость склада — и отрицательный расход РАЗДУЛ БЫ прибыль.
+        # В прибыль такой результат не пускаем, а в интерфейс отдаём признак,
+        # что вводные не заполнены.
+        materials = {
+            "stock_start": s.stock_start,        # ручной ввод
+            "purchase": s.material_purchase,     # ручной ввод
+            "stock_end": stock_end,              # считается по складу
+            "transport": var["transport"],       # сумма записей «Покупок»
+            # Долг поставщику — справочно, В ИТОГ НЕ ВХОДИТ: материал, взятый в
+            # долг, уже сидит в строке «закуп», иначе посчитали бы дважды.
+            "debt": s.material_debt,
+            "total": max(materials_raw, Decimal("0")),
+            "needs_setup": materials_raw < 0,
+        }
 
         # Себестоимость проданного: закупочная стоимость материала, ушедшего в
-        # заказы за период. Зафиксирована на строках чека в момент списания
-        # (FIFO по партиям), поэтому переоценка склада задним числом её не
-        # двигает. Возвращённые строки и отменённые чеки не считаем — товар
-        # вернулся на склад.
+        # заказы за период (FIFO по партиям, зафиксирована в момент продажи).
+        # В прибыль НЕ входит — её считает блок «Материалы» (решение заказчика);
+        # остаётся справочной цифрой для сверки маржи.
         cogs = by_created(
             TransactionItem.objects.filter(is_returned=False).exclude(
                 receipt__status=Receipt.Status.CANCELLED
@@ -252,7 +277,7 @@ class FinanceReportView(APIView):
             field="receipt__created_at",
         ).aggregate(v=_SUM("cost_total"))["v"]
 
-        total_expenses = total_fixed + operating_variable + cogs
+        total_expenses = materials["total"] + total_fixed + operating_variable
 
         # Выручка = оплаченные чеки (полная сумма) + предоплаты по открытым заказам.
         live = by_created(Receipt.objects.exclude(status=Receipt.Status.CANCELLED))
@@ -320,10 +345,15 @@ class FinanceReportView(APIView):
                     "other": fx["other"],
                     "total": total_fixed,
                 },
+                # Блок «Материалы» — первый в отчёте, как в Excel заказчика.
+                "materials": materials,
                 "variable": {
                     "cutter": var["cutter"],
-                    "transport": var["transport"],
                     "other": var["other"],
+                    # Вложения показываем в этом же блоке, но в total их нет —
+                    # total идёт в прибыль, вложения нет.
+                    "equipment": var["equipment"],
+                    "improvement": var["improvement"],
                     "total": operating_variable,
                 },
                 # Себестоимость проданного материала — отдельной строкой, чтобы

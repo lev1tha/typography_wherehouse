@@ -138,6 +138,21 @@ export default function Finance({ embedded = false }) {
       />
     </div>
   );
+  // Заголовок блока и подытог — визуальное разделение как в Excel заказчика.
+  const blockHead = (label) => (
+    <div
+      style={{
+        background: "var(--primary-soft)",
+        borderRadius: "var(--r-md)",
+        padding: "8px 14px",
+        margin: "0 0 6px",
+        fontWeight: 700,
+        color: "var(--accent-strong)",
+      }}
+    >
+      {label}
+    </div>
+  );
   const totalRow = (label, value) => (
     <div
       className="crow"
@@ -182,10 +197,35 @@ export default function Finance({ embedded = false }) {
         {totalRow(t("finance.grossMargin"), report.gross_margin)}
       </div>
 
-      {/* Сводка по постоянным расходам: сами записи ведутся ниже, отдельными
-          разделами «Постоянные расходы» и «Зарплаты». */}
+      {/* Три блока с подытогами — структура как в Excel заказчика. */}
+      {report.materials && (
+        <div className="card" style={{ marginTop: 16 }}>
+          {blockHead(t("finance.blockMaterials"))}
+          {editRow(t("finance.stockStart"), "stock_start")}
+          {editRow(t("finance.materialPurchase"), "material_purchase")}
+          <div className="crow">
+            <span className="k">{t("finance.stockEnd")}</span>
+            <span>{som(report.materials.stock_end)}</span>
+          </div>
+          <div className="crow">
+            <span className="k">{t("finance.transportRow")}</span>
+            <span>{som(report.materials.transport)}</span>
+          </div>
+          {editRow(t("finance.materialDebt"), "material_debt")}
+          <p className="muted" style={{ fontSize: 12, margin: "2px 0 0" }}>
+            {t("finance.materialsHint")}
+          </p>
+          {report.materials.needs_setup && (
+            <p style={{ fontSize: 12, margin: "6px 0 0", color: "var(--danger)" }}>
+              {t("finance.materialsNeedSetup")}
+            </p>
+          )}
+          {totalRow(t("finance.totalMaterials"), report.materials.total)}
+        </div>
+      )}
+
       <div className="card" style={{ marginTop: 16 }}>
-        <h3>{t("finance.fixed")}</h3>
+        {blockHead(t("finance.blockFixed"))}
         <div className="crow"><span className="k">{t("fixedCat.RENT")}</span><span>{som(report.fixed.rent)}</span></div>
         <div className="crow"><span className="k">{t("fixedCat.UTILITIES")}</span><span>{som(report.fixed.utilities)}</span></div>
         <div className="crow"><span className="k">{t("fixedCat.INTERNET")}</span><span>{som(report.fixed.internet)}</span></div>
@@ -194,15 +234,29 @@ export default function Finance({ embedded = false }) {
         {totalRow(t("finance.totalFixed"), report.fixed.total)}
       </div>
 
-      {report.investments && (
-        <div className="card" style={{ marginTop: 16 }}>
-          <h3>{t("finance.investmentsTitle")}</h3>
-          <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.investmentsHint")}</p>
-          <div className="crow"><span className="k">{t("expenseCat.EQUIPMENT")}</span><span>{som(report.investments.equipment)}</span></div>
-          <div className="crow"><span className="k">{t("expenseCat.IMPROVEMENT")}</span><span>{som(report.investments.improvement)}</span></div>
-          {totalRow(t("finance.investmentsTotal"), report.investments.total)}
+      <div className="card" style={{ marginTop: 16 }}>
+        {blockHead(t("finance.blockVariable"))}
+        <div className="crow"><span className="k">{t("expenseCat.CUTTER")}</span><span>{som(report.variable.cutter)}</span></div>
+        <div className="crow"><span className="k">{t("expenseCat.OTHER")}</span><span>{som(report.variable.other)}</span></div>
+        <div className="crow">
+          <span className="k">
+            {t("expenseCat.EQUIPMENT")} <span className="muted" style={{ fontSize: 12 }}>· {t("finance.notInProfit")}</span>
+          </span>
+          <span className="muted">{som(report.variable.equipment)}</span>
         </div>
-      )}
+        <div className="crow">
+          <span className="k">
+            {t("expenseCat.IMPROVEMENT")} <span className="muted" style={{ fontSize: 12 }}>· {t("finance.notInProfit")}</span>
+          </span>
+          <span className="muted">{som(report.variable.improvement)}</span>
+        </div>
+        {totalRow(t("finance.totalVariable"), report.variable.total)}
+        {report.investments && Number(report.investments.total) > 0 && (
+          <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
+            {t("finance.investmentsHint")} — {som(report.investments.total)}
+          </p>
+        )}
+      </div>
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3>{t("finance.referralTitle")}</h3>

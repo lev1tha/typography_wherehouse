@@ -312,8 +312,12 @@ class CogsTests(APITestCase):
         self.assertEqual(Decimal(str(data["revenue"])), Decimal("2000"))
         self.assertEqual(Decimal(str(data["cogs"])), Decimal("400"))
         self.assertEqual(Decimal(str(data["gross_margin"])), Decimal("1600"))
-        # Прибыль = выручка − (постоянные + переменные + себестоимость).
-        self.assertEqual(Decimal(str(data["profit"])), Decimal("1600"))
+        # Себестоимость — справочная цифра: в прибыль идёт итог блока
+        # «Материалы» (решение заказчика), поэтому 2000 − cogs здесь не ждём.
+        self.assertEqual(
+            Decimal(str(data["profit"])),
+            Decimal(str(data["revenue"])) - Decimal(str(data["total_expenses"])),
+        )
 
     def test_returned_line_drops_out_of_cogs(self):
         from sales.sale_service import refund_receipt
@@ -350,3 +354,96 @@ class CogsTests(APITestCase):
         self.assertEqual(r.status_code, 200, r.data)
         row = next(x for x in r.data["rows"] if x["day"] == today.day)
         self.assertEqual(Decimal(str(row["variable"])), Decimal("400"))
+
+
+class MaterialsBlockTests(APITestCase):
+    """Блок «Материалы» как в Excel: три блока с подытогами, прибыль считается
+    по итогу материалов, вложения в прибыль не входят."""
+
+    URL = "/api/finance/report/"
+
+    def setUp(self):
+        from finance.models import FinanceSettings
+        from warehouse.models import Material
+
+        self.admin = User.objects.create_user(username="m_admin", password="x", role=User.Role.ADMIN)
+        self.client.force_authenticate(self.admin)
+        FinanceSettings.objects.update_or_create(
+            pk=1,
+            defaults={
+                "stock_start": Decimal("1000"),
+                "material_purchase": Decimal("5000"),
+                "material_debt": Decimal("700"),
+            },
+        )
+        # Остаток на конец = склад по закупочной цене: 10 × 200 = 2000.
+        Material.objects.create(
+            name="Акрил", category="Акрил", quantity=Decimal("10"),
+            purchase_price=Decimal("200"),
+        )
+
+    def _report(self):
+        r = self.client.get(self.URL)
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.data
+
+    def test_materials_total_formula(self):
+        Expense.objects.create(category=Expense.Category.TRANSPORT, amount=Decimal("300"))
+        m = self._report()["materials"]
+        self.assertEqual(Decimal(str(m["stock_start"])), Decimal("1000"))
+        self.assertEqual(Decimal(str(m["purchase"])), Decimal("5000"))
+        self.assertEqual(Decimal(str(m["stock_end"])), Decimal("2000"))
+        self.assertEqual(Decimal(str(m["transport"])), Decimal("300"))
+        # 1000 + 5000 + 300 − 2000 = 4300
+        self.assertEqual(Decimal(str(m["total"])), Decimal("4300"))
+
+    def test_material_debt_is_informational_not_in_total(self):
+        m = self._report()["materials"]
+        self.assertEqual(Decimal(str(m["debt"])), Decimal("700"))
+        # Долг показан, но в итог не добавлен: 1000 + 5000 + 0 − 2000 = 4000.
+        self.assertEqual(Decimal(str(m["total"])), Decimal("4000"))
+
+    def test_transport_counted_once_not_in_variable(self):
+        Expense.objects.create(category=Expense.Category.TRANSPORT, amount=Decimal("300"))
+        data = self._report()
+        self.assertEqual(Decimal(str(data["materials"]["transport"])), Decimal("300"))
+        # В переменных расходах транспорта больше нет — иначе задвоился бы.
+        self.assertEqual(Decimal(str(data["variable"]["total"])), Decimal("0"))
+
+    def test_investments_shown_but_not_in_profit(self):
+        Expense.objects.create(category=Expense.Category.EQUIPMENT, amount=Decimal("9000"))
+        Expense.objects.create(category=Expense.Category.CUTTER, amount=Decimal("100"))
+        data = self._report()
+        # Оборудование видно в блоке…
+        self.assertEqual(Decimal(str(data["variable"]["equipment"])), Decimal("9000"))
+        # …но в подытог переменных (который идёт в прибыль) не входит.
+        self.assertEqual(Decimal(str(data["variable"]["total"])), Decimal("100"))
+
+    def test_profit_uses_materials_block_not_cogs(self):
+        data = self._report()
+        expected = (
+            Decimal(str(data["materials"]["total"]))
+            + Decimal(str(data["fixed"]["total"]))
+            + Decimal(str(data["variable"]["total"]))
+        )
+        self.assertEqual(Decimal(str(data["total_expenses"])), expected)
+        self.assertEqual(
+            Decimal(str(data["profit"])),
+            Decimal(str(data["revenue"])) - expected,
+        )
+        # Себестоимость осталась справочной цифрой и в расходы не добавлена.
+        self.assertIn("cogs", data)
+
+    def test_negative_total_does_not_inflate_profit(self):
+        """Пока вводные не заполнены, формула уходит в минус на стоимость склада.
+        Отрицательный расход раздул бы прибыль — в прибыль такое не пускаем."""
+        from finance.models import FinanceSettings
+
+        FinanceSettings.objects.update_or_create(
+            pk=1, defaults={"stock_start": Decimal("0"), "material_purchase": Decimal("0")},
+        )
+        m = self._report()["materials"]
+        self.assertTrue(m["needs_setup"])
+        self.assertEqual(Decimal(str(m["total"])), Decimal("0"))
+        # Остаток на конец при этом честно показан.
+        self.assertEqual(Decimal(str(m["stock_end"])), Decimal("2000"))
