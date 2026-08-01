@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
+import { apiError } from "../../api/errors.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
@@ -354,7 +355,7 @@ export default function Checkout() {
       setOrderTitle("");
       api.get("/clients/clients/").then((r) => setClientsList(r.data.results));
     } catch (e) {
-      setError(e.response?.data?.detail || t("common.error"));
+      setError(apiError(e, t("common.error")));
     } finally {
       setBusy(false);
     }

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
+import { apiError } from "../../api/errors.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import Icon from "../../components/Icon.jsx";
@@ -82,14 +83,7 @@ export default function Clients() {
     }
   }
 
-  function errMsg(e) {
-    const data = e.response?.data;
-    return (
-      data?.detail ||
-      (Array.isArray(data?.referred_by) ? data.referred_by[0] : null) ||
-      t("common.error")
-    );
-  }
+  const errMsg = (e) => apiError(e, t("common.error"));
 
   async function setReferrer(value) {
     try {
