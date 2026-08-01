@@ -6,6 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from accounts.permissions import IsAdmin
 from audit.models import AuditLog
 from clients.models import Client
 from clients.serializers import ClientSerializer
@@ -100,6 +101,26 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 debt += owed
         return Response({"total": qs.count(), "working": working, "ready": ready, "debt": debt})
 
+    @action(detail=False, methods=["get"])
+    def titles(self, request):
+        """Ранее использованные наименования заказов — для подсказки в кассе,
+        как живой поиск по клиенту. Свежие сверху, без повторов."""
+        seen, out = set(), []
+        rows = (
+            self.get_queryset()
+            .exclude(title="")
+            .order_by("-created_at")
+            .values_list("title", flat=True)[:200]
+        )
+        for title in rows:
+            key = title.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                out.append(title.strip())
+            if len(out) >= 30:
+                break
+        return Response(out)
+
     def _fresh_response(self, receipt):
         """Re-load the receipt so the response reflects mutations (the loaded
         instance carries a stale prefetch cache after add/refund/status changes)."""
@@ -187,7 +208,9 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         AuditLog.record(request.user, f"Возврат по чеку {receipt.order_number}")
         return self._fresh_response(receipt)
 
-    @action(detail=True, methods=["post"])
+    # Деньги и откат оплаты — только админ: складовщик оформляет продажу,
+    # но не решает, погашен ли долг и не отменяет принятую оплату.
+    @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
     def pay(self, request, pk=None):
         """POST /receipts/<id>/pay/ — принять оплату долга (полную или частичную).
         Увеличивает amount_paid; когда долг погашен — статус становится PAID."""
@@ -239,7 +262,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         AuditLog.record(request.user, f"Оплата долга по чеку {receipt.order_number}: +{amount} сом")
         return self._fresh_response(receipt)
 
-    @action(detail=True, methods=["post"])
+    @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
     def unpay(self, request, pk=None):
         """POST /receipts/<id>/unpay/ — откат оплаты: вернуть чек в «Не оплачено».
 

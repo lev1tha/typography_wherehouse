@@ -47,9 +47,12 @@ class EdgeReceiptStatsTests(APITestCase):
     # ---- helpers -----------------------------------------------------------
 
     def _material_receipt(self, cashier, *, client=None, amount_paid=None):
-        """Cash material-only receipt. amount_paid=None → fully PAID; a value
-        below total → stays PENDING with debt."""
-        return create_sale(
+        """Cash material-only receipt. amount_paid=None → оплачен полностью;
+        значение ниже итога → остаётся PENDING с долгом.
+
+        Сумму оплаты касса теперь передаёт явно (пустое поле = ничего не
+        приняли), поэтому «оплачен полностью» здесь доводим руками."""
+        receipt = create_sale(
             client=client,
             cashier=cashier,
             payment_method=Receipt.PaymentMethod.CASH,
@@ -61,6 +64,11 @@ class EdgeReceiptStatsTests(APITestCase):
             }],
             amount_paid=amount_paid,
         )
+        if amount_paid is None:
+            receipt.amount_paid = receipt.total_price
+            receipt.payment_status = Receipt.PaymentStatus.PAID
+            receipt.save(update_fields=["amount_paid", "payment_status"])
+        return receipt
 
     def _service_receipt(self, cashier, *, fulfillment, client=None):
         """Build a receipt that carries a SERVICE line directly (so it counts

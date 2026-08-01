@@ -59,6 +59,7 @@ export default function Checkout() {
   const [paymentMethod, setPaymentMethod] = useState("CASH");
   const [prepay, setPrepay] = useState("");
   const [orderTitle, setOrderTitle] = useState(""); // наименование заказа
+  const [titleHints, setTitleHints] = useState([]); // ранее использованные
   const [client, setClient] = useState({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" });
   const [clientId, setClientId] = useState(null);
   const [referredBy, setReferredBy] = useState("");
@@ -73,6 +74,9 @@ export default function Checkout() {
     api.get("/warehouse/materials/", { params: { ordering: "name" } }).then((r) => setMaterials(r.data.results));
     api.get("/services/services/").then((r) => setServices(r.data.results));
     api.get("/clients/clients/").then((r) => setClientsList(r.data.results));
+    // Подсказки по названию заказа — как живой поиск клиента, чтобы повторные
+    // работы назывались одинаково, а не «вывеска», «Вывеска», «вывеска2».
+    api.get("/sales/receipts/titles/").then((r) => setTitleHints(r.data)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -252,8 +256,10 @@ export default function Checkout() {
       if (!w || !l) return;
       const area = +(w * l).toFixed(3);
       // «Отрезать кусок» = материал (площадь) + работа реза (погонный метр).
-      // Погонный метр можно ввести вручную; если пусто — берём площадь (Ш×Д).
-      const runM = Number(cut.running_meters) || area;
+      // Длину реза вводит мастер. Пока не ввёл — работа 0: раньше сюда
+      // подставлялась площадь и умножалась на ставку за пог.м, то есть кв.м
+      // считались как пог.м и цена работы выходила неверной.
+      const runM = Number(cut.running_meters) || 0;
       if (!cuttingService) {
         // В каталоге нет услуги резки → продаём только кусок материала.
         setCart((prev) => [...prev, {
@@ -339,8 +345,9 @@ export default function Checkout() {
     });
     const payload = { payment_method: paymentMethod, items };
     if (orderTitle.trim()) payload.title = orderTitle.trim();
-    if (paymentMethod !== "ONLINE" && prepay !== "" && Number(prepay) >= 0)
-      payload.amount_paid = Number(prepay);
+    // Пустое поле = ничего не приняли, весь заказ уходит в долг. Раньше пустое
+    // молча означало «оплачено полностью», и долг терялся.
+    if (paymentMethod !== "ONLINE") payload.amount_paid = Math.max(0, Number(prepay) || 0);
     if (clientId) payload.client_id = clientId;
     else if (client.phone)
       payload.client = { ...client, ...(referredBy ? { referred_by: Number(referredBy) } : {}) };
@@ -373,8 +380,8 @@ export default function Checkout() {
   const cutWorkRate = cut?.service
     ? (cut.service.uses_running_meter ? Number(cut.cutRate || 0) : Number(cut.service.rate_flat))
     : (cut?.cutting ? Number(cut.cutRate || 0) : 0);
-  // Работа резки — по погонному метру: ручной ввод, иначе из площади (Ш×Д).
-  const cutRunM = cut?.cutting && Number(cut?.running_meters) > 0 ? Number(cut.running_meters) : cutArea;
+  // Работа резки — строго по введённой длине реза (пог.м), без подстановки площади.
+  const cutRunM = cut?.cutting ? Number(cut?.running_meters) || 0 : 0;
   const cutWork = cutWorkOn ? cutWorkRate * cutRunM : 0;
   const cutMaterialSum = cutMatSqm * cutArea;
   const cutPieceQty = Number(cut?.qty) || 1;
@@ -500,7 +507,13 @@ export default function Checkout() {
               value={orderTitle}
               onChange={(e) => setOrderTitle(e.target.value)}
               placeholder={t("checkout.orderTitlePh")}
+              list="order-title-hints"
             />
+            <datalist id="order-title-hints">
+              {titleHints.map((x) => (
+                <option key={x} value={x} />
+              ))}
+            </datalist>
           </div>
 
           <div className="row">
@@ -574,22 +587,41 @@ export default function Checkout() {
           {paymentMethod !== "ONLINE" && (
             <div className="field" style={{ marginTop: 10 }}>
               <label>{t("checkout.prepay")}</label>
-              <input
-                type="number"
-                min="0"
-                value={prepay}
-                onChange={(e) => setPrepay(e.target.value)}
-                placeholder={`${total.toFixed(0)} сом`}
-              />
+              <div className="row" style={{ gap: 8, margin: 0 }}>
+                <input
+                  type="number"
+                  min="0"
+                  value={prepay}
+                  onChange={(e) => setPrepay(e.target.value)}
+                  placeholder="0"
+                  style={{ flex: 1 }}
+                />
+                {/* Обычный случай — заплатили всю сумму: одна кнопка вместо
+                    набора цифр, чтобы касса не тормозила на каждой продаже. */}
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setPrepay(String(total.toFixed(0)))}
+                  disabled={!total}
+                >
+                  {t("checkout.payFull")}
+                </button>
+              </div>
               <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
                 {t("checkout.prepayHint")}
               </p>
-              {prepay !== "" && Number(prepay) < total && (
+              {Number(prepay || 0) < total && (
                 <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
                   {t("receipts.debt")}:{" "}
                   <strong style={{ color: "var(--danger)" }}>
-                    {(total - Number(prepay)).toFixed(0)} сом
+                    {(total - Number(prepay || 0)).toFixed(0)} сом
                   </strong>
+                </div>
+              )}
+              {Number(prepay || 0) > total && total > 0 && (
+                <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
+                  {t("checkout.change")}:{" "}
+                  <strong>{(Number(prepay) - total).toFixed(0)} сом</strong>
                 </div>
               )}
             </div>

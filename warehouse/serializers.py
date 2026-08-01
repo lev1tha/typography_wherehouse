@@ -43,6 +43,7 @@ class MaterialSerializer(serializers.ModelSerializer):
             "sqm_price",
             "sheets_remaining",
             "is_below_critical",
+            "is_archived",
             "stock_value",
             "images",
             "primary_image",

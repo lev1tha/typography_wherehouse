@@ -61,6 +61,8 @@ class EdgeRefundTests(APITestCase):
                 {"type": "MATERIAL", "material": self.acrylic, "quantity": 1, "mode": "PIECE"},
                 {"type": "MATERIAL", "material": self.bolt, "quantity": 2, "mode": "SQM"},
             ],
+            # Оплату указываем явно: без неё заказ уходит в долг.
+            amount_paid=Decimal("3900"),
         )
 
     # ---- full refund -------------------------------------------------------

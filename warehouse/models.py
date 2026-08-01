@@ -98,6 +98,10 @@ class Material(models.Model):
         default=Decimal("0"),
         help_text=_("Стоимость работы резки за погонный метр для этого материала"),
     )
+    # Материал, который больше не продаём. Удалить его нельзя, если по нему были
+    # продажи или поступления (иначе поедут суммы в старых чеках и отчётах),
+    # поэтому прячем из каталога и кассы, а историю оставляем целой.
+    is_archived = models.BooleanField(_("скрыт из каталога"), default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

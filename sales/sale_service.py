@@ -149,13 +149,15 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
             rate = _priced("cut_rate", material.cut_rate_per_pm if material else Decimal("0"))
         else:
             rate = _priced("cut_rate", service.rate_flat)
-        # Резку считаем по погонному метру (длине реза): можно ввести вручную,
-        # иначе берём площадь куска. Материал всегда списывается/считается по площади.
+        # Резку считаем по ДЛИНЕ РЕЗА в погонных метрах — её вводит мастер.
+        # Пока не ввёл, работа = 0: раньше сюда подставлялась площадь и
+        # умножалась на ставку за пог.м, то есть кв.м считались как пог.м
+        # (для листа 1.22×2.44 — 2.98 вместо реальных 7.32).
+        # Для не-резочных площадных услуг (внутренний монтаж) — по-прежнему площадь.
         work_qty = area
         if service.uses_running_meter:
             rm = entry.get("running_meters")
-            if rm not in (None, ""):
-                work_qty = Decimal(str(rm))
+            work_qty = Decimal(str(rm)) if rm not in (None, "") else Decimal("0")
         work = TransactionItem.objects.create(
             receipt=receipt, type=TransactionItem.Type.SERVICE, service=service,
             quantity=work_qty, price_per_item=rate,
@@ -211,10 +213,17 @@ def create_sale(*, client, cashier, payment_method, items_data, amount_paid=None
     total = receipt.recalculate_total()
 
     if payment_method != Receipt.PaymentMethod.ONLINE:
-        # Наличные / MBank / DemirBank — оплата принимается на месте (перевод/нал):
-        # деньги получены, склад списывается сразу, предоплата опциональна, а
-        # остаток (если платят частично) остаётся долгом (чек — PENDING).
-        paid = total if amount_paid is None else min(max(Decimal(str(amount_paid)), Decimal("0")), total)
+        # Наличные / MBank / DemirBank — товар отдаём сразу, поэтому склад
+        # списывается независимо от оплаты. Сколько денег реально взяли —-
+        # решает кассир: сумма НЕ указана значит не платили, и весь заказ
+        # уходит в долг (раньше пустое поле молча означало «оплачено полностью»).
+        # Переплату не записываем: долг не может быть отрицательным, лишнее —
+        # сдача, её отдают на руки.
+        paid = (
+            Decimal("0")
+            if amount_paid is None
+            else min(max(Decimal(str(amount_paid)), Decimal("0")), total)
+        )
         _deduct_all(receipt)
         receipt.stock_deducted = True
         receipt.amount_paid = paid

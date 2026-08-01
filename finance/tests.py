@@ -276,16 +276,24 @@ class CogsTests(APITestCase):
         receive_lot(self.mat, form="ROLL", width=Decimal("1"), length=Decimal("10"),
                     purchase_cost=Decimal("2000"), markup_percent=Decimal("0"))
 
-    def _sell(self, area="2", price="1000"):
+    def _sell(self, area="2", price="1000", paid=None):
+        """Продажа. paid=None → оплачена полностью (выручка сразу в отчёте);
+        касса теперь требует указать сумму явно, пустое поле = долг."""
         from sales.sale_service import create_sale
-        return create_sale(
+        receipt = create_sale(
             client=None, cashier=self.admin, payment_method="CASH",
             items_data=[{
                 "type": "MATERIAL", "material": self.mat,
                 "quantity": Decimal(area), "mode": "SQM",
                 "material_price": Decimal(price),
             }],
+            amount_paid=paid,
         )
+        if paid is None:
+            receipt.amount_paid = receipt.total_price
+            receipt.payment_status = "PAID"
+            receipt.save(update_fields=["amount_paid", "payment_status"])
+        return receipt
 
     def _report(self):
         r = self.client.get(self.REPORT)

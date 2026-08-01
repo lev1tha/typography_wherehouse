@@ -7,7 +7,7 @@ import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
-const CATS = ["CUTTER", "EQUIPMENT", "IMPROVEMENT", "OTHER"];
+const CATS = ["CUTTER", "TRANSPORT", "EQUIPMENT", "IMPROVEMENT", "OTHER"];
 const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
 
 function Stat({ label, value }) {
@@ -144,6 +144,7 @@ export default function Expenses({ embedded = false }) {
       <div className="stat-grid" style={{ marginBottom: 16 }}>
         <Stat label={t("expenses.totalInvest")} value={som(total)} />
         <Stat label={t("expenseCat.CUTTER")} value={som(sumBy("CUTTER"))} />
+        <Stat label={t("expenseCat.TRANSPORT")} value={som(sumBy("TRANSPORT"))} />
         <Stat label={t("expenseCat.EQUIPMENT")} value={som(sumBy("EQUIPMENT"))} />
         <Stat label={t("expenseCat.IMPROVEMENT")} value={som(sumBy("IMPROVEMENT"))} />
       </div>

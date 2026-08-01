@@ -28,6 +28,8 @@ export default function Clients() {
   const [showAllOrders, setShowAllOrders] = useState(false);
   const [onlyDebt, setOnlyDebt] = useState(false);
   const [minOrders, setMinOrders] = useState("");
+  // Клиента можно завести заранее, не дожидаясь продажи.
+  const [creating, setCreating] = useState(null);
 
   // День важнее месяца: выбран день — смотрим ровно его, иначе весь месяц.
   function periodParams() {
@@ -84,6 +86,19 @@ export default function Clients() {
   }
 
   const errMsg = (e) => apiError(e, t("common.error"));
+
+  async function createClient() {
+    const body = { ...creating };
+    if (!body.phone?.trim()) return toast(t("clients.needPhone"), "error");
+    try {
+      await api.post("/clients/clients/", body);
+      setCreating(null);
+      load();
+      toast(t("clients.created"));
+    } catch (e) {
+      toast(errMsg(e), "error");
+    }
+  }
 
   async function setReferrer(value) {
     try {
@@ -185,6 +200,12 @@ export default function Clients() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
+        <button
+          type="button"
+          onClick={() => setCreating({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" })}
+        >
+          + {t("clients.newClient")}
+        </button>
       </div>
 
       {/* Период: месяц стрелками или конкретный день. Показываем клиентов,
@@ -448,6 +469,52 @@ export default function Clients() {
             ) : (
               <span className="muted">{t("common.empty")}</span>
             )}
+          </div>
+        </Modal>
+      )}
+
+      {creating && (
+        <Modal
+          title={t("clients.newClient")}
+          onClose={() => setCreating(null)}
+          footer={
+            <>
+              <button className="secondary" onClick={() => setCreating(null)}>{t("common.cancel")}</button>
+              <button onClick={createClient}>{t("common.add")}</button>
+            </>
+          }
+        >
+          <div className="field">
+            <label>{t("clients.type")}</label>
+            <select value={creating.type} onChange={(e) => setCreating({ ...creating, type: e.target.value })}>
+              <option value="PHYSICAL">{t("clients.physical")}</option>
+              <option value="OSOO">{t("clients.osoo")}</option>
+            </select>
+          </div>
+          <div className="field">
+            <label>{creating.type === "OSOO" ? t("clients.companyName") : t("clients.fullName")}</label>
+            {creating.type === "OSOO" ? (
+              <input
+                value={creating.company_name}
+                onChange={(e) => setCreating({ ...creating, company_name: e.target.value })}
+                autoFocus
+              />
+            ) : (
+              <input
+                value={creating.full_name}
+                onChange={(e) => setCreating({ ...creating, full_name: e.target.value })}
+                autoFocus
+              />
+            )}
+          </div>
+          <div className="field">
+            <label>{t("clients.phone")}</label>
+            <input
+              value={creating.phone}
+              onChange={(e) => setCreating({ ...creating, phone: e.target.value })}
+              placeholder="+996…"
+              inputMode="tel"
+            />
           </div>
         </Modal>
       )}

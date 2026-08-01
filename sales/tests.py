@@ -130,17 +130,21 @@ class CuttingPricingAPITests(APITestCase):
             name="Резка букв", kind=PrintingService.Kind.CUTTING, rate_flat=Decimal("200"),
         )
 
-    def _checkout(self, items):
+    def _checkout(self, items, amount_paid=None):
+        # amount_paid не указан → касса ничего не приняла, заказ уходит в долг.
+        payload = {"payment_method": "CASH", "items": items}
+        if amount_paid is not None:
+            payload["amount_paid"] = amount_paid
         return self.client.post(
-            "/api/sales/receipts/checkout/",
-            {"payment_method": "CASH", "items": items}, format="json",
+            "/api/sales/receipts/checkout/", payload, format="json",
         )
 
     def test_cutting_splits_into_work_and_material_lines(self):
-        # 0.5 × 0.5 = 0.25 кв.м cut. Work is computed from area × cut rate.
+        # 0.5 × 0.5 = 0.25 кв.м материала; длина реза задаётся отдельно.
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "0.5", "length": "0.5",
+            "running_meters": "0.25",
         }])
         self.assertEqual(r.status_code, 201, r.data)
         receipt = Receipt.objects.get(pk=r.data["id"])
@@ -148,7 +152,7 @@ class CuttingPricingAPITests(APITestCase):
         self.assertEqual(len(items), 2)
         work = next(i for i in items if i.type == TransactionItem.Type.SERVICE)
         mat = next(i for i in items if i.type == TransactionItem.Type.MATERIAL)
-        self.assertEqual(work.quantity, Decimal("0.25"))          # площадь (авто)
+        self.assertEqual(work.quantity, Decimal("0.25"))          # длина реза
         self.assertEqual(work.price_per_item, Decimal("20"))      # ставка резки материала
         self.assertEqual(mat.quantity, Decimal("0.25"))           # площадь
         self.assertEqual(mat.price_per_item, Decimal("1400"))      # материал за кв.м
@@ -163,7 +167,7 @@ class CuttingPricingAPITests(APITestCase):
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "1.2", "length": "0.51",
-            "material_price": "1400", "cut_rate": "50",
+            "material_price": "1400", "cut_rate": "50", "running_meters": "0.61",
         }])
         self.assertEqual(r.status_code, 201, r.data)
         receipt = Receipt.objects.get(pk=r.data["id"])
@@ -173,7 +177,7 @@ class CuttingPricingAPITests(APITestCase):
         self.assertEqual(mat.price_per_item, Decimal("1400"))      # overridden material price
         self.assertEqual(mat.quantity, Decimal("0.612"))          # 3-decimal area precision
         # Каждая строка округляется ВВЕРХ до целого сома:
-        # работа 0.612×50 = 30.6 → 31; материал 0.612×1400 = 856.8 → 857; итог 888.
+        # работа 0.61×50 = 30.5 → 31; материал 0.612×1400 = 856.8 → 857; итог 888.
         self.assertEqual(work.line_total, Decimal("31"))
         self.assertEqual(mat.line_total, Decimal("857"))
         self.assertEqual(receipt.total_price, Decimal("888.00"))
@@ -239,18 +243,21 @@ class CuttingPricingAPITests(APITestCase):
         self.assertEqual(receipt.payment_status, "PENDING")
         self.assertEqual(receipt.debt, Decimal("2700"))
         # Частичная оплата 700 → долг 2000, всё ещё PENDING.
+        self.client.force_authenticate(self.admin)  # оплата долга — только админ
         r = self.client.post(f"/api/sales/receipts/{rid}/pay/", {"amount": 700}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
         receipt.refresh_from_db()
         self.assertEqual(receipt.debt, Decimal("2000"))
         self.assertEqual(receipt.payment_status, "PENDING")
         # Оплата без суммы → гасит весь остаток, статус PAID, долг 0.
+        self.client.force_authenticate(self.admin)  # оплата долга — только админ
         r = self.client.post(f"/api/sales/receipts/{rid}/pay/", {}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
         receipt.refresh_from_db()
         self.assertEqual(receipt.payment_status, "PAID")
         self.assertEqual(receipt.debt, Decimal("0"))
         # Повторная оплата уже закрытого чека → 400.
+        self.client.force_authenticate(self.admin)  # оплата долга — только админ
         r = self.client.post(f"/api/sales/receipts/{rid}/pay/", {"amount": 100}, format="json")
         self.assertEqual(r.status_code, 400, r.data)
 
@@ -266,6 +273,7 @@ class CuttingPricingAPITests(APITestCase):
             format="json",
         )
         rid = r.data["id"]
+        self.client.force_authenticate(self.admin)  # оплата долга — только админ
         r = self.client.post(f"/api/sales/receipts/{rid}/pay/", {"amount": 10000}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
         receipt = Receipt.objects.get(pk=rid)
@@ -279,7 +287,8 @@ class CuttingPricingAPITests(APITestCase):
         self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "1", "length": "1",
-        }])
+            "running_meters": "1",
+        }], amount_paid=1420)
         self.client.force_authenticate(self.admin)
         data = self.client.get("/api/audit/dashboard/").data
         b = data["breakdown"]
@@ -294,7 +303,7 @@ class CuttingPricingAPITests(APITestCase):
         # Purchase tied to a client:
         self.client.post(
             "/api/sales/receipts/checkout/",
-            {"payment_method": "CASH", "client_id": client.id,
+            {"payment_method": "CASH", "client_id": client.id, "amount_paid": 3700,
              "items": [{"type": "MATERIAL", "material": self.acrylic.id, "quantity": 1, "mode": "PIECE"}]},
             format="json",
         )

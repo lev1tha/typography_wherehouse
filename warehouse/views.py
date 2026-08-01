@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+from django.shortcuts import get_object_or_404
+
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -39,6 +41,52 @@ class MaterialViewSet(viewsets.ModelViewSet):
     search_fields = ["name", "category"]
     ordering_fields = ["name", "quantity", "price_per_unit", "purchase_price", "category"]
     ordering = ["name"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        # Скрытые материалы не показываем ни в каталоге, ни в кассе.
+        # ?archived=1 — чтобы админ мог их увидеть и при желании вернуть.
+        if self.request.query_params.get("archived") in ("1", "true", "True"):
+            return qs.filter(is_archived=True)
+        return qs.filter(is_archived=False)
+
+    def destroy(self, request, *args, **kwargs):
+        """Удаление материала. Если по нему уже была история (продажи, приход,
+        партии) — не удаляем, а скрываем: иначе суммы в старых чеках и отчётах
+        поехали бы задним числом. Товар без истории удаляется насовсем."""
+        material = self.get_object()
+        has_history = (
+            material.transaction_items.exists()
+            or material.inventory_logs.exists()
+            or material.rolls.exists()
+        )
+        if has_history:
+            material.is_archived = True
+            material.save(update_fields=["is_archived", "updated_at"])
+            AuditLog.record(request.user, f"Материал «{material.name}» скрыт из каталога")
+            return Response(
+                {
+                    "archived": True,
+                    "detail": "Материал скрыт из каталога — по нему есть история продаж или поступлений.",
+                },
+                status=status.HTTP_200_OK,
+            )
+        name = material.name
+        material.delete()
+        AuditLog.record(request.user, f"Удалён материал «{name}»")
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
+    def restore(self, request, pk=None):
+        """Вернуть скрытый материал в каталог.
+
+        Ищем в ПОЛНОМ списке: обычная выборка прячет скрытые, и восстанавливать
+        было бы нечего — приходил 404."""
+        material = get_object_or_404(Material, pk=pk)
+        material.is_archived = False
+        material.save(update_fields=["is_archived", "updated_at"])
+        AuditLog.record(request.user, f"Материал «{material.name}» возвращён в каталог")
+        return Response(MaterialSerializer(material, context={"request": request}).data)
 
     @action(detail=True, methods=["patch"], url_path="update-price")
     def update_price(self, request, pk=None):

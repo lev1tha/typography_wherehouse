@@ -7,6 +7,8 @@ import GalleryModal from "../../components/GalleryModal.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
 import ReceiveStockModal from "../../components/ReceiveStockModal.jsx";
+import { useUI } from "../../components/UIProvider.jsx";
+import { apiError } from "../../api/errors.js";
 
 const EMPTY = {
   name: "",
@@ -44,6 +46,7 @@ const SectionLabel = ({ children }) => (
 
 export default function Catalog({ embedded = false }) {
   const { t } = useTranslation();
+  const { toast, confirm } = useUI();
   const [materials, setMaterials] = useState([]);
   const [search, setSearch] = useState("");
   const [ordering, setOrdering] = useState("name");
@@ -66,6 +69,19 @@ export default function Catalog({ embedded = false }) {
   }, [search, ordering, category]);
 
   const categories = [...new Set(materials.map((m) => m.category))];
+
+  // Товар с историей продаж удалить нельзя — сервер прячет его из каталога,
+  // чтобы суммы в старых чеках и отчётах не поехали задним числом.
+  async function removeMaterial(m) {
+    if (!(await confirm(t("warehouse.deleteConfirm", { name: m.name })))) return;
+    try {
+      const { data } = await api.delete(`/warehouse/materials/${m.id}/`);
+      toast(data?.archived ? data.detail : t("warehouse.deleted"));
+      load();
+    } catch (e) {
+      toast(apiError(e, t("common.error")), "error");
+    }
+  }
 
   async function save() {
     const payload = { ...editing };
@@ -145,6 +161,9 @@ export default function Catalog({ embedded = false }) {
           </button>
           <button className="ghost" onClick={() => setEditing(m)} aria-label={t("common.edit")}>
             <Icon name="pencil" size={17} />
+          </button>
+          <button className="ghost" onClick={() => removeMaterial(m)} aria-label={t("common.delete")}>
+            <Icon name="trash" size={17} />
           </button>
         </div>
       ),

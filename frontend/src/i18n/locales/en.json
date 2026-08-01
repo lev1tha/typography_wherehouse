@@ -126,7 +126,9 @@
     "tabMovement": "Movement",
     "pricesSection": "Material prices",
     "priceStockSection": "Price & stock",
-    "qtyNote": "changes via intake / inventory"
+    "qtyNote": "changes via intake / inventory",
+    "deleteConfirm": "Delete “{{name}}”? If it has sales, it will be hidden from the catalogue and the history kept.",
+    "deleted": "Material deleted"
   },
   "unit": {
     "SQM": "sqm",
@@ -224,7 +226,9 @@
     "reissuePass": "Issue new one",
     "passModalTitle": "Password for the client",
     "passHint": "Tell the client this password. They sign in with their phone number and it. Shown once — after that you can only issue a new one.",
-    "reissuePassConfirm": "Issue a new password? The old one will stop working."
+    "reissuePassConfirm": "Issue a new password? The old one will stop working.",
+    "needPhone": "Enter a phone number",
+    "created": "Client added"
   },
   "checkout": {
     "outOfStock": "Out of stock",
@@ -265,7 +269,7 @@
     "cutRateLabel": "Cut rate, som/running m",
     "sellWithCut": "Cut",
     "cutToggle": "Cutting",
-    "prepayHint": "Leave empty if paying the full amount",
+    "prepayHint": "How much you took now. Empty — the whole order becomes debt.",
     "cutHint": "Turn on if the sheet needs cutting to size",
     "sizeHint": "In metres, e.g. 0.5 × 1.2",
     "runMetersHint": "Leave empty — we'll use the area (W×L)",
@@ -280,7 +284,9 @@
     "mbank": "MBank",
     "demirbank": "DemirBank",
     "orderTitle": "Order name",
-    "orderTitlePh": "e.g. Sign for a cafe (optional)"
+    "orderTitlePh": "e.g. Sign for a cafe (optional)",
+    "payFull": "Full amount",
+    "change": "Change"
   },
   "receipts": {
     "title": "Receipts",
@@ -442,7 +448,9 @@
     "cogsTitle": "Cost of goods & margin",
     "cogs": "Cost of goods sold",
     "grossMargin": "Gross margin",
-    "cogsHint": "Purchase cost of the material consumed by orders in the period. Taken from the lots it was actually drawn from and frozen at sale time."
+    "cogsHint": "Purchase cost of the material consumed by orders in the period. Taken from the lots it was actually drawn from and frozen at sale time.",
+    "colReceived": "Received",
+    "totalRow": "TOTAL"
   },
   "expenses": {
     "title": "Purchases & investments",
@@ -465,7 +473,8 @@
     "CUTTER": "Consumables (cutter)",
     "EQUIPMENT": "Equipment purchase",
     "IMPROVEMENT": "Workshop improvement",
-    "OTHER": "Other costs"
+    "OTHER": "Other costs",
+    "TRANSPORT": "Transport costs"
   },
   "myOrders": {
     "title": "My orders",

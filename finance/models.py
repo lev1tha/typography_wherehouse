@@ -12,6 +12,7 @@ class Expense(models.Model):
 
     class Category(models.TextChoices):
         CUTTER = "CUTTER", _("Расходники фреза")
+        TRANSPORT = "TRANSPORT", _("Транспортные расходы")
         EQUIPMENT = "EQUIPMENT", _("Покупка оборудования")
         IMPROVEMENT = "IMPROVEMENT", _("Улучшение цеха")
         OTHER = "OTHER", _("Прочие расходы")

@@ -90,10 +90,11 @@ class EdgeCuttingTests(APITestCase):
 
     def test_line_totals_round_up_to_whole_som(self):
         # Площадь 0.33×0.33 = 0.109; материал 0.109×1400 = 152.6 → 153;
-        # работа 0.109×20 = 2.18 → 3; итог 156. Округляем ВВЕРХ, без копеек.
+        # работа (длина реза 0.11) × 20 = 2.2 → 3; итог 156. Округляем ВВЕРХ.
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "0.33", "length": "0.33",
+            "running_meters": "0.11",
         }])
         self.assertEqual(r.status_code, 201, r.data)
         receipt = Receipt.objects.get(pk=r.data["id"])
@@ -108,7 +109,7 @@ class EdgeCuttingTests(APITestCase):
     def test_cutting_without_material_makes_only_work_line(self):
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
-            "width": "0.5", "length": "0.5",
+            "width": "0.5", "length": "0.5", "running_meters": "0.25",
         }])
         self.assertEqual(r.status_code, 201, r.data)
         receipt = Receipt.objects.get(pk=r.data["id"])
@@ -117,7 +118,7 @@ class EdgeCuttingTests(APITestCase):
         self.assertEqual(len(items), 1)
         work = items[0]
         self.assertEqual(work.type, TransactionItem.Type.SERVICE)
-        self.assertEqual(work.quantity, Decimal("0.250"))   # площадь
+        self.assertEqual(work.quantity, Decimal("0.250"))   # длина реза
         # Нет материала и нет override → ставка резки 0.
         self.assertEqual(work.price_per_item, Decimal("0"))
         self.assertEqual(receipt.total_price, Decimal("0.00"))
@@ -125,7 +126,7 @@ class EdgeCuttingTests(APITestCase):
     def test_cutting_without_material_uses_cut_rate_override(self):
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
-            "width": "1", "length": "1", "cut_rate": "35",
+            "width": "1", "length": "1", "cut_rate": "35", "running_meters": "1",
         }])
         self.assertEqual(r.status_code, 201, r.data)
         receipt = Receipt.objects.get(pk=r.data["id"])
@@ -158,19 +159,22 @@ class EdgeCuttingTests(APITestCase):
         # Итог = 4×20 + 1×1400 = 80 + 1400 = 1480
         self.assertEqual(receipt.total_price, Decimal("1480.00"))
 
-    def test_running_meters_empty_falls_back_to_area(self):
+    def test_running_meters_empty_means_no_work_charged(self):
+        """Пустая длина реза → работа 0, а не «площадь как пог.м».
+
+        Раньше сюда подставлялась площадь и умножалась на ставку за погонный
+        метр — кв.м считались как пог.м, и цена работы выходила неверной."""
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "0.5", "length": "0.5",
         }])
         self.assertEqual(r.status_code, 201, r.data)
         receipt = Receipt.objects.get(pk=r.data["id"])
-        work = receipt.items.get(type=TransactionItem.Type.SERVICE)
-        mat = receipt.items.get(type=TransactionItem.Type.MATERIAL)
-        self.assertEqual(work.quantity, Decimal("0.250"))   # площадь
-        self.assertEqual(mat.quantity, Decimal("0.250"))
-
-    # ---- Нулевые/пустые width-height -------------------------------------
+        work = next(i for i in self._items(receipt) if i.type == TransactionItem.Type.SERVICE)
+        self.assertEqual(work.quantity, Decimal("0"))
+        # Материал при этом считается по площади как обычно.
+        material = next(i for i in self._items(receipt) if i.type == TransactionItem.Type.MATERIAL)
+        self.assertEqual(material.quantity, Decimal("0.250"))
 
     def test_zero_dimensions_yields_only_work_line(self):
         r = self._checkout([{
@@ -203,9 +207,11 @@ class EdgeCuttingTests(APITestCase):
 
     def test_area_quantized_to_three_decimals(self):
         # 0.33 × 0.33 = 0.1089 → поле quantity (decimal_places=3) → 0.109.
+        # Длина реза приходит отдельным полем (в нём 2 знака после запятой).
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "0.33", "length": "0.33",
+            "running_meters": "0.11",
         }])
         self.assertEqual(r.status_code, 201, r.data)
         receipt = Receipt.objects.get(pk=r.data["id"])
@@ -214,7 +220,8 @@ class EdgeCuttingTests(APITestCase):
         mat = receipt.items.get(type=TransactionItem.Type.MATERIAL)
         work.refresh_from_db()
         mat.refresh_from_db()
-        self.assertEqual(work.quantity, Decimal("0.109"))
+        self.assertEqual(work.quantity, Decimal("0.110"))
+        # Площадь материала — именно она квантуется из 0.1089.
         self.assertEqual(mat.quantity, Decimal("0.109"))
 
     # ---- Админ-override, равный нулю (подозрение на баг) ------------------
@@ -257,3 +264,58 @@ class EdgeCuttingTests(APITestCase):
         # PrimaryKeyRelatedField не находит услугу → 400, чек не создаётся.
         self.assertEqual(r.status_code, 400, r.data)
         self.assertEqual(Receipt.objects.count(), 0)
+
+
+class NoPrepaymentMeansDebtTests(APITestCase):
+    """Пустая сумма оплаты = ничего не приняли, весь заказ в долг.
+
+    Раньше пустое поле молча означало «оплачено полностью», и продажа в долг
+    выглядела закрытой.
+    """
+
+    def setUp(self):
+        self.store = User.objects.create_user(
+            username="store_nopay", password="x", role=User.Role.STOREKEEPER
+        )
+        self.client.force_authenticate(self.store)
+        self.material = Material.objects.create(
+            name="Лист", category="Пластик", unit="SQM",
+            quantity=Decimal("100"), price_per_unit=Decimal("1000"),
+        )
+
+    def _checkout(self, **extra):
+        payload = {
+            "payment_method": "CASH",
+            "items": [{"type": "MATERIAL", "material": self.material.id,
+                       "quantity": 2, "mode": "SQM"}],
+            **extra,
+        }
+        return self.client.post("/api/sales/receipts/checkout/", payload, format="json")
+
+    def test_no_amount_means_full_debt(self):
+        r = self._checkout()
+        self.assertEqual(r.status_code, 201, r.data)
+        receipt = Receipt.objects.get(pk=r.data["id"])
+        self.assertEqual(receipt.payment_status, Receipt.PaymentStatus.PENDING)
+        self.assertEqual(receipt.amount_paid, Decimal("0"))
+        self.assertEqual(receipt.debt, Decimal("2000"))
+        # Товар всё равно отгружён — склад списан.
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.quantity, Decimal("98.00"))
+
+    def test_partial_amount_leaves_the_rest_as_debt(self):
+        receipt = Receipt.objects.get(pk=self._checkout(amount_paid=500).data["id"])
+        self.assertEqual(receipt.payment_status, Receipt.PaymentStatus.PENDING)
+        self.assertEqual(receipt.debt, Decimal("1500"))
+
+    def test_full_amount_closes_the_order(self):
+        receipt = Receipt.objects.get(pk=self._checkout(amount_paid=2000).data["id"])
+        self.assertEqual(receipt.payment_status, Receipt.PaymentStatus.PAID)
+        self.assertEqual(receipt.debt, Decimal("0"))
+
+    def test_overpayment_is_capped_no_negative_debt(self):
+        # Дали больше — лишнее это сдача, в долг минусом не уходит.
+        receipt = Receipt.objects.get(pk=self._checkout(amount_paid=5000).data["id"])
+        self.assertEqual(receipt.payment_status, Receipt.PaymentStatus.PAID)
+        self.assertEqual(receipt.amount_paid, Decimal("2000"))
+        self.assertEqual(receipt.debt, Decimal("0"))

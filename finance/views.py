@@ -14,7 +14,7 @@ from rest_framework.views import APIView
 
 from accounts.permissions import IsAdmin
 from sales.models import Receipt, TransactionItem
-from warehouse.models import Material
+from warehouse.models import InventoryLog, Material
 
 from .models import Expense, FinanceSettings, FixedExpense, SalaryPayment
 from .serializers import (
@@ -225,6 +225,7 @@ class FinanceReportView(APIView):
 
         var = {
             "cutter": cat(Expense.Category.CUTTER),
+            "transport": cat(Expense.Category.TRANSPORT),
             "equipment": cat(Expense.Category.EQUIPMENT),
             "improvement": cat(Expense.Category.IMPROVEMENT),
             "other": cat(Expense.Category.OTHER),
@@ -237,7 +238,7 @@ class FinanceReportView(APIView):
             "improvement": var["improvement"],
             "total": var["equipment"] + var["improvement"],
         }
-        operating_variable = var["cutter"] + var["other"]
+        operating_variable = var["cutter"] + var["transport"] + var["other"]
 
         # Себестоимость проданного: закупочная стоимость материала, ушедшего в
         # заказы за период. Зафиксирована на строках чека в момент списания
@@ -321,6 +322,7 @@ class FinanceReportView(APIView):
                 },
                 "variable": {
                     "cutter": var["cutter"],
+                    "transport": var["transport"],
                     "other": var["other"],
                     "total": operating_variable,
                 },
@@ -469,14 +471,42 @@ class DailyReportView(APIView):
 
 
 class MaterialReportView(APIView):
-    """GET /api/finance/material-report/ — таблица «резка по материалам» как в
-    эталоне: по каждому материалу — заказов, продано кв.м / листов, сумма
-    материала, сумма резки, текущий остаток. Считается из позиций чеков."""
+    """GET /api/finance/material-report/ — таблица «резка по материалам»: по
+    каждому материалу заказов, продано кв.м / листов, сумма материала, сумма
+    резки, поступление за период и текущий остаток. Плюс строка ИТОГО.
+
+    Период: ?date_from=&date_to= или ?year=&month=. Продажи и поступления
+    считаются за период; ОСТАТОК всегда «на сейчас» — это состояние склада, а
+    не оборот."""
 
     permission_classes = [IsAdmin]
 
     def get(self, request):
+        d_from = _parse_date(request.query_params.get("date_from"))
+        d_to = _parse_date(request.query_params.get("date_to"))
+        # Месяц можно задать и как year+month — тем же выбором, что в других
+        # разделах; разворачиваем его в границы периода.
+        try:
+            year = int(request.query_params.get("year") or 0)
+            month = int(request.query_params.get("month") or 0)
+        except (TypeError, ValueError):
+            year = month = 0
+        if year and 1 <= month <= 12:
+            d_from = date(year, month, 1)
+            d_to = date(year, month, calendar.monthrange(year, month)[1])
+
+        def by_receipt_date(qs):
+            if d_from:
+                qs = qs.filter(receipt__created_at__date__gte=d_from)
+            if d_to:
+                qs = qs.filter(receipt__created_at__date__lte=d_to)
+            return qs
+
         live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED)
+        if d_from:
+            live = live.filter(created_at__date__gte=d_from)
+        if d_to:
+            live = live.filter(created_at__date__lte=d_to)
 
         # Сумма резки по материалу: работу «Резка» каждого чека относим к
         # материалу этого же чека (как в разбивке по категориям).
@@ -525,6 +555,7 @@ class MaterialReportView(APIView):
             .exclude(receipt__status=Receipt.Status.CANCELLED)
             .select_related("material")
         )
+        mat_items = by_receipt_date(mat_items)
         for it in mat_items:
             m = it.material
             a = agg[m.id]
@@ -540,6 +571,19 @@ class MaterialReportView(APIView):
             a["mat_rev"] += q * it.price_per_item
             a["orders"].add(it.receipt_id)
 
+        # Поступление за период: приход по складским логам (и партии рулонов,
+        # и обычный приход пишут SUPPLY с положительным количеством).
+        received = defaultdict(lambda: Decimal("0"))
+        supply = InventoryLog.objects.filter(
+            type=InventoryLog.Type.SUPPLY, quantity_changed__gt=0
+        )
+        if d_from:
+            supply = supply.filter(created_at__date__gte=d_from)
+        if d_to:
+            supply = supply.filter(created_at__date__lte=d_to)
+        for log in supply.values("material_id", "quantity_changed"):
+            received[log["material_id"]] += log["quantity_changed"]
+
         rows = []
         for m in Material.objects.all().order_by("name"):
             a = agg.get(m.id)
@@ -553,9 +597,31 @@ class MaterialReportView(APIView):
                     "sold_sheets": a["sheets"] if a else Decimal("0"),
                     "material_revenue": a["mat_rev"] if a else Decimal("0"),
                     "cut_revenue": cut_by_mat.get(m.id, Decimal("0")),
+                    "received": received.get(m.id, Decimal("0")),
                     "stock": m.quantity,
                     "unit": m.unit,
                 }
             )
 
-        return Response({"rows": rows})
+        # ИТОГО. Заказы не складываем по строкам: один чек может содержать
+        # несколько материалов и посчитался бы дважды — берём уникальные чеки.
+        all_orders = set()
+        for a in agg.values():
+            all_orders |= a["orders"]
+        totals = {
+            "orders": len(all_orders),
+            "sold_area": sum((r["sold_area"] for r in rows), Decimal("0")),
+            "sold_sheets": sum((r["sold_sheets"] for r in rows), Decimal("0")),
+            "material_revenue": sum((r["material_revenue"] for r in rows), Decimal("0")),
+            "cut_revenue": sum((r["cut_revenue"] for r in rows), Decimal("0")),
+            "received": sum((r["received"] for r in rows), Decimal("0")),
+        }
+
+        return Response({
+            "rows": rows,
+            "totals": totals,
+            "period": {
+                "from": d_from.isoformat() if d_from else None,
+                "to": d_to.isoformat() if d_to else None,
+            },
+        })

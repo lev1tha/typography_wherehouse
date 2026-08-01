@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
+import { useAuth } from "../../auth/AuthContext.jsx";
 import AddToOrderModal from "../../components/AddToOrderModal.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import Icon from "../../components/Icon.jsx";
@@ -20,6 +21,7 @@ export default function StoreReceipts() {
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [advancingId, setAdvancingId] = useState(null);
+  const { isAdmin } = useAuth();
   const [paying, setPaying] = useState(null);
   const [sort, setSort] = useState({ key: "_debt", dir: "desc" });
 
@@ -153,7 +155,10 @@ export default function StoreReceipts() {
       sortKey: "_debt",
       render: (r) => {
         const hasDebt = Number(r.debt) > 0;
+        // Принимать оплату и откатывать её может только админ — складовщик
+        // видит долг, но кнопок у него нет (бэкенд тоже вернёт 403).
         const canUndo =
+          isAdmin &&
           (r.payment_status === "PAID" || Number(r.amount_paid) > 0) &&
           !["REFUNDED", "PARTIALLY_REFUNDED"].includes(r.payment_status) &&
           r.status !== "CANCELLED";
@@ -161,7 +166,7 @@ export default function StoreReceipts() {
         return (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
             {hasDebt && <span style={{ color: "var(--danger)", fontWeight: 600 }}>{r.debt} сом</span>}
-            {hasDebt && (
+            {hasDebt && isAdmin && (
               <button
                 className="secondary"
                 style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
@@ -236,12 +241,13 @@ export default function StoreReceipts() {
           onClose={() => setOpen(null)}
           footer={
             <>
-              {Number(open.debt) > 0 && (
+              {Number(open.debt) > 0 && isAdmin && (
                 <button onClick={() => setPaying(open)} disabled={busy}>
                   {t("receipts.acceptPayment")}
                 </button>
               )}
-              {(open.payment_status === "PAID" || Number(open.amount_paid) > 0) &&
+              {isAdmin &&
+                (open.payment_status === "PAID" || Number(open.amount_paid) > 0) &&
                 !["REFUNDED", "PARTIALLY_REFUNDED"].includes(open.payment_status) &&
                 open.status !== "CANCELLED" && (
                   <button className="secondary" onClick={(e) => undoPay(open, e)} disabled={busy}>

@@ -17,7 +17,8 @@ class EdgeDebtPayTests(APITestCase):
         self.admin = User.objects.create_user(
             username="admin_edge", password="x", role=User.Role.ADMIN
         )
-        self.client.force_authenticate(self.storekeeper)
+        # Оплата долга и откат оплаты доступны только админу.
+        self.client.force_authenticate(self.admin)
         self.material = Material.objects.create(
             name="Acryl edge", category="Plastic", unit="SQM",
             quantity=Decimal("100"), price_per_unit=Decimal("3700"),

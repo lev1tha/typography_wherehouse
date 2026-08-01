@@ -18,7 +18,8 @@ class _Base(APITestCase):
         self.admin = User.objects.create_user(
             username="admin_u11", password="x", role=User.Role.ADMIN
         )
-        self.client.force_authenticate(self.storekeeper)
+        # Оплата долга и откат оплаты доступны только админу.
+        self.client.force_authenticate(self.admin)
         self.material = Material.objects.create(
             name="Acryl u11", category="Plastic", unit="SQM",
             quantity=Decimal("100"), price_per_unit=Decimal("3700"),
@@ -129,12 +130,17 @@ class UnpayTests(_Base):
         self.assertEqual(r.payment_status, Receipt.PaymentStatus.PAID)
         self.assertEqual(r.debt, Decimal("0"))
 
-    def test_unpay_forbidden_cross_storekeeper(self):
-        # Складовщик не видит чужой чек → 404 (get_object в его queryset).
-        other = User.objects.create_user(username="other_u11", password="x", role=User.Role.STOREKEEPER)
-        r = self._make_receipt(amount_paid=Decimal("3700"), payment_status=Receipt.PaymentStatus.PAID, cashier=other)
-        resp = self._unpay(r)
-        self.assertEqual(resp.status_code, 404)
+    def test_unpay_forbidden_for_storekeeper(self):
+        """Откат оплаты — только админ: складовщик оформляет продажи, но не
+        отменяет уже принятые деньги, в том числе по своим же чекам."""
+        r = self._make_receipt(
+            amount_paid=Decimal("3700"), payment_status=Receipt.PaymentStatus.PAID,
+            cashier=self.storekeeper,
+        )
+        self.client.force_authenticate(self.storekeeper)
+        self.assertEqual(self._unpay(r).status_code, 403)
+        r.refresh_from_db()
+        self.assertEqual(r.payment_status, Receipt.PaymentStatus.PAID)
 
 
 class DebtSortTests(_Base):

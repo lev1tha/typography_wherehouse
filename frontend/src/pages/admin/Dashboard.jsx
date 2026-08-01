@@ -127,6 +127,7 @@ export default function Dashboard() {
       push(t("finance.salary"), Math.round(Number(fin.fixed.salary)));
       push(t("finance.fixedOther"), Math.round(Number(fin.fixed.other)));
       push(t("expenseCat.CUTTER"), Math.round(Number(fin.variable.cutter)));
+      push(t("expenseCat.TRANSPORT"), Math.round(Number(fin.variable.transport)));
       push(t("dashboard.otherVariable"), Math.round(Number(fin.variable.other)));
       push(t("finance.cogs"), Math.round(Number(fin.cogs)));
       push(t("finance.grossMargin"), Math.round(Number(fin.gross_margin)));
@@ -209,6 +210,7 @@ export default function Dashboard() {
               <div className="crow"><span className="k">{t("finance.salary")}</span><span>{som(fin.fixed.salary)}</span></div>
               <div className="crow"><span className="k">{t("finance.fixedOther")}</span><span>{som(fin.fixed.other)}</span></div>
               <div className="crow"><span className="k">{t("expenseCat.CUTTER")}</span><span>{som(fin.variable.cutter)}</span></div>
+              <div className="crow"><span className="k">{t("expenseCat.TRANSPORT")}</span><span>{som(fin.variable.transport)}</span></div>
               <div className="crow"><span className="k">{t("dashboard.otherVariable")}</span><span>{som(fin.variable.other)}</span></div>
               <div className="crow"><span className="k">{t("finance.cogs")}</span><span>{som(fin.cogs)}</span></div>
               <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6, paddingTop: 8 }}>

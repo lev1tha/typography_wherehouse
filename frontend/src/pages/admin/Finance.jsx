@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import api from "../../api/api.js";
 import DailyProfitChart from "../../components/DailyProfitChart.jsx";
 import DataTable from "../../components/DataTable.jsx";
+import MonthPicker from "../../components/MonthPicker.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
 const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
@@ -28,12 +29,16 @@ export default function Finance({ embedded = false }) {
   const [settings, setSettings] = useState(null);
   const [matReport, setMatReport] = useState([]);
   const [matFilter, setMatFilter] = useState("");
+  const [matTotals, setMatTotals] = useState(null);
+  // Период для отчёта по материалам: месяц или конкретный день.
+  const [matPeriod, setMatPeriod] = useState({ year: new Date().getFullYear(), month: null });
+  const [matDay, setMatDay] = useState("");
 
   const loadReport = () => api.get("/finance/report/").then((r) => setReport(r.data));
   function load() {
     loadReport();
     api.get("/finance/settings/").then((r) => setSettings(r.data));
-    api.get("/finance/material-report/").then((r) => setMatReport(r.data.rows));
+    loadMaterialReport();
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, []);
@@ -45,6 +50,24 @@ export default function Finance({ embedded = false }) {
       .catch(() => toast(t("common.error"), "error"));
   }
 
+  function matPeriodParams() {
+    if (matDay) return { date_from: matDay, date_to: matDay };
+    if (!matPeriod.month) return {};
+    return { year: matPeriod.year, month: matPeriod.month };
+  }
+
+  function loadMaterialReport() {
+    api
+      .get("/finance/material-report/", { params: matPeriodParams() })
+      .then((r) => {
+        setMatReport(r.data.rows);
+        setMatTotals(r.data.totals || null);
+      })
+      .catch(() => toast(t("common.error"), "error"));
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(loadMaterialReport, [matPeriod.year, matPeriod.month, matDay]);
+
   const filteredMat = matFilter
     ? matReport.filter((r) => String(r.id) === matFilter)
     : matReport;
@@ -53,7 +76,8 @@ export default function Finance({ embedded = false }) {
     const head = [
       t("common.name"), t("common.category"), t("finance.colOrders"),
       t("finance.colSoldArea"), t("finance.colSoldSheets"),
-      t("finance.colMatSum"), t("finance.colCutSum"), t("finance.colStock"),
+      t("finance.colMatSum"), t("finance.colCutSum"), t("finance.colReceived"),
+      t("finance.colStock"),
     ];
     const lines = [head.join(";")];
     for (const r of filteredMat) {
@@ -65,7 +89,19 @@ export default function Finance({ embedded = false }) {
         Number(r.sold_sheets || 0).toFixed(2),
         Math.round(Number(r.material_revenue || 0)),
         Math.round(Number(r.cut_revenue || 0)),
+        Number(r.received || 0).toFixed(2),
         Number(r.stock || 0).toFixed(2),
+      ].join(";"));
+    }
+    if (matTotals && !matFilter) {
+      lines.push([
+        t("finance.totalRow"), "", matTotals.orders,
+        Number(matTotals.sold_area || 0).toFixed(2),
+        Number(matTotals.sold_sheets || 0).toFixed(2),
+        Math.round(Number(matTotals.material_revenue || 0)),
+        Math.round(Number(matTotals.cut_revenue || 0)),
+        Number(matTotals.received || 0).toFixed(2),
+        "",
       ].join(";"));
     }
     const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
@@ -83,6 +119,7 @@ export default function Finance({ embedded = false }) {
     { key: "sold_sheets", label: t("finance.colSoldSheets"), render: (r) => q2(r.sold_sheets) },
     { key: "material_revenue", label: t("finance.colMatSum"), render: (r) => som(r.material_revenue) },
     { key: "cut_revenue", label: t("finance.colCutSum"), render: (r) => som(r.cut_revenue) },
+    { key: "received", label: t("finance.colReceived"), render: (r) => q2(r.received) },
     { key: "stock", label: t("finance.colStock"), render: (r) => `${q2(r.stock)} ${t(`unit.${r.unit}`)}` },
   ];
 
@@ -189,6 +226,11 @@ export default function Finance({ embedded = false }) {
           {t("finance.materialReportTitle")}
         </summary>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end", marginTop: 12, gap: 10, flexWrap: "wrap" }}>
+          <MonthPicker value={matPeriod} onChange={(v) => { setMatPeriod(v); setMatDay(""); }} />
+          <div className="field" style={{ margin: 0 }}>
+            <label>{t("clients.filterDay")}</label>
+            <input type="date" value={matDay} onChange={(e) => setMatDay(e.target.value)} />
+          </div>
           <div className="field" style={{ margin: 0, minWidth: 220 }}>
             <label>{t("finance.filterMaterial")}</label>
             <select value={matFilter} onChange={(e) => setMatFilter(e.target.value)}>
@@ -204,6 +246,35 @@ export default function Finance({ embedded = false }) {
         </div>
         <div style={{ marginTop: 12 }}>
           <DataTable columns={matColumns} rows={filteredMat} />
+          {/* ИТОГО по всем материалам. При фильтре по одному материалу не
+              показываем — там итог совпал бы с единственной строкой. */}
+          {matTotals && !matFilter && (
+            <div
+              className="crow"
+              style={{
+                background: "var(--primary-soft)",
+                borderRadius: "var(--r-md)",
+                padding: "10px 14px",
+                marginTop: 8,
+                flexWrap: "wrap",
+                gap: 12,
+              }}
+            >
+              <strong style={{ color: "var(--accent-strong)" }}>{t("finance.totalRow")}</strong>
+              <span>
+                <span className="muted">{t("finance.colOrders")}:</span> <strong>{matTotals.orders}</strong>
+                {" · "}
+                <span className="muted">{t("finance.colSoldArea")}:</span> <strong>{q2(matTotals.sold_area)}</strong>
+                {" · "}
+                <span className="muted">{t("finance.colMatSum")}:</span> <strong>{som(matTotals.material_revenue)}</strong>
+                {" · "}
+                <span className="muted">{t("finance.colCutSum")}:</span>{" "}
+                <strong style={{ color: "var(--accent-strong)" }}>{som(matTotals.cut_revenue)}</strong>
+                {" · "}
+                <span className="muted">{t("finance.colReceived")}:</span> <strong>{q2(matTotals.received)}</strong>
+              </span>
+            </div>
+          )}
         </div>
       </details>
     </>
