@@ -57,7 +57,7 @@ python manage.py runserver
 | GET/POST | `/api/services/services/` | Услуги и тарификация |
 | GET/PATCH | `/api/services/settings/` | Настройки ценообразования (% ЗП мастера) |
 | GET/POST | `/api/clients/clients/` | CRM (`?search=<имя/телефон>` для автоподстановки) |
-| POST | `/api/clients/clients/{id}/reset-password/` | Сброс пароля клиентского портала |
+| POST | `/api/clients/clients/{id}/set-password/` | Выдать клиенту пароль от кабинета (только админ) |
 | POST | `/api/clients/clients/{id}/request-referral-change/` | Заявка на смену реферера (не-админ) |
 | POST/GET | `/api/clients/referral-requests/`, `/{id}/approve/`, `/{id}/reject/` | Очередь модерации смены реферера (админ) |
 | POST | `/api/sales/receipts/checkout/` | Оформление продажи |
@@ -76,6 +76,9 @@ python manage.py runserver
 | GET | `/api/finance/daily/` | Посуточная прибыль за месяц (`?year=&month=`) |
 | GET/PATCH | `/api/finance/settings/` | Ручные P&L-вводные (аренда, коммуналка, ЗП, бонус реферала…) |
 | POST | `/api/finance/unlock/` | Проверка пароля доступа к финансовым экранам |
+| GET/POST | `/api/finance/fixed-expenses/` | Постоянные расходы записями (`?year=&month=`) |
+| GET/POST | `/api/finance/salaries/` | Зарплаты по сотрудникам (`?year=&month=`) |
+| GET | `/api/sales/receipts/titles/` | Подсказки наименований заказов для кассы |
 | GET/POST | `/api/finance/expenses/` | Расходы/инвестиции (фреза, оборудование, улучшение цеха, прочее) |
 | POST | `/api/integrations/payments/webhook/` | Вебхук платёжного шлюза |
 | POST | `/api/integrations/telegram/customer/webhook/` | Привязка клиента по контакту (бот клиентов) |
@@ -106,8 +109,9 @@ python manage.py runserver
 
 ## Клиенты и рефералы
 
-- Клиентский портал — вход по **телефону + собственному паролю** (клиент задаёт
-  пароль при первом входе; сброс — персоналом из карточки клиента). Отдельный
+- Клиентский портал — вход по **телефону + паролю, который выдаёт админ** из
+  карточки клиента (клиент себе пароль не заводит; складовщику недоступно).
+  Пароль показывается один раз, «забыл» решается выдачей нового. Отдельный
   JWT-scope (`scope=customer`) полностью изолирует токены клиента от токенов
   персонала.
 - **Реферальная программа**: фиксированная сумма бонуса за каждого приведённого
@@ -174,5 +178,5 @@ python manage.py run_customer_bot
 python manage.py test
 ```
 
-198 тестов (модели, сервисы продаж/склада, edge-кейсы возвратов/долга/FIFO,
-финотчёт) — должны быть зелёными.
+238 тестов (модели, сервисы продаж/склада, edge-кейсы возвратов/долга/FIFO,
+себестоимость, финотчёт, фильтры клиентов) — должны быть зелёными.
