@@ -5,6 +5,15 @@ import api from "../../api/api.js";
 
 const COLORS = ["#e8853a", "#ffc592", "#2a9d99", "#d6b6f6", "#7a4a1e", "#1aae39"];
 
+// Расходы финотчёта одним списком — те виды, что уменьшают прибыль. Вложения
+// (оборудование, улучшение цеха) идут отдельной карточкой, поэтому здесь их нет.
+const expenseRows = (fin) =>
+  [
+    ...(fin.materials?.rows || []),
+    ...(fin.fixed?.rows || []),
+    ...(fin.variable?.rows || []),
+  ].filter((r) => r.in_profit);
+
 function Stat({ label, value, suffix, color }) {
   return (
     <div className="stat">
@@ -121,14 +130,9 @@ export default function Dashboard() {
     push(t("dashboard.refunded"), Math.round(Number(data.refunds.total_refunded)));
     if (fin) {
       push("", "");
-      push(t("finance.rent"), Math.round(Number(fin.fixed.rent)));
-      push(t("finance.utilities"), Math.round(Number(fin.fixed.utilities)));
-      push(t("finance.internet"), Math.round(Number(fin.fixed.internet)));
-      push(t("finance.salary"), Math.round(Number(fin.fixed.salary)));
-      push(t("finance.fixedOther"), Math.round(Number(fin.fixed.other)));
-      push(t("expenseCat.CUTTER"), Math.round(Number(fin.variable.cutter)));
-      push(t("expenseCat.TRANSPORT"), Math.round(Number(fin.variable.transport)));
-      push(t("dashboard.otherVariable"), Math.round(Number(fin.variable.other)));
+      // Строки — виды расхода из отчёта, поэтому свои виды («Реклама»,
+      // «Налоги») попадают в выгрузку сами, без правки этого списка.
+      for (const row of expenseRows(fin)) push(row.name, Math.round(Number(row.amount)));
       push(t("finance.cogs"), Math.round(Number(fin.cogs)));
       push(t("finance.grossMargin"), Math.round(Number(fin.gross_margin)));
       push(t("finance.expenses"), Math.round(Number(fin.total_expenses)));
@@ -204,14 +208,11 @@ export default function Dashboard() {
             {/* Расходы детально */}
             <div className="card">
               <h3>{t("dashboard.expensesBreakdown")}</h3>
-              <div className="crow"><span className="k">{t("finance.rent")}</span><span>{som(fin.fixed.rent)}</span></div>
-              <div className="crow"><span className="k">{t("finance.utilities")}</span><span>{som(fin.fixed.utilities)}</span></div>
-              <div className="crow"><span className="k">{t("finance.internet")}</span><span>{som(fin.fixed.internet)}</span></div>
-              <div className="crow"><span className="k">{t("finance.salary")}</span><span>{som(fin.fixed.salary)}</span></div>
-              <div className="crow"><span className="k">{t("finance.fixedOther")}</span><span>{som(fin.fixed.other)}</span></div>
-              <div className="crow"><span className="k">{t("expenseCat.CUTTER")}</span><span>{som(fin.variable.cutter)}</span></div>
-              <div className="crow"><span className="k">{t("expenseCat.TRANSPORT")}</span><span>{som(fin.variable.transport)}</span></div>
-              <div className="crow"><span className="k">{t("dashboard.otherVariable")}</span><span>{som(fin.variable.other)}</span></div>
+              {expenseRows(fin).map((row) => (
+                <div className="crow" key={row.id}>
+                  <span className="k">{row.name}</span><span>{som(row.amount)}</span>
+                </div>
+              ))}
               <div className="crow"><span className="k">{t("finance.cogs")}</span><span>{som(fin.cogs)}</span></div>
               <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6, paddingTop: 8 }}>
                 <strong style={{ color: "var(--accent-strong)" }}>{t("finance.expenses")}</strong>
@@ -223,8 +224,11 @@ export default function Dashboard() {
             <div className="card">
               <h3>{t("finance.investmentsTitle")}</h3>
               <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.investmentsHint")}</p>
-              <div className="crow"><span className="k">{t("expenseCat.EQUIPMENT")}</span><span>{som(fin.investments.equipment)}</span></div>
-              <div className="crow"><span className="k">{t("expenseCat.IMPROVEMENT")}</span><span>{som(fin.investments.improvement)}</span></div>
+              {(fin.investments.rows || []).map((row) => (
+                <div className="crow" key={row.id}>
+                  <span className="k">{row.name}</span><span>{som(row.amount)}</span>
+                </div>
+              ))}
               <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6, paddingTop: 8 }}>
                 <strong style={{ color: "var(--accent-strong)" }}>{t("finance.investmentsTotal")}</strong>
                 <strong style={{ color: "var(--accent-strong)" }}>{som(fin.investments.total)}</strong>

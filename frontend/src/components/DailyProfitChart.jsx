@@ -8,18 +8,28 @@ const BAR_H = 90; // px above and below the zero baseline
 
 // Day-by-day profit/loss bar chart for one calendar month, so the owner can
 // see which days were in the red — not just the month-end total.
-export default function DailyProfitChart() {
+export default function DailyProfitChart({ year: propYear, month: propMonth, reloadKey = 0 }) {
   const { t } = useTranslation();
   const now = new Date();
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth() + 1); // 1-12
+  const [year, setYear] = useState(propYear ?? now.getFullYear());
+  const [month, setMonth] = useState(propMonth ?? now.getMonth() + 1); // 1-12
   const [data, setData] = useState(null);
   const [hoverDay, setHoverDay] = useState(null);
 
+  // График всегда про один месяц, но период страницы может стоять на другом
+  // (или на «весь период» — тогда месяц пропадает и остаётся выбранный здесь).
+  // Идём за страницей, а стрелки продолжают листать месяцы локально.
+  useEffect(() => {
+    if (propYear) setYear(propYear);
+    if (propMonth) setMonth(propMonth);
+  }, [propYear, propMonth]);
+
+  // reloadKey растёт, когда со страницы поменяли траты, — иначе график остался
+  // бы на старых цифрах и спорил бы со сводкой над ним.
   useEffect(() => {
     setData(null);
     api.get("/finance/daily/", { params: { year, month } }).then((r) => setData(r.data));
-  }, [year, month]);
+  }, [year, month, reloadKey]);
 
   function shift(delta) {
     let m = month + delta;

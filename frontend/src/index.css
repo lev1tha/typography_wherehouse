@@ -196,6 +196,119 @@ button.ghost:hover {
   color: var(--ink);
 }
 
+/* Ссылка, выглядящая как вторичная кнопка — переход в соседний раздел. */
+.btn-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  color: var(--accent-strong);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.btn-link:hover {
+  background: var(--primary-soft);
+}
+
+/* Складской лист по материалам — плотная таблица «как в Excel»: много колонок,
+   поэтому прокручивается вбок и не ломает ширину страницы. */
+.sheet-wrap {
+  overflow-x: auto;
+  margin-top: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+}
+
+.sheet-table {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.sheet-table th,
+.sheet-table td {
+  padding: 6px 10px;
+  border-right: 1px solid var(--hairline);
+}
+
+.sheet-table th.sheet-group {
+  text-align: center;
+  background: var(--primary-soft);
+  color: var(--accent-strong);
+}
+
+.sheet-table th.sheet-group-alt {
+  background: #fdf1e3;
+}
+
+/* Числовые колонки — вправо и моноширинно, чтобы разряды читались столбиком. */
+.sheet-num {
+  display: block;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Клетка, которую вписали руками: она победила расчёт — помечаем уголком,
+   чтобы было видно, где цифра своя, а где перенесена системой. */
+.sheet-table td.sheet-manual {
+  position: relative;
+}
+
+.sheet-table td.sheet-manual::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 0;
+  height: 0;
+  border-top: 7px solid var(--accent-strong);
+  border-left: 7px solid transparent;
+}
+
+.sheet-table td.sheet-end {
+  background: #eef3fb; /* «остаток в конце месяца» выделен, как в исходном листе */
+}
+
+.sheet-input {
+  width: 84px;
+  height: 30px;
+  padding: 2px 6px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.sheet-table tfoot .sheet-total td {
+  background: var(--primary-soft);
+  font-weight: 700;
+  color: var(--accent-strong);
+}
+
+/* Строка блока финотчёта: выглядит как строка таблицы, а работает как кнопка —
+   открывает траты этого вида. Растягиваем на всю ширину карточки и убираем
+   «кнопочную» высоту, иначе блок перестаёт читаться как отчёт. */
+button.ghost.kind-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: auto;
+  padding: 7px 8px;
+  margin: 0 -8px;
+  color: var(--ink);
+  font-weight: 400;
+  text-align: left;
+  border-radius: var(--r-md);
+}
+
+button.ghost.kind-row .k {
+  color: var(--ink-muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
 button.danger {
   background: var(--danger);
   color: #fff;

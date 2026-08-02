@@ -260,6 +260,16 @@ export default function Catalog({ embedded = false }) {
             </div>
           </div>
 
+          {/* Колонка «производство» складской таблицы: откуда возят материал. */}
+          <div className="field">
+            <label>{t("warehouse.production")}</label>
+            <input
+              value={editing.production ?? ""}
+              onChange={(e) => setEditing({ ...editing, production: e.target.value })}
+              placeholder={t("warehouse.productionPh")}
+            />
+          </div>
+
           <label className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"

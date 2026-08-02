@@ -128,14 +128,18 @@
     "priceStockSection": "Price & stock",
     "qtyNote": "changes via intake / inventory",
     "deleteConfirm": "Delete “{{name}}”? If it has sales, it will be hidden from the catalogue and the history kept.",
-    "deleted": "Material deleted"
+    "deleted": "Material deleted",
+    "production": "Made in / supplier",
+    "productionPh": "e.g. Bishkek, Global",
+    "tabSheet": "Monthly stock"
   },
   "unit": {
     "SQM": "sqm",
     "METER": "m",
     "PIECE": "pcs",
     "KG": "kg",
-    "LITER": "L"
+    "LITER": "L",
+    "SHEET": "sheet"
   },
   "pricing": {
     "title": "Pricing & services",
@@ -457,32 +461,36 @@
     "materialPurchase": "Material purchase",
     "transportRow": "Transport costs",
     "notInProfit": "not in profit",
-    "materialsHint": "Total = opening stock + purchase + transport − closing stock. Material debt is informational and not part of the total. Transport comes from “Purchases”.",
-    "materialsNeedSetup": "Fill in the opening stock and material purchase — without them the material cost is wrong and is excluded from profit."
+    "materialsHint": "Total = opening stock + purchases + transport − closing stock. Opening stock and purchases are computed by the system — from stock and from intakes; a hand-entered value wins. Material debt is shown for reference and is not in the total.",
+    "materialsNeedSetup": "Material cost is off for now: closing stock exceeds opening plus purchases. Fill in the balances under Stock → “Monthly stock”, or enter the opening stock by hand.",
+    "allTime": "All time",
+    "thisMonth": "This month",
+    "periodHint": "Every figure in the report is for the selected month.",
+    "allTimeActive": "Showing all-time figures.",
+    "stockTableTitle": "Stock by material (Excel layout)",
+    "colStockStart": "Opening stock",
+    "colStockEnd": "Closing stock",
+    "colSoldQty": "Sold",
+    "colProduction": "Made in",
+    "colUnit": "Counted in",
+    "colReceiptsBy": "Deliveries by date",
+    "stockTableHint": "Opening stock + deliveries − closing stock = sold. Stock on past dates is rolled back from today's stock.",
+    "stockStartAuto": "Computed from stock — leave empty",
+    "autoOverridden": "Entered by hand; the system computed {{value}}",
+    "autoPlaceholderHint": "Empty means the system's figure is used. Type your own to override.",
+    "autoFromStock": "from stock intakes: {{value}}",
+    "autoManualPart": "by hand {{value}}"
   },
   "expenses": {
-    "title": "Purchases & investments",
-    "subtitle": "Cutter, equipment, workshop improvement and other variable costs. Amounts feed the «Variable costs» of the report.",
-    "category": "Category",
     "amount": "Amount",
     "date": "Date",
-    "namePh": "E.g.: cutter 3.175 mm",
     "added": "Added",
     "needAmount": "Enter amount",
     "confirmDel": "Delete record?",
-    "totalInvest": "Total investments",
-    "detailLabel": "What exactly",
-    "detailPh": "E.g.: bulbs, brushes, paint",
     "note": "Comment",
     "notePh": "optional",
-    "editTitle": "Edit purchase"
-  },
-  "expenseCat": {
-    "CUTTER": "Consumables (cutter)",
-    "EQUIPMENT": "Equipment purchase",
-    "IMPROVEMENT": "Workshop improvement",
-    "OTHER": "Other costs",
-    "TRANSPORT": "Transport costs"
+    "subtitle": "Cutter, transport, equipment, workshop upgrades and other variable costs.",
+    "category": "Expense type"
   },
   "myOrders": {
     "title": "My orders",
@@ -535,30 +543,55 @@
     "November",
     "December"
   ],
-  "fixedCat": {
-    "RENT": "Workshop rent",
-    "UTILITIES": "Utilities",
-    "INTERNET": "Internet",
-    "OTHER": "Other fixed"
-  },
   "fixed": {
-    "title": "Fixed costs",
-    "subtitle": "Rent, utilities, internet and the rest — dated records, just like purchases.",
     "forWhat": "What for / period",
     "forWhatPh": "e.g. Rent for July",
-    "notePh": "what's included: power 3000, gas 1200",
     "totalForPeriod": "Total for period",
-    "editTitle": "Edit cost"
+    "subtitle": "Rent, utilities, internet and the rest — dated records.",
+    "editTitle": "Edit expense"
   },
   "salary": {
-    "title": "Salaries",
-    "subtitle": "Who was paid, how much and when.",
     "employee": "Employee",
     "employeePh": "employee name",
-    "notePh": "e.g. advance for July",
-    "totalForPeriod": "Total for period",
-    "editTitle": "Edit payment",
-    "needEmployee": "Enter the employee",
-    "added": "Payment added"
+    "subtitle": "Who was paid, how much and when."
+  },
+  "kinds": {
+    "add": "expense type",
+    "newTitle": "New expense type",
+    "editTitle": "Expense type settings",
+    "name": "Name",
+    "namePh": "e.g. Advertising, Taxes, Machine repair",
+    "block": "Which block to show it in",
+    "inProfit": "Reduces profit",
+    "inProfitHint": "Clear it for an investment: the cost stays visible in the report but does not reduce profit — like buying equipment.",
+    "builtinHint": "Built-in type: name and order can change, the block cannot.",
+    "needName": "Enter a name",
+    "created": "Expense type added",
+    "delete": "Delete type",
+    "confirmDelete": "Delete this expense type? If it has entries it will be hidden instead, and the entries kept.",
+    "deleted": "Expense type deleted",
+    "hidden": "Type hidden, its entries were kept",
+    "settings": "Type settings",
+    "openHint": "Open the spending for this type",
+    "empty": "No spending in this period.",
+    "periodHint": "Spending from {{from}} to {{to}}",
+    "allTimeHint": "All spending, all time",
+    "notInProfitHint": "does not reduce profit"
+  },
+  "stockSheet": {
+    "title": "Stock by material",
+    "groupStock": "in stock",
+    "groupIncoming": "deliveries",
+    "colName": "Material",
+    "colStart": "Opening stock",
+    "colReceived": "Received",
+    "colEnd": "Closing stock",
+    "colSold": "Sold",
+    "colProduction": "Made in",
+    "hint": "Opening stock carries over from last month's closing automatically — enter it once, in the month you start from. Then: opening + received − sold = closing. Any cell can be corrected by hand.",
+    "needMonth": "Pick a specific month to enter opening stock.",
+    "linkFromFinance": "Open the stock sheet by material",
+    "manualCell": "Entered by hand — overrides the computed value",
+    "carriedCell": "Carried over from last month's closing"
   }
 }

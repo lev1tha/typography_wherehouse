@@ -12,7 +12,7 @@ import Pricing from "./pages/admin/Pricing.jsx";
 import Clients from "./pages/admin/Clients.jsx";
 import ReferralRequests from "./pages/admin/ReferralRequests.jsx";
 import Receipts from "./pages/admin/Receipts.jsx";
-import FinanceSection from "./pages/admin/FinanceSection.jsx";
+import Finance from "./pages/admin/Finance.jsx";
 import CustomerOrders from "./pages/customer/CustomerOrders.jsx";
 import Warehouse from "./pages/store/Warehouse.jsx";
 import Checkout from "./pages/store/Checkout.jsx";
@@ -92,7 +92,7 @@ export default function App() {
           path="/admin/finance"
           element={
             <FinanceGate>
-              <FinanceSection />
+              <Finance />
             </FinanceGate>
           }
         />
