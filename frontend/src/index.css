@@ -715,12 +715,46 @@ label {
   animation: modal-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.modal.wide {
-  max-width: 1180px;
+/* Причина в ленте движений — вторичный текст: не даём ей растягивать таблицу,
+   длинное режем многоточием (полностью видно в подсказке). */
+.journal-reason {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  max-width: 280px;
+  font-size: 13px;
 }
 
-/* Таблица массового ввода: ячейка = поле ввода, поэтому у неё нет ни своих
-   отступов, ни рамки — рамку рисует сама ячейка таблицы. */
+/* Ввод каталога пачкой: одиннадцать колонок, поэтому окно занимает почти всю
+   ширину экрана — иначе половина полей уезжает за край. */
+.modal.wide {
+  max-width: min(1440px, 96vw);
+}
+
+.grid-wrap {
+  overflow: auto;
+  max-height: 58vh;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+}
+
+/* Ячейка = поле ввода, поэтому у неё почти нет своих отступов.
+   border-collapse: separate — обязательно: при collapse Chrome не приклеивает
+   ячейки по горизонтали, и при прокрутке вправо номер строки с названием
+   уезжали за край, то есть правые колонки заполнялись вслепую. */
+.grid-table {
+  margin: 0;
+  border-collapse: separate;
+  border-spacing: 0;
+  /* overflow у .table создаёт свой контекст прокрутки и убивает sticky:
+     ячейка «приклеивается» к невидимой области вместо края экрана.
+     Скругление и рамку рисует обёртка .grid-wrap. */
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+}
+
 .grid-table td {
   padding: 2px 4px;
 }
@@ -738,6 +772,83 @@ label {
 .grid-table th {
   font-size: 11px;
   white-space: nowrap;
+}
+
+/* Шапка в два яруса и обе — липкие: при полусотне строк заголовки уезжают
+   вверх, и на середине списка уже не помнишь, где какая колонка. */
+.grid-table thead th {
+  position: sticky;
+  z-index: 2;
+  background: var(--surface);
+}
+
+.grid-table thead tr.grid-groups th {
+  top: 0;
+  height: 26px;
+  padding: 0 8px;
+}
+
+.grid-table thead tr.grid-heads th {
+  top: 26px;
+}
+
+/* Заливка групп — та же, что в складском листе: заказчик уже видит такую
+   шапку там, и связь «группа → её колонки» читается без объяснений.
+   (Правило складского листа привязано к .sheet-table, здесь нужно своё.) */
+.grid-table thead tr.grid-groups th.sheet-group {
+  text-align: center;
+  background: var(--primary-soft);
+  color: var(--accent-strong);
+  border-left: 3px solid var(--surface);
+  border-right: 3px solid var(--surface);
+}
+
+.grid-table thead tr.grid-groups th.grid-group-sheet {
+  background: #fdf1e3;
+}
+
+/* Номер строки — только чтобы сослаться на неё в ошибке. */
+.grid-table .grid-num {
+  width: 30px;
+  min-width: 30px;
+  padding: 0 4px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Название не уезжает при горизонтальной прокрутке: без него на узком экране
+   правые колонки заполняешь вслепую — непонятно, какой это материал. */
+.grid-table .grid-sticky {
+  position: sticky;
+  left: 30px;
+  z-index: 1;
+  background: var(--surface);
+  /* Граница справа — чтобы приклеенное название не сливалось с колонками,
+     которые проезжают под ним. */
+  box-shadow: 1px 0 0 var(--hairline);
+}
+
+.grid-table thead .grid-sticky {
+  z-index: 3;
+}
+
+.grid-table .grid-num {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+}
+
+.grid-table thead .grid-num {
+  z-index: 3;
+}
+
+/* Строка с ошибкой остаётся подсвеченной и под липкими ячейками. */
+.grid-table tr.warn .grid-sticky,
+.grid-table tr.warn .grid-num {
+  background: var(--warn-bg);
 }
 
 @keyframes modal-in {
@@ -1312,6 +1423,20 @@ label {
   }
   .table {
     display: none;
+  }
+  /* Кроме сетки ввода каталога: у неё нет карточного двойника, и правило выше
+     оставляло на телефоне пустое окно с одной кнопкой. Таблица остаётся
+     таблицей и прокручивается вбок — приклеенное название не даёт потеряться.
+     Ячейки при этом не раздуваем до 48px: одиннадцать колонок по 48 превращают
+     ввод в бесконечную прокрутку. */
+  .grid-table {
+    display: table;
+  }
+  .grid-table input,
+  .grid-table select {
+    height: 38px;
+    min-height: 38px;
+    font-size: 14px;
   }
   .cards {
     display: flex;

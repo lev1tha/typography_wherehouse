@@ -62,19 +62,41 @@ export default function CatalogGrid({ types, sites, onDone, onClose }) {
   const [busy, setBusy] = useState(false);
   const gridRef = useRef(null);
 
+  // Колонки сгруппированы шапкой в два яруса — как в складском листе заказчика:
+  // одиннадцать равнозначных заголовков подряд читаются как стена, а «Материал ·
+  // Лист · Цены» видно с одного взгляда. Подписи внутри группы короткие: группа
+  // уже сказала, о чём речь, и колонки от этого влезают на экран без прокрутки.
   const COLS = useMemo(() => [
-    { key: "name", label: t("grid.name"), width: 165 },
-    { key: "type", label: t("warehouse.type"), width: 110, options: types },
-    { key: "color", label: t("warehouse.color"), width: 100 },
-    { key: "thickness_mm", label: t("grid.thickness"), width: 72, num: true },
-    { key: "article", label: t("warehouse.article"), width: 70 },
-    { key: "sheet_width", label: t("grid.width"), width: 76, num: true },
-    { key: "sheet_height", label: t("grid.height"), width: 76, num: true },
-    { key: "production", label: t("grid.production"), width: 110, options: sites },
-    { key: "piece_price", label: t("grid.piecePrice"), width: 95, num: true },
-    { key: "price_per_sqm", label: t("grid.sqmPrice"), width: 95, num: true },
-    { key: "cut_rate_per_pm", label: t("grid.cutRate"), width: 95, num: true },
+    { key: "name", label: t("grid.name"), width: 168, sticky: true },
+    { key: "type", label: t("warehouse.type"), width: 104, options: types, group: "material" },
+    { key: "color", label: t("warehouse.color"), width: 96, group: "material" },
+    // Единицу видно из группы («Лист, м», «Цены, сом»), а у толщины своей группы
+    // нет — миллиметры остаются подсказкой на заголовке.
+    { key: "thickness_mm", label: t("grid.thickness"), hint: t("warehouse.thickness"), width: 68, num: true, group: "material" },
+    { key: "article", label: t("warehouse.article"), width: 68, group: "material" },
+    { key: "production", label: t("grid.production"), width: 104, options: sites, group: "material" },
+    { key: "sheet_width", label: t("grid.width"), width: 70, num: true, group: "sheet" },
+    { key: "sheet_height", label: t("grid.height"), width: 70, num: true, group: "sheet" },
+    { key: "piece_price", label: t("grid.piecePrice"), width: 86, num: true, group: "price" },
+    { key: "price_per_sqm", label: t("grid.sqmPrice"), width: 86, num: true, group: "price" },
+    { key: "cut_rate_per_pm", label: t("grid.cutRate"), width: 86, num: true, group: "price" },
   ], [types, sites, t]);
+
+  // Шапка первого яруса: подряд идущие колонки одной группы под общим заголовком.
+  const GROUPS = useMemo(() => {
+    const titles = {
+      material: t("grid.groupMaterial"),
+      sheet: t("grid.groupSheet"),
+      price: t("grid.groupPrice"),
+    };
+    const out = [];
+    COLS.forEach((col) => {
+      const last = out[out.length - 1];
+      if (last && last.group === col.group) last.span += 1;
+      else out.push({ group: col.group, title: titles[col.group] || "", span: 1 });
+    });
+    return out;
+  }, [COLS, t]);
 
   function setCell(rowIndex, key, value) {
     setRows((prev) => {
@@ -190,22 +212,38 @@ export default function CatalogGrid({ types, sites, onDone, onClose }) {
     <>
       <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>{t("grid.hint")}</p>
 
-      <div ref={gridRef} style={{ overflowX: "auto", maxHeight: "58vh", overflowY: "auto" }}>
+      <div ref={gridRef} className="grid-wrap">
         <table className="table grid-table">
           <thead>
-            <tr>
-              <th style={{ width: 34 }} />
+            <tr className="grid-groups">
+              <th className="grid-num" />
+              <th className="grid-sticky" />
+              {GROUPS.filter((g) => g.group).map((g) => (
+                <th key={g.group} colSpan={g.span} className={`sheet-group grid-group-${g.group}`}>
+                  {g.title}
+                </th>
+              ))}
+            </tr>
+            <tr className="grid-heads">
+              <th className="grid-num" />
               {COLS.map((col) => (
-                <th key={col.key} style={{ minWidth: col.width }}>{col.label}</th>
+                <th
+                  key={col.key}
+                  className={col.sticky ? "grid-sticky" : ""}
+                  style={{ minWidth: col.width }}
+                  title={col.hint || undefined}
+                >
+                  {col.label}
+                </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {rows.map((row, rowIndex) => (
               <tr key={rowIndex} className={errors[rowIndex] ? "warn" : ""}>
-                <td className="muted" style={{ textAlign: "right", fontSize: 12 }}>{rowIndex + 1}</td>
+                <td className="grid-num">{rowIndex + 1}</td>
                 {COLS.map((col, colIndex) => (
-                  <td key={col.key}>
+                  <td key={col.key} className={col.sticky ? "grid-sticky" : ""}>
                     {col.options ? (
                       <select
                         data-cell={`${rowIndex}-${colIndex}`}
@@ -231,6 +269,10 @@ export default function CatalogGrid({ types, sites, onDone, onClose }) {
                         step={col.num ? "any" : undefined}
                         value={row[col.key]}
                         placeholder={col.key === "name" ? suggestedName(row, types) : ""}
+                        // Собранное название длиннее ячейки — показываем целиком
+                        // по наведению, обрезанное «Форекс молочный 8 м…» не
+                        // даёт понять, тот ли это материал.
+                        title={col.key === "name" ? row.name || suggestedName(row, types) : undefined}
                         onChange={(e) => setCell(rowIndex, col.key, e.target.value)}
                         onPaste={(e) => handlePaste(e, rowIndex, colIndex)}
                         onKeyDown={(e) => handleKeyDown(e, rowIndex, colIndex)}

@@ -18,6 +18,21 @@ import MonthPicker from "./MonthPicker.jsx";
 
 const TYPES = ["SUPPLY", "SALE", "RETURN", "WRITE_OFF", "ADJUSTMENT"];
 
+/** Причина без того, что уже написано в соседних колонках.
+ *
+ * В журнале причина хранится самодостаточной фразой («Продажа по чеку №13 —
+ * форекс 3мм»), потому что её читают и в админке, где колонок нет. В ленте
+ * начало этой фразы дублирует колонки «Операция» и «Заказ», и самый широкий
+ * столбец таблицы состоял из уже сказанного. Показываем хвост после тире;
+ * полная фраза остаётся в подсказке по наведению.
+ */
+function shortReason(row) {
+  const text = row.reason || "";
+  if (row.type !== "SALE" && row.type !== "RETURN") return text;
+  const dash = text.indexOf(" — ");
+  return dash === -1 ? "" : text.slice(dash + 3);
+}
+
 // Приход — зелёным, расход — красным: цифру со знаком глазами не ищут.
 const TONE = {
   SUPPLY: "ok",
@@ -115,7 +130,11 @@ export default function StockJournal() {
     {
       key: "reason",
       label: t("journal.reason"),
-      render: (r) => <span className="muted">{r.reason || "—"}</span>,
+      render: (r) => (
+        <span className="muted journal-reason" title={r.reason || ""}>
+          {shortReason(r) || "—"}
+        </span>
+      ),
     },
     {
       key: "created_by_username",
@@ -126,21 +145,28 @@ export default function StockJournal() {
 
   return (
     <>
-      {/* flex-end: у выбора месяца сверху подпись, без выравнивания по низу
-          селекторы встают лесенкой. */}
+      {/* Подписи у всех трёх фильтров: у выбора месяца она есть по своей
+          природе, и без подписей у соседей ряд выглядел как случайный набор
+          выпадашек разной высоты. */}
       <div className="toolbar" style={{ alignItems: "flex-end" }}>
-        <select value={type} onChange={(e) => filter(setType)(e.target.value)}>
-          <option value="">{t("journal.allTypes")}</option>
-          {TYPES.map((code) => (
-            <option key={code} value={code}>{t(`logType.${code}`)}</option>
-          ))}
-        </select>
-        <select value={material} onChange={(e) => filter(setMaterial)(e.target.value)}>
-          <option value="">{t("journal.allMaterials")}</option>
-          {materials.map((m) => (
-            <option key={m.id} value={m.id}>{m.name}</option>
-          ))}
-        </select>
+        <div className="field" style={{ margin: 0 }}>
+          <label>{t("journal.type")}</label>
+          <select value={type} onChange={(e) => filter(setType)(e.target.value)}>
+            <option value="">{t("journal.allTypes")}</option>
+            {TYPES.map((code) => (
+              <option key={code} value={code}>{t(`logType.${code}`)}</option>
+            ))}
+          </select>
+        </div>
+        <div className="field" style={{ margin: 0 }}>
+          <label>{t("checkout.material")}</label>
+          <select value={material} onChange={(e) => filter(setMaterial)(e.target.value)}>
+            <option value="">{t("journal.allMaterials")}</option>
+            {materials.map((m) => (
+              <option key={m.id} value={m.id}>{m.name}</option>
+            ))}
+          </select>
+        </div>
         <MonthPicker value={period} onChange={filter(setPeriod)} />
       </div>
 
