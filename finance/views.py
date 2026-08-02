@@ -712,10 +712,10 @@ class MaterialReportView(APIView):
             type=InventoryLog.Type.SUPPLY, quantity_changed__gt=0
         )
         if d_from:
-            supply = supply.filter(created_at__date__gte=d_from)
+            supply = supply.filter(happened_at__date__gte=d_from)
         if d_to:
-            supply = supply.filter(created_at__date__lte=d_to)
-        for log in supply.annotate(day=TruncDate("created_at")).values(
+            supply = supply.filter(happened_at__date__lte=d_to)
+        for log in supply.annotate(day=TruncDate("happened_at")).values(
             "material_id", "quantity_changed", "day"
         ):
             received[log["material_id"]] += log["quantity_changed"]
@@ -756,7 +756,7 @@ class MaterialReportView(APIView):
                     "id": m.id,
                     "name": m.name,
                     "type": m.type.name if m.type_id else "",
-                    "production": m.production,
+                    "production": m.production.name if m.production_id else "",
                     "orders": len(a["orders"]) if a else 0,
                     "sold_area": a["area"] if a else Decimal("0"),
                     "sold_sheets": a["sheets"] if a else Decimal("0"),

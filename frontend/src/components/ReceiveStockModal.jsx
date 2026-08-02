@@ -17,6 +17,9 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
   const [v, setV] = useState({
     width: "", length: "", height: "", sheet_count: "",
     quantity: "", purchase_cost: "", actual_price: "", code: "",
+    // Дата поступления: заказчик вносит поставки задним числом, когда доходят
+    // руки — в его Excel даты идут вразнобой. По ней же выстраивается FIFO.
+    received_on: new Date().toISOString().slice(0, 10),
   });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setV((s) => ({ ...s, [k]: e.target.value }));
@@ -51,12 +54,14 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           height: form === "SHEET" ? Number(v.height) : null,
           sheet_count: form === "SHEET" ? Number(v.sheet_count) : null,
           purchase_cost: Number(v.purchase_cost),
+          received_on: v.received_on || null,
         });
       } else {
         await api.post("/warehouse/materials/supply/", {
           material: material.id,
           quantity: Number(v.quantity),
           actual_price: v.actual_price ? Number(v.actual_price) : null,
+          happened_on: v.received_on || null,
           reason: v.code,
         });
       }
@@ -128,6 +133,14 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
       )}
 
       <div className="field">
+        <div className="field">
+          <label>{t("supply.receivedOn")}</label>
+          <input type="date" value={v.received_on} onChange={set("received_on")} />
+          <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+            {t("supply.receivedOnHint")}
+          </p>
+        </div>
+
         <label>{t("supply.rollCode")}</label>
         <input value={v.code} onChange={set("code")} placeholder={t("supply.batchPlaceholder")} />
       </div>

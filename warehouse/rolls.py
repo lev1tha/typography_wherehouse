@@ -14,10 +14,18 @@ from .models import InventoryLog, Material, Roll
 
 
 def compute_area(form: str, *, width=None, length=None, height=None, sheet_count=None) -> Decimal:
-    """Area in кв.м for a lot, from its form and dimensions."""
+    """Area in кв.м for a lot, from its form and dimensions.
+
+    Округление до десятитысячных, как у площади листа. При сотых лист
+    1.22 × 2.44 = 2.9768 и партия из 5 листов давала 14.88 вместо 14.884 —
+    обратный пересчёт возвращал 4.9987 листа вместо пяти ровно в той колонке,
+    которую заказчик сверяет со своим Excel. У партии из 50 листов расхождения
+    не было (148.84 укладывается в два знака), поэтому на глаз проблема ловилась
+    через раз.
+    """
     if form == Roll.Form.SHEET:
-        return (Decimal(width) * Decimal(height) * Decimal(sheet_count)).quantize(Decimal("0.01"))
-    return (Decimal(width) * Decimal(length)).quantize(Decimal("0.01"))
+        return (Decimal(width) * Decimal(height) * Decimal(sheet_count)).quantize(Decimal("0.0001"))
+    return (Decimal(width) * Decimal(length)).quantize(Decimal("0.0001"))
 
 
 @transaction.atomic
@@ -26,7 +34,6 @@ def receive_lot(
     *,
     form: str,
     purchase_cost: Decimal,
-    markup_percent: Decimal,
     width=None,
     length=None,
     height=None,
@@ -34,15 +41,20 @@ def receive_lot(
     area: Decimal = None,
     code: str = "",
     user=None,
+    received_at=None,
 ) -> Roll:
     """Receive a new lot (roll or sheets). Computes area from dimensions unless
     `area` is given directly; then creates the lot and refreshes material stock.
+
+    ``received_at`` — дата поступления; поставки часто вносят задним числом.
+    По ней же идёт FIFO, поэтому партия встаёт в очередь по своей настоящей
+    дате, а не по моменту ввода.
     """
     if area is None:
         area = compute_area(form, width=width, length=length, height=height, sheet_count=sheet_count)
     area = Decimal(area)
     locked = Material.objects.select_for_update().get(pk=material.pk)
-    roll = Roll.objects.create(
+    roll = Roll(
         material=locked,
         code=code,
         form=form,
@@ -53,9 +65,11 @@ def receive_lot(
         initial_area=area,
         remaining_area=area,
         purchase_cost=Decimal(purchase_cost),
-        markup_percent=Decimal(markup_percent),
         created_by=user,
     )
+    if received_at:
+        roll.received_at = received_at
+    roll.save()
     # The material is a roll-material; stock is the sum of remaining roll areas.
     locked.is_roll_material = True
     if locked.unit != Material.Unit.SQM:
@@ -68,7 +82,7 @@ def receive_lot(
         "is_roll_material", "unit", "quantity", "purchase_price", "updated_at",
     ])
 
-    InventoryLog.objects.create(
+    entry = InventoryLog(
         type=InventoryLog.Type.SUPPLY,
         material=locked,
         quantity_changed=Decimal(area),
@@ -76,14 +90,17 @@ def receive_lot(
         reason=f"Поступление: {roll.dimensions_label} ({area} кв.м), {purchase_cost} сом",
         created_by=user,
     )
+    if received_at:
+        entry.happened_at = received_at
+    entry.save()
     return roll
 
 
 # Backwards-compatible alias.
-def receive_roll(material, *, area, purchase_cost, markup_percent, code="", user=None):
+def receive_roll(material, *, area, purchase_cost, code="", user=None):
     return receive_lot(
         material, form=Roll.Form.ROLL, area=area, purchase_cost=purchase_cost,
-        markup_percent=markup_percent, code=code, user=user,
+        code=code, user=user,
     )
 
 

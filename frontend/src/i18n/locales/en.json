@@ -380,7 +380,9 @@
     "retailPerSqm": "Retail price per sqm",
     "noRollMaterials": "No m²-based materials. Create one with the «Sheet / roll» checkbox in the catalogue (Warehouse).",
     "costPerSqm": "Cost, som/sqm",
-    "batchPlaceholder": "Batch / supplier (optional)"
+    "batchPlaceholder": "Batch / supplier (optional)",
+    "receivedOn": "Received on",
+    "receivedOnHint": "Can be back-dated — the lot queues for consumption by its real date."
   },
   "writeoffReason": {
     "DAMAGE": "Damage",

@@ -1,6 +1,9 @@
 from decimal import Decimal
 
+from datetime import datetime
+
 from django.db.models import Count
+from django.utils import timezone
 from django.shortcuts import get_object_or_404
 
 from rest_framework import status, viewsets
@@ -18,12 +21,14 @@ from .models import (
     MaterialImage,
     MaterialMonthOpening,
     MaterialType,
+    ProductionSite,
     Roll,
 )
 from .rolls import receive_lot
 from .serializers import (
     MaterialMonthOpeningSerializer,
     MaterialTypeSerializer,
+    ProductionSiteSerializer,
     AdjustmentSerializer,
     InventoryLogSerializer,
     MaterialImageSerializer,
@@ -37,6 +42,14 @@ from .serializers import (
 from .stock import apply_stock_change
 
 
+def _as_moment(day):
+    """Дата из формы → момент времени. Поставку вносят задним числом, и её
+    дата важнее момента ввода; не указана — берётся текущее время."""
+    if not day:
+        return None
+    return timezone.make_aware(datetime.combine(day, datetime.min.time()))
+
+
 class MaterialViewSet(viewsets.ModelViewSet):
     """Warehouse catalogue. Read for all staff; create/edit for admins.
 
@@ -47,7 +60,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
     queryset = Material.objects.prefetch_related("images").all()
     serializer_class = MaterialSerializer
     permission_classes = [IsAdminOrReadOnly]
-    filterset_fields = ["type", "color", "thickness_mm"]
+    filterset_fields = ["type", "color", "thickness_mm", "production"]
     search_fields = ["name", "color", "article"]
     ordering_fields = ["name", "quantity", "price_per_unit", "purchase_price", "thickness_mm"]
     ordering = ["name"]
@@ -130,6 +143,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
             actual_price=data.get("actual_price"),
             reason=data.get("reason") or "Поступление от поставщика",
             user=request.user,
+            happened_at=_as_moment(data.get("happened_on")),
         )
         return Response(MaterialSerializer(material, context={"request": request}).data)
 
@@ -169,7 +183,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
             height=data.get("height"),
             sheet_count=data.get("sheet_count"),
             purchase_cost=data["purchase_cost"],
-            markup_percent=data.get("markup_percent") or Decimal("0"),
+            received_at=_as_moment(data.get("received_on")),
             code=data.get("code", ""),
             user=request.user,
         )
@@ -294,4 +308,32 @@ class MaterialTypeViewSet(viewsets.ModelViewSet):
             material_type.save(update_fields=["is_archived"])
             return Response({"archived": True}, status=status.HTTP_200_OK)
         material_type.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ProductionSiteViewSet(viewsets.ModelViewSet):
+    """Справочник производств («откуда возим»). Читают все, правит админ."""
+
+    serializer_class = ProductionSiteSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    pagination_class = None
+
+    def get_queryset(self):
+        qs = ProductionSite.objects.annotate(materials_total=Count("materials"))
+        if self.request.query_params.get("archived") == "1":
+            return qs
+        return qs.filter(is_archived=False)
+
+    def destroy(self, request, *args, **kwargs):
+        site = self.get_object()
+        if site.is_builtin:
+            return Response(
+                {"detail": "Встроенное производство удалить нельзя — его можно скрыть."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if site.materials.exists():
+            site.is_archived = True
+            site.save(update_fields=["is_archived"])
+            return Response({"archived": True}, status=status.HTTP_200_OK)
+        site.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

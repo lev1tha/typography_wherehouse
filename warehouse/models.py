@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import models
+from django.utils import timezone
 from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
 
@@ -41,6 +42,34 @@ class MaterialType(models.Model):
         base = slugify(name or "", allow_unicode=True)[:32] or "tip"
         code, n = base, 2
         while MaterialType.objects.filter(code=code).exists():
+            code = f"{base}-{n}"
+            n += 1
+        return code
+
+
+class ProductionSite(models.Model):
+    """Откуда возят материал: Бишкек, Глобал. Колонка «производство» в его листе."""
+
+    code = models.SlugField(_("код"), max_length=40, unique=True, allow_unicode=True)
+    name = models.CharField(_("название"), max_length=80)
+    is_builtin = models.BooleanField(_("встроенное"), default=False)
+    position = models.PositiveIntegerField(_("порядок"), default=100)
+    is_archived = models.BooleanField(_("скрыто"), default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("производство")
+        verbose_name_plural = _("производства")
+        ordering = ["position", "name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+    @staticmethod
+    def make_code(name: str) -> str:
+        base = slugify(name or "", allow_unicode=True)[:32] or "proizvodstvo"
+        code, n = base, 2
+        while ProductionSite.objects.filter(code=code).exists():
             code = f"{base}-{n}"
             n += 1
         return code
@@ -166,13 +195,12 @@ class Material(models.Model):
         help_text=_("Стоимость работы резки за погонный метр для этого материала"),
     )
     # Откуда возят материал — колонка «производство» в складской таблице
-    # заказчика (Бишкек, Глобал, …). Свободный текст: список поставщиков
-    # меняется, а заводить под него справочник смысла нет.
-    production = models.CharField(
-        _("производство"),
-        max_length=120,
-        blank=True,
-        help_text=_("Откуда возят: напр. Бишкек, Глобал"),
+    # заказчика (Бишкек, Глобал). Справочник, а не свободный текст: печатать
+    # его на каждом материале руками — лишняя работа, а опечатка заводила бы
+    # ещё одно «производство», которое потом не сгруппируется.
+    production = models.ForeignKey(
+        "ProductionSite", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="materials", verbose_name=_("производство"),
     )
     # Материал, который больше не продаём. Удалить его нельзя, если по нему были
     # продажи или поступления (иначе поедут суммы в старых чеках и отчётах),
@@ -358,12 +386,16 @@ class InventoryLog(models.Model):
         blank=True,
         related_name="inventory_logs",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    # Дата САМОЙ операции, а не момента ввода: заказчик вносит поставки задним
+    # числом, когда доходят руки — в его Excel даты идут вразнобой (01, 10, 14,
+    # 19, 05, 06 июля). При auto_now_add июльская поставка, введённая в августе,
+    # уезжала в август и складской лист расходился с его таблицей.
+    happened_at = models.DateTimeField(_("дата операции"), default=timezone.now)
 
     class Meta:
         verbose_name = _("складская операция")
         verbose_name_plural = _("складские операции")
-        ordering = ["-created_at"]
+        ordering = ["-happened_at"]
 
     def __str__(self) -> str:
         return f"{self.get_type_display()} {self.material.name}: {self.quantity_changed}"
@@ -402,10 +434,10 @@ class Roll(models.Model):
         _("себестоимость рулона"), max_digits=12, decimal_places=2,
         help_text=_("Полная стоимость закупки рулона"),
     )
-    markup_percent = models.DecimalField(
-        _("наценка, %"), max_digits=6, decimal_places=2, default=Decimal("20.00")
-    )
-    received_at = models.DateTimeField(auto_now_add=True)
+    # Дата поступления партии — редактируемая по той же причине, что и у
+    # складской операции. По ней же идёт FIFO, поэтому партия, внесённая задним
+    # числом, встаёт в очередь на списание по своей настоящей дате.
+    received_at = models.DateTimeField(_("дата поступления"), default=timezone.now)
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="rolls",
@@ -421,14 +453,6 @@ class Roll(models.Model):
         if not self.initial_area:
             return Decimal("0")
         return (self.purchase_cost / self.initial_area).quantize(Decimal("0.01"))
-
-    @property
-    def price_per_sqm(self) -> Decimal:
-        """Retail price per кв.м = cost × (1 + markup%) / area."""
-        if not self.initial_area:
-            return Decimal("0")
-        retail_total = self.purchase_cost * (Decimal("1") + self.markup_percent / Decimal("100"))
-        return (retail_total / self.initial_area).quantize(Decimal("0.01"))
 
     @property
     def is_depleted(self) -> bool:

@@ -34,12 +34,12 @@ class EdgeStockRollTests(APITestCase):
     def _make_two_rolls(self):
         old = receive_lot(
             self.mat, form=Roll.Form.ROLL, width=Decimal("1"), length=Decimal("10"),
-            purchase_cost=Decimal("40"), markup_percent=Decimal("0"),
+            purchase_cost=Decimal("40"),
             code="OLD", user=self.admin,
         )
         new = receive_lot(
             self.mat, form=Roll.Form.ROLL, width=Decimal("1"), length=Decimal("10"),
-            purchase_cost=Decimal("120"), markup_percent=Decimal("0"),
+            purchase_cost=Decimal("120"),
             code="NEW", user=self.admin,
         )
         self.mat.refresh_from_db()
@@ -57,7 +57,7 @@ class EdgeStockRollTests(APITestCase):
         r = self.client.post(
             "/api/warehouse/materials/receive-roll/",
             {"material": self.mat.id, "form": "ROLL", "width": "1.5",
-             "length": "10", "purchase_cost": "100", "markup_percent": "0"},
+             "length": "10", "purchase_cost": "100"},
             format="json",
         )
         self.assertEqual(r.status_code, 201, r.data)
@@ -74,7 +74,7 @@ class EdgeStockRollTests(APITestCase):
         r = self.client.post(
             "/api/warehouse/materials/receive-roll/",
             {"material": self.mat.id, "form": "SHEET", "width": "1", "height": "2",
-             "sheet_count": "10", "purchase_cost": "100", "markup_percent": "0"},
+             "sheet_count": "10", "purchase_cost": "100"},
             format="json",
         )
         self.assertEqual(r.status_code, 201, r.data)
@@ -111,7 +111,7 @@ class EdgeStockRollTests(APITestCase):
     def test_checkout_over_stock_returns_400(self):
         receive_lot(
             self.mat, form=Roll.Form.ROLL, width=Decimal("1"), length=Decimal("5"),
-            purchase_cost=Decimal("50"), markup_percent=Decimal("0"), user=self.admin,
+            purchase_cost=Decimal("50"), user=self.admin,
         )
         self.mat.refresh_from_db()
         r = self._checkout([
@@ -126,7 +126,7 @@ class EdgeStockRollTests(APITestCase):
     def test_whole_piece_deducts_piece_area_times_qty(self):
         receive_lot(
             self.mat, form=Roll.Form.ROLL, width=Decimal("1"), length=Decimal("10"),
-            purchase_cost=Decimal("100"), markup_percent=Decimal("0"), user=self.admin,
+            purchase_cost=Decimal("100"), user=self.admin,
         )
         self.mat.refresh_from_db()
         r = self._checkout([
@@ -141,7 +141,7 @@ class EdgeStockRollTests(APITestCase):
         self.mat.save(update_fields=["piece_area"])
         receive_lot(
             self.mat, form=Roll.Form.ROLL, width=Decimal("1"), length=Decimal("10"),
-            purchase_cost=Decimal("100"), markup_percent=Decimal("0"), user=self.admin,
+            purchase_cost=Decimal("100"), user=self.admin,
         )
         self.mat.refresh_from_db()
         r = self._checkout([
@@ -154,7 +154,7 @@ class EdgeStockRollTests(APITestCase):
     def test_refund_restores_total_quantity(self):
         receive_lot(
             self.mat, form=Roll.Form.ROLL, width=Decimal("1"), length=Decimal("10"),
-            purchase_cost=Decimal("100"), markup_percent=Decimal("0"), user=self.admin,
+            purchase_cost=Decimal("100"), user=self.admin,
         )
         self.mat.refresh_from_db()
         r = self._checkout([
@@ -197,7 +197,7 @@ class EdgeStockRollTests(APITestCase):
         self.client.force_authenticate(self.admin)
         receive_lot(
             self.mat, form=Roll.Form.ROLL, width=Decimal("1"), length=Decimal("10"),
-            purchase_cost=Decimal("100"), markup_percent=Decimal("0"), user=self.admin,
+            purchase_cost=Decimal("100"), user=self.admin,
         )
         self.mat.refresh_from_db()
         r = self.client.post(
@@ -218,7 +218,7 @@ class EdgeStockRollTests(APITestCase):
         self.client.force_authenticate(self.admin)
         receive_lot(
             self.mat, form=Roll.Form.ROLL, width=Decimal("1"), length=Decimal("5"),
-            purchase_cost=Decimal("50"), markup_percent=Decimal("0"), user=self.admin,
+            purchase_cost=Decimal("50"), user=self.admin,
         )
         self.mat.refresh_from_db()
         r = self.client.post(

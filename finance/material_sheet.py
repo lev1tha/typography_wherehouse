@@ -70,7 +70,7 @@ def collect_flows(materials):
 
     supply = (
         InventoryLog.objects.filter(type=InventoryLog.Type.SUPPLY, quantity_changed__gt=0)
-        .annotate(m=TruncMonth("created_at"))
+        .annotate(m=TruncMonth("happened_at"))
         .values("material_id", "quantity_changed", "m")
     )
     for row in supply:
@@ -115,9 +115,9 @@ def purchases_from_stock(d_from=None, d_to=None):
         type=InventoryLog.Type.SUPPLY, quantity_changed__gt=0, actual_price__isnull=False
     )
     if d_from:
-        qs = qs.filter(created_at__date__gte=d_from)
+        qs = qs.filter(happened_at__date__gte=d_from)
     if d_to:
-        qs = qs.filter(created_at__date__lte=d_to)
+        qs = qs.filter(happened_at__date__lte=d_to)
     return sum(
         (row["quantity_changed"] * row["actual_price"]
          for row in qs.values("quantity_changed", "actual_price")),

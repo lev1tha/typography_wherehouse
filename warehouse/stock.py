@@ -22,12 +22,16 @@ def apply_stock_change(
     actual_price: Decimal | None = None,
     reason: str | None = None,
     user=None,
+    happened_at=None,
 ) -> Material:
     """Add `delta` (may be negative) to a material's quantity.
 
     Locks the row to avoid race conditions on concurrent sales. Optionally
     writes an InventoryLog entry and updates the purchase price. Fires a
     low-stock alert if the new quantity crosses the critical balance.
+
+    ``happened_at`` — дата самой операции: приход часто вносят задним числом.
+    Не передана — берётся текущий момент.
     """
     locked = Material.objects.select_for_update().get(pk=material.pk)
     was_above = locked.quantity > locked.critical_balance
@@ -38,7 +42,7 @@ def apply_stock_change(
     locked.save(update_fields=["quantity", "purchase_price", "updated_at"])
 
     if log_type:
-        InventoryLog.objects.create(
+        entry = InventoryLog(
             type=log_type,
             material=locked,
             quantity_changed=Decimal(delta),
@@ -46,6 +50,9 @@ def apply_stock_change(
             reason=reason,
             created_by=user,
         )
+        if happened_at:
+            entry.happened_at = happened_at
+        entry.save()
 
     # Trigger alert only on a downward crossing of the critical threshold.
     if was_above and locked.quantity <= locked.critical_balance:

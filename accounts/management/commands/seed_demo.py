@@ -39,6 +39,7 @@ from warehouse.models import (
     Material,
     MaterialMonthOpening,
     MaterialType,
+    ProductionSite,
     Roll,
 )
 from warehouse.rolls import receive_lot
@@ -153,6 +154,11 @@ EXPENSES = [
 ]
 
 
+def _site(name: str):
+    """Производство из справочника: у заказчика это Бишкек или Глобал."""
+    return ProductionSite.objects.filter(name=name).first()
+
+
 def _aware(day: date):
     return timezone.make_aware(datetime.combine(day, datetime.min.time()))
 
@@ -240,7 +246,7 @@ class Command(BaseCommand):
                     "sheet_height": height,
                     "unit": Material.Unit.SQM,
                     "is_roll_material": True,
-                    "production": production,
+                    "production": _site(production),
                     "purchase_price": D(cost),
                     "price_per_sqm": D(retail),
                     "piece_price": (D(retail) * area).quantize(D("1")),
@@ -316,18 +322,12 @@ class Command(BaseCommand):
         for name, sheets in OPENINGS.items():
             material = materials[name]
             width, height = self._sheet_size(name)
-            known = set(InventoryLog.objects.values_list("id", flat=True))
-            lot = receive_lot(
+            receive_lot(
                 material, form=Roll.Form.SHEET,
                 purchase_cost=(material.purchase_price * material.piece_area * sheets).quantize(D("0.01")),
-                markup_percent=D("0"),
                 width=width, height=height, sheet_count=D(sheets),
-                user=user,
+                user=user, received_at=_aware(last_prev),
             )
-            stamp = _aware(last_prev)
-            fresh = set(InventoryLog.objects.values_list("id", flat=True)) - known
-            InventoryLog.objects.filter(id__in=fresh).update(created_at=stamp)
-            Roll.objects.filter(pk=lot.pk).update(received_at=stamp)
         self.stdout.write(f"Складской запас на начало: {len(OPENINGS)} партий ({last_prev})")
 
     def _openings(self, materials, month):
@@ -341,25 +341,18 @@ class Command(BaseCommand):
     def _intakes(self, materials, month, user):
         """Приход партиями, датами не по порядку — как в Excel заказчика.
 
-        Дату приходится проставлять UPDATE-ом: `InventoryLog.created_at` и
-        `Roll.received_at` объявлены `auto_now_add`, то есть через интерфейс
-        внести поставку задним числом сейчас НЕЛЬЗЯ вообще.
+        Дата передаётся прямо в приёмку: поставку задним числом система теперь
+        принимает нормально, обходить модель UPDATE-ом больше не нужно.
         """
         for day, name, sheets in INTAKES:
             material = materials[name]
             width, height = self._sheet_size(name)
-            known_logs = set(InventoryLog.objects.values_list("id", flat=True))
-            lot = receive_lot(
+            receive_lot(
                 material, form=Roll.Form.SHEET,
                 purchase_cost=(material.purchase_price * material.piece_area * sheets).quantize(D("0.01")),
-                markup_percent=D("0"),
                 width=width, height=height, sheet_count=D(sheets),
-                user=user,
+                user=user, received_at=_aware(month.replace(day=day)),
             )
-            stamp = _aware(month.replace(day=day))
-            fresh = set(InventoryLog.objects.values_list("id", flat=True)) - known_logs
-            InventoryLog.objects.filter(id__in=fresh).update(created_at=stamp)
-            Roll.objects.filter(pk=lot.pk).update(received_at=stamp)
         self.stdout.write(f"Приходов: {len(INTAKES)} (даты вразнобой, как у заказчика)")
 
     @staticmethod
@@ -406,14 +399,12 @@ class Command(BaseCommand):
         """Брак — то, что в складском листе заказчика теряется: его формула
         знает только «начало + поступление − проданные»."""
         material = materials["форекс 8мм"]
-        known = set(InventoryLog.objects.values_list("id", flat=True))
         apply_stock_change(
             material, -material.piece_area * 3,
             log_type=InventoryLog.Type.WRITE_OFF,
             reason="Списание: Брак. Повело при резке, 3 листа.", user=user,
+            happened_at=_aware(month.replace(day=23)),
         )
-        fresh = set(InventoryLog.objects.values_list("id", flat=True)) - known
-        InventoryLog.objects.filter(id__in=fresh).update(created_at=_aware(month.replace(day=23)))
         self.stdout.write("Списание: 3 листа форекса 8мм в брак")
 
     def _supply_sale_and_refund(self, clients, month, user):
@@ -428,18 +419,16 @@ class Command(BaseCommand):
             defaults={
                 "type": MaterialType.objects.filter(code="OTHER").first(),
                 "unit": Material.Unit.PIECE,
-                "is_roll_material": False, "production": "Бишкек",
+                "is_roll_material": False, "production": _site("Бишкек"),
                 "purchase_price": D(SUPPLY_PRICE), "price_per_unit": D(SUPPLY_RETAIL),
                 "critical_balance": D("50"),
             },
         )
-        known = set(InventoryLog.objects.values_list("id", flat=True))
         apply_stock_change(
             material, D(SUPPLY_QTY), log_type=InventoryLog.Type.SUPPLY,
             actual_price=D(SUPPLY_PRICE), reason="Поступление от поставщика", user=user,
+            happened_at=_aware(month.replace(day=2)),
         )
-        fresh = set(InventoryLog.objects.values_list("id", flat=True)) - known
-        InventoryLog.objects.filter(id__in=fresh).update(created_at=_aware(month.replace(day=2)))
 
         receipt = sale_service.create_sale(
             client=clients["Нурлан"], cashier=user,
@@ -508,10 +497,12 @@ class Command(BaseCommand):
 
         # 2. Приходы датируются моментом ввода.
         w("")
-        w("2. Даты приходов пришлось проставлять UPDATE-ом в обход модели:")
-        w("   InventoryLog.created_at и Roll.received_at — auto_now_add, то есть")
-        w("   через интерфейс поставку задним числом внести НЕЛЬЗЯ. У заказчика")
-        w("   в Excel даты идут вразнобой (01, 10, 14, 19, 05, 06) — он так и работает.")
+        days = sorted({d for d, *_ in INTAKES})
+        w(f"2. Приходы датированы задним числом штатно: дни {days} идут вразнобой,")
+        w("   как в Excel заказчика. Раньше InventoryLog и Roll были auto_now_add,")
+        w("   и вся июльская поставка, внесённая в августе, уезжала в август —")
+        w("   складской лист расходился с его таблицей. Теперь дата передаётся")
+        w("   в приёмку, и по ней же выстраивается FIFO.")
 
         # 3. Списание выпадает из складского листа. Считаем ровно тем же кодом,
         # которым считает отчёт, и сверяем с фактическим остатком склада.

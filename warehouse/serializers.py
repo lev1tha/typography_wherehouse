@@ -6,6 +6,7 @@ from .models import (
     MaterialImage,
     MaterialMonthOpening,
     MaterialType,
+    ProductionSite,
     Roll,
 )
 
@@ -29,6 +30,7 @@ class MaterialSerializer(serializers.ModelSerializer):
         max_digits=14, decimal_places=2, read_only=True
     )
     type_name = serializers.CharField(source="type.name", read_only=True)
+    production_name = serializers.CharField(source="production.name", read_only=True)
     # Подсказка для формы: как назвался бы материал по заполненным полям.
     suggested_name = serializers.CharField(read_only=True)
 
@@ -58,6 +60,7 @@ class MaterialSerializer(serializers.ModelSerializer):
             "wholesale_min_qty",
             "cut_rate_per_pm",
             "production",
+            "production_name",
             "sqm_price",
             "sheets_remaining",
             "is_below_critical",
@@ -104,9 +107,9 @@ class InventoryLogSerializer(serializers.ModelSerializer):
             "reason",
             "created_by",
             "created_by_username",
-            "created_at",
+            "happened_at",
         ]
-        read_only_fields = ["created_by", "created_at"]
+        read_only_fields = ["created_by"]
 
 
 class SupplySerializer(serializers.Serializer):
@@ -117,6 +120,8 @@ class SupplySerializer(serializers.Serializer):
     actual_price = serializers.DecimalField(
         max_digits=12, decimal_places=2, min_value=0, required=False, allow_null=True
     )
+    # Дата поступления: приход часто вносят задним числом. Не указана — сегодня.
+    happened_on = serializers.DateField(required=False, allow_null=True)
     reason = serializers.CharField(required=False, allow_blank=True)
 
 
@@ -169,7 +174,6 @@ class WriteOffSerializer(serializers.Serializer):
 
 
 class RollSerializer(serializers.ModelSerializer):
-    price_per_sqm = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     cost_per_sqm = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     material_name = serializers.CharField(source="material.name", read_only=True)
     dimensions_label = serializers.CharField(read_only=True)
@@ -190,8 +194,6 @@ class RollSerializer(serializers.ModelSerializer):
             "initial_area",
             "remaining_area",
             "purchase_cost",
-            "markup_percent",
-            "price_per_sqm",
             "cost_per_sqm",
             "received_at",
         ]
@@ -212,9 +214,8 @@ class RollIntakeSerializer(serializers.Serializer):
     height = serializers.DecimalField(max_digits=8, decimal_places=2, min_value=0, required=False, allow_null=True)
     sheet_count = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False, allow_null=True)
     purchase_cost = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0)
-    markup_percent = serializers.DecimalField(
-        max_digits=6, decimal_places=2, min_value=0, required=False
-    )
+    # Дата поступления партии — по ней же идёт FIFO.
+    received_on = serializers.DateField(required=False, allow_null=True)
 
     def validate(self, attrs):
         if attrs["form"] == Roll.Form.ROLL:
@@ -264,5 +265,25 @@ class MaterialTypeSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         validated_data["code"] = MaterialType.make_code(validated_data.get("name", ""))
+        validated_data["is_builtin"] = False
+        return super().create(validated_data)
+
+
+class ProductionSiteSerializer(serializers.ModelSerializer):
+    """Откуда возят материал: Бишкек, Глобал. Справочник, а не свободный текст."""
+
+    materials_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductionSite
+        fields = ["id", "code", "name", "is_builtin", "position", "is_archived", "materials_count"]
+        read_only_fields = ["code", "is_builtin"]
+
+    def get_materials_count(self, obj) -> int:
+        annotated = getattr(obj, "materials_total", None)
+        return annotated if annotated is not None else obj.materials.count()
+
+    def create(self, validated_data):
+        validated_data["code"] = ProductionSite.make_code(validated_data.get("name", ""))
         validated_data["is_builtin"] = False
         return super().create(validated_data)

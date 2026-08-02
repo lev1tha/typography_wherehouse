@@ -408,7 +408,7 @@ class CogsTests(APITestCase):
         )
         # Партия: 10 кв.м за 2000 → 200 сом/кв.м себестоимость.
         receive_lot(self.mat, form="ROLL", width=Decimal("1"), length=Decimal("10"),
-                    purchase_cost=Decimal("2000"), markup_percent=Decimal("0"))
+                    purchase_cost=Decimal("2000"))
 
     def _sell(self, area="2", price="1000", paid=None):
         """Продажа. paid=None → оплачена полностью (выручка сразу в отчёте);
@@ -468,7 +468,7 @@ class CogsTests(APITestCase):
         self._sell(area="2")  # по 200 сом/кв.м
         # Новая партия ВДВОЕ дороже — прошлые продажи это не должно двигать.
         receive_lot(self.mat, form="ROLL", width=Decimal("1"), length=Decimal("10"),
-                    purchase_cost=Decimal("4000"), markup_percent=Decimal("0"))
+                    purchase_cost=Decimal("4000"))
         self.assertEqual(Decimal(str(self._report()["cogs"])), Decimal("400"))
 
     def test_fifo_spans_two_lots(self):
@@ -476,7 +476,7 @@ class CogsTests(APITestCase):
 
         # Вторая партия дороже; продаём больше, чем осталось в первой.
         receive_lot(self.mat, form="ROLL", width=Decimal("1"), length=Decimal("10"),
-                    purchase_cost=Decimal("5000"), markup_percent=Decimal("0"))  # 500/кв.м
+                    purchase_cost=Decimal("5000"))  # 500/кв.м
         receipt = self._sell(area="12")
         # 10 кв.м из первой (×200) + 2 из второй (×500) = 2000 + 1000 = 3000.
         self.assertEqual(Decimal(str(receipt.items.get().cost_total)), Decimal("3000"))
@@ -617,7 +617,7 @@ class MaterialStockReportTests(APITestCase):
     OPENING_URL = "/api/warehouse/month-openings/"
 
     def setUp(self):
-        from warehouse.models import Material
+        from warehouse.models import Material, ProductionSite
 
         self.admin = User.objects.create_user(username="ms_admin", password="x", role=User.Role.ADMIN)
         self.client.force_authenticate(self.admin)
@@ -627,7 +627,7 @@ class MaterialStockReportTests(APITestCase):
             name="Форекс 8мм", unit="SQM", is_roll_material=True,
             piece_area=Decimal("2"), purchase_price=Decimal("100"),
             price_per_sqm=Decimal("200"), piece_price=Decimal("400"),
-            production="Бишкек",
+            production=ProductionSite.objects.get(code="BISHKEK"),
         )
 
     def _opening(self, *, sheets, year, month):
@@ -638,21 +638,14 @@ class MaterialStockReportTests(APITestCase):
         return r
 
     def _receive(self, *, sheets, day):
-        """Приход партии, задним числом."""
-        from warehouse.models import InventoryLog
+        """Приход партии задним числом — дата передаётся прямо в приёмку."""
         from warehouse.rolls import receive_lot
 
-        before = set(InventoryLog.objects.values_list("id", flat=True))
         receive_lot(
             self.material, form="SHEET", purchase_cost=Decimal("100") * sheets * 2,
-            markup_percent=Decimal("0"), width=Decimal("1"), height=Decimal("2"),
-            sheet_count=Decimal(sheets),
+            width=Decimal("1"), height=Decimal("2"), sheet_count=Decimal(sheets),
+            received_at=timezone.make_aware(datetime.combine(day, datetime.min.time())),
         )
-        # Датируем именно созданный сейчас лог: фильтр по created_at промахнулся
-        # бы для будущих дат (тесты про перенос заглядывают в следующий год).
-        stamp = timezone.make_aware(datetime.combine(day, datetime.min.time()))
-        fresh = set(InventoryLog.objects.values_list("id", flat=True)) - before
-        InventoryLog.objects.filter(id__in=fresh).update(created_at=stamp)
 
     def _sell(self, *, sheets, day, returned=False):
         """Продажа листами, задним числом."""
@@ -823,14 +816,10 @@ class AutoComputedInputsTests(APITestCase):
         from warehouse.models import InventoryLog
         from warehouse.stock import apply_stock_change
 
-        before = set(InventoryLog.objects.values_list("id", flat=True))
         apply_stock_change(
             self.material, Decimal(qty),
             log_type=InventoryLog.Type.SUPPLY, actual_price=Decimal(price),
-        )
-        fresh = set(InventoryLog.objects.values_list("id", flat=True)) - before
-        InventoryLog.objects.filter(id__in=fresh).update(
-            created_at=timezone.make_aware(datetime.combine(day, datetime.min.time()))
+            happened_at=timezone.make_aware(datetime.combine(day, datetime.min.time())),
         )
 
     # ---- закуп материала считается по приходам на склад ---------------------

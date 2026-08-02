@@ -22,7 +22,7 @@ class MaterialAdmin(TranslationAdmin):
 
 @admin.register(InventoryLog)
 class InventoryLogAdmin(admin.ModelAdmin):
-    list_display = ("created_at", "type", "material", "quantity_changed", "created_by")
+    list_display = ("happened_at", "type", "material", "quantity_changed", "created_by")
     list_filter = ("type",)
 
 
@@ -30,6 +30,6 @@ class InventoryLogAdmin(admin.ModelAdmin):
 class RollAdmin(admin.ModelAdmin):
     list_display = (
         "__str__", "material", "remaining_area", "initial_area",
-        "purchase_cost", "markup_percent", "received_at",
+        "purchase_cost", "received_at",
     )
     list_filter = ("material",)

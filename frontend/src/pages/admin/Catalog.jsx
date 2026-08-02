@@ -75,6 +75,7 @@ export default function Catalog({ embedded = false }) {
   const [typeId, setTypeId] = useState("");
   const [color, setColor] = useState("");
   const [types, setTypes] = useState([]);
+  const [sites, setSites] = useState([]);
   const [gallery, setGallery] = useState(null);
   const [editing, setEditing] = useState(null);
   const [receiving, setReceiving] = useState(null);
@@ -95,6 +96,7 @@ export default function Catalog({ embedded = false }) {
 
   useEffect(() => {
     api.get("/warehouse/material-types/").then((r) => setTypes(r.data.results || r.data));
+    api.get("/warehouse/production-sites/").then((r) => setSites(r.data.results || r.data));
   }, []);
 
   const colors = [...new Set(materials.map((m) => m.color).filter(Boolean))];
@@ -356,14 +358,19 @@ export default function Catalog({ embedded = false }) {
             </div>
           </div>
 
-          {/* Колонка «производство» складской таблицы: откуда возят материал. */}
+          {/* Колонка «производство» складской таблицы: откуда возят материал.
+              Справочник, а не текст — опечатка иначе заводила бы ещё одно. */}
           <div className="field">
             <label>{t("warehouse.production")}</label>
-            <input
+            <select
               value={editing.production ?? ""}
-              onChange={(e) => setEditing({ ...editing, production: e.target.value })}
-              placeholder={t("warehouse.productionPh")}
-            />
+              onChange={(e) => setEditing({ ...editing, production: e.target.value ? Number(e.target.value) : null })}
+            >
+              <option value="">—</option>
+              {sites.map((x) => (
+                <option key={x.id} value={x.id}>{x.name}</option>
+              ))}
+            </select>
           </div>
 
           <label className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
