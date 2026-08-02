@@ -404,6 +404,24 @@
     "WRITE_OFF": "Write-off",
     "ADJUSTMENT": "Stock-take"
   },
+  "grid": {
+    "open": "Bulk entry",
+    "title": "Bulk catalogue entry",
+    "hint": "One row per material. Tab moves right, Enter moves down. Paste a block from Excel straight into a cell (Ctrl+V) — it spreads across rows and columns. A blank name is built from the fields; sheet area is computed from the size.",
+    "name": "Name",
+    "thickness": "Thickness, mm",
+    "width": "Width, m",
+    "height": "Height, m",
+    "production": "Production",
+    "piecePrice": "Price per sheet/pc",
+    "sqmPrice": "Price per sqm",
+    "cutRate": "Cutting, som/rm",
+    "readyCount": "Rows filled: {{count}}",
+    "save": "Save {{count}}",
+    "saved": "Materials added: {{count}}",
+    "hasErrors": "Not saved: {{count}} rows have errors. Nothing was added — fix them and submit again.",
+    "rowNo": "Row {{row}}"
+  },
   "writeoffReason": {
     "DAMAGE": "Damage",
     "DEFECT": "Defect",

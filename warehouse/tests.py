@@ -12,7 +12,13 @@ from accounts.models import User
 from clients.models import Client
 from sales import sale_service
 from sales.models import Receipt, TransactionItem
-from warehouse.models import InventoryLog, Material, Roll
+from warehouse.models import (
+    InventoryLog,
+    Material,
+    MaterialType,
+    ProductionSite,
+    Roll,
+)
 from warehouse.rolls import receive_lot
 
 
@@ -154,6 +160,74 @@ class StockJournalTests(APITestCase):
         junk = self.client.get("/api/warehouse/inventory-logs/?year=абв&month=")
         self.assertEqual(junk.status_code, 200)
         self.assertEqual(junk.data["count"], 1)
+
+    def test_bulk_creates_catalogue_and_derives_what_it_can(self):
+        """Сетка массового ввода: имя, единица и площадь листа выводятся сами."""
+        self.client.force_authenticate(self.admin)
+        kind = MaterialType.objects.create(code="forex", name="Форекс")
+        site = ProductionSite.objects.create(code="bishkek", name="Бишкек")
+        r = self.client.post("/api/warehouse/materials/bulk/", {"rows": [
+            # Справочники названием — так приходит вставка из Excel.
+            {"type": "форекс", "color": "молочный", "thickness_mm": "8",
+             "sheet_width": "1.22", "sheet_height": "2.44",
+             "production": "бишкек", "piece_price": "4500", "price_per_sqm": "1600"},
+            # Штучный расходник: размера нет, значит и в кв.м его не считают.
+            {"name": "Скотч двусторонний", "price_per_unit": "180"},
+        ]}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["created"], 2)
+
+        sheet = Material.objects.get(name="Форекс молочный 8 мм 1,22×2,44")
+        self.assertTrue(sheet.is_roll_material)
+        self.assertEqual(sheet.unit, Material.Unit.SQM)
+        self.assertEqual(sheet.piece_area, Decimal("2.9768"))
+        self.assertEqual(sheet.type, kind)
+        self.assertEqual(sheet.production, site)
+
+        piece = Material.objects.get(name="Скотч двусторонний")
+        self.assertFalse(piece.is_roll_material)
+        self.assertEqual(piece.unit, Material.Unit.PIECE)
+
+    def test_bulk_is_all_or_nothing_and_reports_row_numbers(self):
+        """Опечатка в одной строке не должна оставить полпачки в каталоге."""
+        self.client.force_authenticate(self.admin)
+        MaterialType.objects.create(code="forex2", name="Форекс")
+        before = Material.objects.count()
+        r = self.client.post("/api/warehouse/materials/bulk/", {"rows": [
+            {"type": "Форекс", "color": "белый"},
+            {"type": "Такого нет", "color": "синий"},
+            {"color": ""},
+            {"name": self.piece.name},
+        ]}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(Material.objects.count(), before)
+        errors = {item["row"]: item["fields"] for item in r.data["errors"]}
+        self.assertEqual(set(errors), {1, 2, 3})
+        self.assertIn("type", errors[1])
+        self.assertIn("name", errors[2])
+        self.assertIn("уже есть", str(errors[3]["name"]))
+
+    def test_bulk_catches_duplicate_inside_the_batch(self):
+        """Дубль внутри самой пачки в базе ещё не лежит — ловим отдельно."""
+        self.client.force_authenticate(self.admin)
+        r = self.client.post("/api/warehouse/materials/bulk/", {"rows": [
+            {"name": "Плёнка матовая"},
+            {"name": "плёнка матовая"},
+        ]}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data["errors"][0]["row"], 1)
+        self.assertFalse(Material.objects.filter(name__iexact="плёнка матовая").exists())
+
+    def test_bulk_is_admin_only(self):
+        keeper = User.objects.create_user(
+            username="grid_keeper", password="x", role=User.Role.STOREKEEPER
+        )
+        self.client.force_authenticate(keeper)
+        r = self.client.post("/api/warehouse/materials/bulk/", {"rows": [
+            {"name": "Что-нибудь"},
+        ]}, format="json")
+        self.assertEqual(r.status_code, 403)
+        self.assertFalse(Material.objects.filter(name="Что-нибудь").exists())
 
     def test_page_size_param_returns_whole_catalogue(self):
         """Выпадающий список материалов не должен обрезаться страницей в 25."""

@@ -2,11 +2,13 @@ import { useTranslation } from "react-i18next";
 
 import Icon from "./Icon.jsx";
 
-export default function Modal({ title, onClose, children, footer }) {
+// `wide` — для содержимого, которому 520px мало: таблица массового ввода
+// каталога иначе показывала бы три колонки из одиннадцати.
+export default function Modal({ title, onClose, children, footer, wide = false }) {
   const { t } = useTranslation();
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className={wide ? "modal wide" : "modal"} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <h2>{title}</h2>
           <button className="ghost" onClick={onClose} aria-label={t("common.close")}>

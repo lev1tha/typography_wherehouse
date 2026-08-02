@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from datetime import datetime
 
+from django.db import transaction
 from django.db.models import Count
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
@@ -26,6 +27,8 @@ from .models import (
 )
 from .rolls import receive_lot
 from .serializers import (
+    build_ref_index,
+    MaterialBulkRowSerializer,
     MaterialMonthOpeningSerializer,
     MaterialTypeSerializer,
     ProductionSiteSerializer,
@@ -129,6 +132,72 @@ class MaterialViewSet(viewsets.ModelViewSet):
             f"{old_price} → {material.price_per_unit} сом",
         )
         return Response(MaterialSerializer(material, context={"request": request}).data)
+
+    @action(detail=False, methods=["post"], url_path="bulk", permission_classes=[IsAdmin])
+    def bulk(self, request):
+        """POST /materials/bulk/ — завести пачку материалов одним запросом.
+
+        Заказчик пришёл из Excel, и его каталог — это полсотни строк. Заводить
+        их модалкой по одной он не станет; сетка на фронте шлёт всё сюда.
+
+        Всё или ничего: одна опечатка в 47-й строке не должна оставить в базе 46
+        материалов, которых потом не найти. Ошибки возвращаются с номером
+        строки, сетка подсвечивает ячейки, и он отправляет заново.
+        """
+        rows = request.data.get("rows")
+        if not isinstance(rows, list) or not rows:
+            return Response(
+                {"detail": "Нет строк для сохранения."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Справочники и занятые названия — одним запросом на всю пачку, а не на
+        # каждую строку. Регистр сводится в Python: в SQLite `iexact` не
+        # складывает кириллицу, и «форекс» разошёлся бы с «Форекс» на деве.
+        context = {
+            "types": build_ref_index(MaterialType.objects.all()),
+            "sites": build_ref_index(ProductionSite.objects.all()),
+        }
+        taken = {
+            name.strip().casefold()
+            for name in Material.objects.values_list("name", flat=True)
+        }
+
+        cleaned, errors, seen = [], [], set()
+        for index, row in enumerate(rows):
+            serializer = MaterialBulkRowSerializer(data=row, context=context)
+            if not serializer.is_valid():
+                errors.append({"row": index, "fields": serializer.errors})
+                continue
+            data = serializer.validated_data
+            key = data["name"].strip().casefold()
+            # Две разные беды с одинаковым исходом, но разными объяснениями:
+            # такое название уже в каталоге — или строка задублирована в пачке.
+            if key in taken:
+                message = f"«{data['name']}» уже есть в каталоге."
+            elif key in seen:
+                message = f"«{data['name']}» повторяется в списке."
+            else:
+                seen.add(key)
+                cleaned.append(data)
+                continue
+            errors.append({"row": index, "fields": {"name": [message]}})
+
+        if errors:
+            return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            created = [Material.objects.create(**data) for data in cleaned]
+        AuditLog.record(request.user, f"Каталог пополнен пачкой: {len(created)} материалов")
+        return Response(
+            {
+                "created": len(created),
+                "materials": MaterialSerializer(
+                    created, many=True, context={"request": request}
+                ).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=False, methods=["post"], permission_classes=[IsAdmin])
     def supply(self, request):

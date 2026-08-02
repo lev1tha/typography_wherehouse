@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
+import CatalogGrid from "../../components/CatalogGrid.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import GalleryModal from "../../components/GalleryModal.jsx";
 import Icon from "../../components/Icon.jsx";
@@ -79,6 +80,7 @@ export default function Catalog({ embedded = false }) {
   const [gallery, setGallery] = useState(null);
   const [editing, setEditing] = useState(null);
   const [receiving, setReceiving] = useState(null);
+  const [bulk, setBulk] = useState(false);
 
   function load() {
     const params = { ordering };
@@ -215,7 +217,12 @@ export default function Catalog({ embedded = false }) {
     <>
       <div className="row" style={{ justifyContent: embedded ? "flex-end" : "space-between" }}>
         {!embedded && <h1>{t("warehouse.title")}</h1>}
-        <button onClick={() => setEditing({ ...EMPTY })}>+ {t("warehouse.newMaterial")}</button>
+        <div className="row" style={{ margin: 0, gap: 10 }}>
+          {/* Пачкой — основной способ завести каталог: полсотни материалов
+              модалкой по одной не заводят. */}
+          <button className="secondary" onClick={() => setBulk(true)}>{t("grid.open")}</button>
+          <button onClick={() => setEditing({ ...EMPTY })}>+ {t("warehouse.newMaterial")}</button>
+        </div>
       </div>
 
       <div className="toolbar">
@@ -268,6 +275,20 @@ export default function Catalog({ embedded = false }) {
           onClose={() => setReceiving(null)}
           onDone={load}
         />
+      )}
+
+      {bulk && (
+        <Modal wide title={t("grid.title")} onClose={() => setBulk(false)}>
+          <CatalogGrid
+            types={types}
+            sites={sites}
+            onClose={() => setBulk(false)}
+            onDone={() => {
+              setBulk(false);
+              load();
+            }}
+          />
+        </Modal>
       )}
 
       {editing && (

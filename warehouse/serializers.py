@@ -83,6 +83,98 @@ class MaterialSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(url) if request else url
 
 
+def build_ref_index(queryset):
+    """Справочник для сетки: и по ключу, и по названию без учёта регистра.
+
+    Регистр сводим в Python, а не запросом `name__iexact`: в SQLite он
+    складывает только латиницу, поэтому «форекс» не находил «Форекс» на деве и
+    находил на проде (PostgreSQL). Расхождение dev/prod ровно в том месте, где
+    заказчик вставляет свои названия строчными буквами.
+    """
+    index = {}
+    for obj in queryset:
+        index[str(obj.pk)] = obj
+        index[obj.name.strip().casefold()] = obj
+    return index
+
+
+class RefByIdOrNameField(serializers.Field):
+    """Ссылка на справочник: принимает и id, и название.
+
+    В сетке массового ввода ячейка «Тип» — выпадающий список (приходит id), но
+    туда же вставляют кусок таблицы из Excel, где написано «Форекс» текстом.
+    Требовать от заказчика ключи вместо названий было бы издевательством.
+
+    Справочники приходят готовым индексом в контексте — иначе на пачке в 50
+    строк это 100 лишних запросов.
+    """
+
+    def __init__(self, context_key, label, **kwargs):
+        self.context_key = context_key
+        self.label_text = label
+        super().__init__(**kwargs)
+
+    def to_representation(self, value):
+        return value.pk if value else None
+
+    def to_internal_value(self, data):
+        if data in (None, ""):
+            return None
+        text = str(data).strip()
+        found = (self.context.get(self.context_key) or {}).get(text.casefold())
+        if not found:
+            raise serializers.ValidationError(f"{self.label_text} «{text}» не найден.")
+        return found
+
+
+class MaterialBulkRowSerializer(serializers.ModelSerializer):
+    """Одна строка сетки массового ввода каталога.
+
+    Отличия от обычного `MaterialSerializer`:
+    - название необязательно — пустое соберётся из полей (`Material.save`);
+    - тип и производство принимаются названием, а не только ключом;
+    - единица измерения выводится из размера листа, если её не указали.
+    """
+
+    name = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    type = RefByIdOrNameField("types", "Тип", required=False, allow_null=True)
+    production = RefByIdOrNameField(
+        "sites", "Производство", required=False, allow_null=True
+    )
+
+    class Meta:
+        model = Material
+        fields = [
+            "name", "type", "thickness_mm", "color", "article",
+            "sheet_width", "sheet_height", "unit", "is_roll_material",
+            "critical_balance", "purchase_price", "price_per_unit",
+            "price_per_sqm", "piece_price", "cut_rate_per_pm",
+            "wholesale_price", "wholesale_min_qty", "production",
+        ]
+
+    def validate(self, attrs):
+        # Задан размер листа — значит материал листовой: учёт в кв.м, приход
+        # партиями, продажа и листом, и площадью. Отдельной галкой этот выбор
+        # ничего не добавляет, система его уже знает. Явно переданное значение
+        # (ячейка «Учёт» в сетке) побеждает расчёт.
+        has_sheet = attrs.get("sheet_width") and attrs.get("sheet_height")
+        if has_sheet and "is_roll_material" not in self.initial_data:
+            attrs["is_roll_material"] = True
+        if attrs.get("is_roll_material") and "unit" not in self.initial_data:
+            attrs["unit"] = Material.Unit.SQM
+
+        probe = Material(**{k: v for k, v in attrs.items()})
+        name = (attrs.get("name") or "").strip() or probe.suggested_name()
+        if not name:
+            raise serializers.ValidationError(
+                {"name": "Пустая строка: заполните название или тип с цветом."}
+            )
+        attrs["name"] = name
+        # Занятость названия проверяет вьюха: там же ловятся дубли внутри самой
+        # пачки, и обе проверки лежат в одном месте.
+        return attrs
+
+
 class MaterialPriceUpdateSerializer(serializers.Serializer):
     """Payload for PATCH .../update-price/ — admin retail-price change."""
 

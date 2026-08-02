@@ -715,6 +715,31 @@ label {
   animation: modal-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+.modal.wide {
+  max-width: 1180px;
+}
+
+/* Таблица массового ввода: ячейка = поле ввода, поэтому у неё нет ни своих
+   отступов, ни рамки — рамку рисует сама ячейка таблицы. */
+.grid-table td {
+  padding: 2px 4px;
+}
+
+.grid-table input,
+.grid-table select {
+  width: 100%;
+  min-height: 34px;
+  height: 34px;
+  padding: 4px 6px;
+  font-size: 13px;
+  border-radius: var(--r-sm);
+}
+
+.grid-table th {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 @keyframes modal-in {
   from {
     opacity: 0;
