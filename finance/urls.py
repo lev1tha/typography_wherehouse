@@ -3,19 +3,17 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     DailyReportView,
-    ExpenseViewSet,
+    ExpenseEntryViewSet,
+    ExpenseKindViewSet,
     FinanceReportView,
     FinanceSettingsView,
     FinanceUnlockView,
-    FixedExpenseViewSet,
     MaterialReportView,
-    SalaryPaymentViewSet,
 )
 
 router = DefaultRouter()
-router.register("expenses", ExpenseViewSet, basename="expense")
-router.register("fixed-expenses", FixedExpenseViewSet, basename="fixed-expense")
-router.register("salaries", SalaryPaymentViewSet, basename="salary")
+router.register("expense-kinds", ExpenseKindViewSet, basename="expense-kind")
+router.register("expense-entries", ExpenseEntryViewSet, basename="expense-entry")
 
 urlpatterns = [
     path("report/", FinanceReportView.as_view(), name="finance-report"),

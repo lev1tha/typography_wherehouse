@@ -5,10 +5,11 @@ from datetime import date
 from decimal import Decimal
 
 from django.conf import settings
-from django.db.models import DecimalField, Sum
+from django.db.models import Count, DecimalField, Sum
 from django.db.models.functions import Coalesce, TruncDate
 from django.utils import timezone
 from rest_framework import status, viewsets
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -16,12 +17,19 @@ from accounts.permissions import IsAdmin
 from sales.models import Receipt, TransactionItem
 from warehouse.models import InventoryLog, Material
 
-from .models import Expense, FinanceSettings, FixedExpense, SalaryPayment
+from .material_sheet import (
+    collect_flows,
+    collect_manual,
+    counting_unit,
+    opening_for,
+    purchases_from_stock,
+    q2,
+)
+from .models import ExpenseEntry, ExpenseKind, FinanceSettings
 from .serializers import (
-    ExpenseSerializer,
+    ExpenseEntrySerializer,
+    ExpenseKindSerializer,
     FinanceSettingsSerializer,
-    FixedExpenseSerializer,
-    SalaryPaymentSerializer,
 )
 
 _SUM = lambda field: Coalesce(Sum(field), Decimal("0"), output_field=DecimalField())
@@ -78,6 +86,36 @@ def _filter_by_month(qs, request, field):
     return qs.filter(**{f"{field}__year": year, f"{field}__month": month})
 
 
+def _stock_start_from_sheet(materials, d_from, d_to):
+    """Стоимость склада на начало периода — по складскому листу.
+
+    Σ(остаток на начало месяца по материалу × его закупочная цена). Остаток
+    берётся тот же, что показан в листе: перенос с прошлого месяца или
+    вписанное вручную значение. Период должен совпадать с календарным месяцем —
+    остаток на начало привязан к месяцу; иначе считать неоткуда.
+    """
+    if not (d_from and d_to) or d_from.day != 1:
+        return Decimal("0")
+    last = calendar.monthrange(d_from.year, d_from.month)[1]
+    if d_to != date(d_from.year, d_from.month, last):
+        return Decimal("0")
+
+    manual = collect_manual(materials)
+    received, sold = collect_flows(materials)
+    target = (d_from.year, d_from.month)
+    total = Decimal("0")
+    for m in materials:
+        qty, _is_manual = opening_for(
+            m.id, target, manual=manual, received=received, sold=sold
+        )
+        # Лист считает в листах, склад хранит цену за единицу (кв.м) — при
+        # переводе обратно умножаем на площадь листа.
+        per_sheet = counting_unit(m)
+        in_stock_units = qty * per_sheet if per_sheet else qty
+        total += in_stock_units * (m.purchase_price or Decimal("0"))
+    return total
+
+
 def _prorate_factor(d_from, d_to):
     """Доля «месяца» в выбранном периоде [d_from, d_to] включительно: за каждый
     день берём 1/дней_в_его_месяце и суммируем. Полный календарный месяц → 1.0,
@@ -95,49 +133,75 @@ def _prorate_factor(d_from, d_to):
     return factor
 
 
-class ExpenseViewSet(viewsets.ModelViewSet):
-    """Variable costs / investments (фреза, оборудование, улучшение цеха, прочее).
-    Admin-only. Listed on the «Расходники/Инвестиции» page; feeds the report."""
+class ExpenseKindViewSet(viewsets.ModelViewSet):
+    """Справочник видов расхода — строк финотчёта. Admin-only.
 
-    queryset = Expense.objects.all()
-    serializer_class = ExpenseSerializer
+    Свои виды админ заводит сам («Реклама», «Налоги»); встроенные переименовать
+    можно, удалить — нет. Скрытые по умолчанию не отдаются, `?archived=1` их
+    показывает (та же логика, что у материалов на складе)."""
+
+    serializer_class = ExpenseKindSerializer
     permission_classes = [IsAdmin]
-    filterset_fields = ["category"]
-    ordering = ["-spent_at", "-created_at"]
-
-    def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
-
-
-class FixedExpenseViewSet(viewsets.ModelViewSet):
-    """Постоянные расходы записями (аренда, коммуналка, интернет, прочие).
-    Фильтры: ?category=, ?year=&month= (месячный) и ?spent_at=<дата> (по дню)."""
-
-    queryset = FixedExpense.objects.all()
-    serializer_class = FixedExpenseSerializer
-    permission_classes = [IsAdmin]
-    filterset_fields = ["category", "spent_at"]
-    ordering = ["-spent_at", "-created_at"]
+    filterset_fields = ["block", "in_profit"]
+    pagination_class = None
 
     def get_queryset(self):
-        return _filter_by_month(super().get_queryset(), self.request, "spent_at")
+        qs = ExpenseKind.objects.annotate(entries_total=Count("entries"))
+        # «Вернуть» по определению работает со скрытым видом — иначе он не
+        # нашёлся бы в отфильтрованном списке и ответ был бы 404.
+        if self.action == "restore" or self.request.query_params.get("archived") == "1":
+            return qs
+        return qs.filter(is_archived=False)
 
-    def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+    def destroy(self, request, *args, **kwargs):
+        kind = self.get_object()
+        if kind.is_builtin:
+            return Response(
+                {"detail": "Встроенный вид расхода удалить нельзя — его можно скрыть."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Вид с историей не удаляем, а скрываем: иначе суммы прошлых месяцев
+        # поехали бы задним числом (и PROTECT всё равно не дал бы удалить).
+        if kind.entries.exists():
+            kind.is_archived = True
+            kind.save(update_fields=["is_archived"])
+            return Response({"archived": True}, status=status.HTTP_200_OK)
+        kind.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"])
+    def restore(self, request, pk=None):
+        """Вернуть скрытый вид расхода в отчёт."""
+        kind = self.get_object()
+        kind.is_archived = False
+        kind.save(update_fields=["is_archived"])
+        return Response(self.get_serializer(kind).data)
 
 
-class SalaryPaymentViewSet(viewsets.ModelViewSet):
-    """Зарплаты по сотрудникам: кому, сколько, когда."""
+class ExpenseEntryViewSet(viewsets.ModelViewSet):
+    """Траты по видам: аренда, зарплата, фреза, транспорт, свои виды.
 
-    queryset = SalaryPayment.objects.all()
-    serializer_class = SalaryPaymentSerializer
+    Фильтры: ?kind=, ?year=&month= (месяц), ?date_from=&date_to= (период),
+    ?spent_at=<дата> (день)."""
+
+    serializer_class = ExpenseEntrySerializer
     permission_classes = [IsAdmin]
-    filterset_fields = ["employee", "paid_at"]
-    search_fields = ["employee"]
-    ordering = ["-paid_at", "-created_at"]
+    filterset_fields = ["kind", "spent_at"]
+    ordering = ["-spent_at", "-created_at"]
+    # Диалог вида расхода показывает все траты за период целиком — страница на
+    # 25 строк молча обрезала бы месяц, и итог в диалоге разошёлся бы с отчётом.
+    pagination_class = None
 
     def get_queryset(self):
-        return _filter_by_month(super().get_queryset(), self.request, "paid_at")
+        qs = ExpenseEntry.objects.select_related("kind")
+        qs = _filter_by_month(qs, self.request, "spent_at")
+        d_from = _parse_date(self.request.query_params.get("date_from"))
+        d_to = _parse_date(self.request.query_params.get("date_to"))
+        if d_from:
+            qs = qs.filter(spent_at__gte=d_from)
+        if d_to:
+            qs = qs.filter(spent_at__lte=d_to)
+        return qs
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -194,74 +258,106 @@ class FinanceReportView(APIView):
             return qs
 
         # Структура отчёта повторяет Excel заказчика: три блока с подытогами —
-        # Материалы, Постоянные расходы, Переменные расходы.
-        # Постоянные расходы и зарплаты — теперь записи с датами, поэтому просто
-        # суммируем попавшие в период (раньше месячную сумму приходилось резать
-        # пропорционально — см. _prorate_factor, больше не нужен здесь).
-        def fixed_cat(category):
-            return by_spent(
-                FixedExpense.objects.filter(category=category)
-            ).aggregate(v=_SUM("amount"))["v"]
+        # Материалы, Постоянные расходы, Переменные расходы. Строки блоков — не
+        # зашитые категории, а справочник ExpenseKind: админ заводит свои виды
+        # («Реклама», «Налоги»), и они сами появляются в нужном блоке.
+        spent_by_kind = defaultdict(lambda: Decimal("0"))
+        for row in (
+            by_spent(ExpenseEntry.objects.all())
+            .values("kind_id")
+            .annotate(v=_SUM("amount"))
+        ):
+            spent_by_kind[row["kind_id"]] = row["v"]
 
-        salary_qs = SalaryPayment.objects.all()
-        if d_from:
-            salary_qs = salary_qs.filter(paid_at__gte=d_from)
-        if d_to:
-            salary_qs = salary_qs.filter(paid_at__lte=d_to)
+        kinds = list(ExpenseKind.objects.filter(is_archived=False))
 
-        fx = {
-            "rent": fixed_cat(FixedExpense.Category.RENT),
-            "utilities": fixed_cat(FixedExpense.Category.UTILITIES),
-            "internet": fixed_cat(FixedExpense.Category.INTERNET),
-            "salary": salary_qs.aggregate(v=_SUM("amount"))["v"],
-            "other": fixed_cat(FixedExpense.Category.OTHER),
+        # Что система считает сама, чтобы это не пришлось вбивать руками.
+        # Закуп материала складывается из приходов на склад: каждое поступление
+        # уже несёт свою себестоимость. Ручные записи по этому же виду к нему
+        # ДОБАВЛЯЮТСЯ — для покупок, прошедших мимо склада.
+        auto_by_code = {
+            ExpenseKind.MATERIAL_PURCHASE: purchases_from_stock(d_from, d_to),
         }
-        total_fixed = fx["rent"] + fx["utilities"] + fx["internet"] + fx["salary"] + fx["other"]
 
-        def cat(category):
-            return by_spent(
-                Expense.objects.filter(category=category)
-            ).aggregate(v=_SUM("amount"))["v"]
+        def block_rows(block):
+            """Строки блока со суммой за период, в порядке отображения."""
+            rows = []
+            for k in kinds:
+                if k.block != block:
+                    continue
+                auto = auto_by_code.get(k.code, Decimal("0"))
+                manual = spent_by_kind.get(k.id, Decimal("0"))
+                rows.append({
+                    "id": k.id,
+                    "code": k.code,
+                    "name": k.name,
+                    # Снятый флаг — расход виден, но прибыль не уменьшает
+                    # (оборудование, улучшение цеха и любые свои такие виды).
+                    "in_profit": k.in_profit,
+                    "is_builtin": k.is_builtin,
+                    "amount": auto + manual,
+                    # Часть, посчитанная системой: интерфейс помечает её и
+                    # объясняет, откуда взялась цифра.
+                    "auto_amount": auto,
+                    "manual_amount": manual,
+                })
+            return rows
 
-        var = {
-            "cutter": cat(Expense.Category.CUTTER),
-            "transport": cat(Expense.Category.TRANSPORT),
-            "equipment": cat(Expense.Category.EQUIPMENT),
-            "improvement": cat(Expense.Category.IMPROVEMENT),
-            "other": cat(Expense.Category.OTHER),
-        }
-        # Вложения (оборудование + улучшение цеха) показываются В БЛОКЕ переменных
-        # расходов, но в прибыль НЕ входят: станок за 300 000 не должен делать
-        # месяц убыточным (решение заказчика).
+        def block_total(rows):
+            return sum(
+                (r["amount"] for r in rows if r["in_profit"]), Decimal("0")
+            )
+
+        fixed_rows = block_rows(ExpenseKind.Block.FIXED)
+        variable_rows = block_rows(ExpenseKind.Block.VARIABLE)
+        material_rows = block_rows(ExpenseKind.Block.MATERIALS)
+
+        total_fixed = block_total(fixed_rows)
+        operating_variable = block_total(variable_rows)
+        # Вложения (оборудование + улучшение цеха и любые другие виды со снятым
+        # флагом) показываются В БЛОКЕ переменных расходов, но в прибыль НЕ
+        # входят: станок за 300 000 не должен делать месяц убыточным.
+        investment_rows = [r for r in variable_rows if not r["in_profit"]]
         investments = {
-            "equipment": var["equipment"],
-            "improvement": var["improvement"],
-            "total": var["equipment"] + var["improvement"],
+            "rows": investment_rows,
+            "total": sum((r["amount"] for r in investment_rows), Decimal("0")),
         }
-        # Транспорт переехал в блок «Материалы» — здесь его больше нет, иначе
-        # он посчитался бы дважды.
-        operating_variable = var["cutter"] + var["other"]
-
         # --- Блок «Материалы» (как в исходном Excel заказчика) ---------------
-        # Расход материала за период = остаток на начало + закуп + транспорт
-        # − остаток на конец. Остаток на конец берём живой, со склада.
+        # Закуп, транспорт и долг материала — такие же виды расхода с записями,
+        # как строки остальных блоков. В расход материала идут строки с флагом
+        # «входит в прибыль» (закуп + транспорт + свои виды); долг материала
+        # флага не имеет и остаётся справочным — материал, взятый в долг, уже
+        # сидит в закупе, иначе посчитали бы дважды.
+        #
+        #   расход материала = остаток на начало + Σ(строки блока) − остаток на конец
+        #
+        # Остаток на конец берём живой, со склада.
+        materials_spend = block_total(material_rows)
+        all_materials = list(Material.objects.all())
         stock_end = sum(
-            (m.quantity * m.purchase_price for m in Material.objects.all()),
-            Decimal("0"),
+            (m.quantity * m.purchase_price for m in all_materials), Decimal("0")
         )
-        materials_raw = s.stock_start + s.material_purchase + var["transport"] - stock_end
-        # Пока «остаток на начало» и «закуп» не заполнены, формула уходит в минус
-        # на всю стоимость склада — и отрицательный расход РАЗДУЛ БЫ прибыль.
-        # В прибыль такой результат не пускаем, а в интерфейс отдаём признак,
-        # что вводные не заполнены.
+        # Остаток на начало система считает по складскому листу: остаток на
+        # начало месяца по каждому материалу × его закупочная цена. Раньше это
+        # число вбивали руками; ручное значение по-прежнему возможно и
+        # побеждает расчёт (пустое поле = «считай сам»).
+        stock_start_auto = _stock_start_from_sheet(all_materials, d_from, d_to)
+        stock_start_manual = s.stock_start
+        stock_start = stock_start_manual if stock_start_manual is not None else stock_start_auto
+        # Расход не может быть отрицательным: пока склад не заполнен, «остаток
+        # на конец» больше начала со всем закупом, и формула уходит в минус.
+        materials_raw = stock_start + materials_spend - stock_end
+
+        # Если склад ещё не заполнен, формула уходит в минус на всю его
+        # стоимость — а отрицательный расход РАЗДУЛ БЫ прибыль. В прибыль такой
+        # результат не пускаем и отдаём признак, что вводные не готовы.
         materials = {
-            "stock_start": s.stock_start,        # ручной ввод
-            "purchase": s.material_purchase,     # ручной ввод
+            "stock_start": stock_start,
+            "stock_start_auto": stock_start_auto,
+            "stock_start_is_manual": stock_start_manual is not None,
             "stock_end": stock_end,              # считается по складу
-            "transport": var["transport"],       # сумма записей «Покупок»
-            # Долг поставщику — справочно, В ИТОГ НЕ ВХОДИТ: материал, взятый в
-            # долг, уже сидит в строке «закуп», иначе посчитали бы дважды.
-            "debt": s.material_debt,
+            "spend": materials_spend,            # сумма строк блока, идущих в итог
+            "rows": material_rows,               # виды расхода этого блока
             "total": max(materials_raw, Decimal("0")),
             "needs_setup": materials_raw < 0,
         }
@@ -335,27 +431,15 @@ class FinanceReportView(APIView):
 
         return Response(
             {
-                # Пояснения «что входит» больше не отдельные поля настроек: они
-                # живут примечанием у каждой записи постоянного расхода.
-                "fixed": {
-                    "rent": fx["rent"],
-                    "utilities": fx["utilities"],
-                    "internet": fx["internet"],
-                    "salary": fx["salary"],
-                    "other": fx["other"],
-                    "total": total_fixed,
-                },
+                # Строки блоков — виды расхода из справочника, в порядке
+                # отображения. Пояснения «что входит» живут примечанием у
+                # каждой записи траты.
+                "fixed": {"rows": fixed_rows, "total": total_fixed},
                 # Блок «Материалы» — первый в отчёте, как в Excel заказчика.
                 "materials": materials,
-                "variable": {
-                    "cutter": var["cutter"],
-                    "other": var["other"],
-                    # Вложения показываем в этом же блоке, но в total их нет —
-                    # total идёт в прибыль, вложения нет.
-                    "equipment": var["equipment"],
-                    "improvement": var["improvement"],
-                    "total": operating_variable,
-                },
+                # Вложения показываем в этом же блоке, но в total их нет —
+                # total идёт в прибыль, вложения нет.
+                "variable": {"rows": variable_rows, "total": operating_variable},
                 # Себестоимость проданного материала — отдельной строкой, чтобы
                 # было видно маржу: выручка − себестоимость = сколько заработали
                 # на материале до накладных расходов.
@@ -406,14 +490,12 @@ class DailyReportView(APIView):
         # раньше, размазываем поровну по дням: аренда платится один раз, но
         # «зарабатывать на неё» нужно каждый день, иначе один день месяца
         # выглядел бы катастрофой, а остальные — незаслуженно прибыльными.
-        fixed_total = (
-            FixedExpense.objects.filter(
-                spent_at__gte=first_day, spent_at__lt=next_month_first
-            ).aggregate(v=_SUM("amount"))["v"]
-            + SalaryPayment.objects.filter(
-                paid_at__gte=first_day, paid_at__lt=next_month_first
-            ).aggregate(v=_SUM("amount"))["v"]
+        month_entries = ExpenseEntry.objects.filter(
+            spent_at__gte=first_day, spent_at__lt=next_month_first, kind__in_profit=True
         )
+        fixed_total = month_entries.filter(
+            kind__block=ExpenseKind.Block.FIXED
+        ).aggregate(v=_SUM("amount"))["v"]
         fixed_share = fixed_total / days_in_month
 
         live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED).filter(
@@ -438,11 +520,13 @@ class DailyReportView(APIView):
             revenue_by_day[row["day"]] += row["v"]
 
         variable_by_day = defaultdict(lambda: Decimal("0"))
+        # Переменные и транспорт падают на свой день. Вложения (оборудование/
+        # улучшение цеха и любые виды со снятым флагом «входит в прибыль») в
+        # дневную прибыль не входят — это инвестиции, не операционные расходы.
         expense_rows = (
-            Expense.objects.filter(spent_at__gte=first_day, spent_at__lt=next_month_first)
-            # Вложения (оборудование/улучшение цеха) в дневную прибыль не входят —
-            # это инвестиции, не операционные расходы (как в общем отчёте).
-            .exclude(category__in=[Expense.Category.EQUIPMENT, Expense.Category.IMPROVEMENT])
+            month_entries.filter(
+                kind__block__in=[ExpenseKind.Block.VARIABLE, ExpenseKind.Block.MATERIALS]
+            )
             .values("spent_at")
             .annotate(v=_SUM("amount"))
         )
@@ -505,9 +589,13 @@ class MaterialReportView(APIView):
     каждому материалу заказов, продано кв.м / листов, сумма материала, сумма
     резки, поступление за период и текущий остаток. Плюс строка ИТОГО.
 
-    Период: ?date_from=&date_to= или ?year=&month=. Продажи и поступления
-    считаются за период; ОСТАТОК всегда «на сейчас» — это состояние склада, а
-    не оборот."""
+    Складские колонки повторяют лист заказчика и считаются его формулой:
+    ``остаток на начало + поступление − проданные = остаток на конец``, где
+    остаток на начало вводится РУКАМИ (MaterialMonthOpening) и привязан к
+    календарному месяцу. Материалы с заданной площадью листа считаются в листах.
+
+    Период: ?date_from=&date_to= или ?year=&month=. Колонка `stock` — живой
+    остаток системы «на сейчас», он к формуле не относится."""
 
     permission_classes = [IsAdmin]
 
@@ -524,6 +612,14 @@ class MaterialReportView(APIView):
         if year and 1 <= month <= 12:
             d_from = date(year, month, 1)
             d_to = date(year, month, calendar.monthrange(year, month)[1])
+        # Ручной остаток на начало привязан к календарному месяцу, поэтому он
+        # есть только когда период — ровно месяц (?year=&month= или диапазон,
+        # совпавший с целым месяцем). Для произвольного диапазона начала нет.
+        opening_year, opening_month = (year, month) if (year and 1 <= month <= 12) else (None, None)
+        if opening_year is None and d_from and d_to:
+            last = calendar.monthrange(d_from.year, d_from.month)[1]
+            if d_from.day == 1 and d_to == date(d_from.year, d_from.month, last):
+                opening_year, opening_month = d_from.year, d_from.month
 
         def by_receipt_date(qs):
             if d_from:
@@ -602,8 +698,11 @@ class MaterialReportView(APIView):
             a["orders"].add(it.receipt_id)
 
         # Поступление за период: приход по складским логам (и партии рулонов,
-        # и обычный приход пишут SUPPLY с положительным количеством).
+        # и обычный приход пишут SUPPLY с положительным количеством). Заодно
+        # собираем приходы по дням — колонки «поступление товар» в таблице
+        # заказчика («01.июл — 50, 10.июл — 50»).
         received = defaultdict(lambda: Decimal("0"))
+        received_days = defaultdict(lambda: defaultdict(lambda: Decimal("0")))
         supply = InventoryLog.objects.filter(
             type=InventoryLog.Type.SUPPLY, quantity_changed__gt=0
         )
@@ -611,17 +710,48 @@ class MaterialReportView(APIView):
             supply = supply.filter(created_at__date__gte=d_from)
         if d_to:
             supply = supply.filter(created_at__date__lte=d_to)
-        for log in supply.values("material_id", "quantity_changed"):
+        for log in supply.annotate(day=TruncDate("created_at")).values(
+            "material_id", "quantity_changed", "day"
+        ):
             received[log["material_id"]] += log["quantity_changed"]
+            received_days[log["material_id"]][log["day"]] += log["quantity_changed"]
+
+        # Остаток на начало месяца система переносит с конца прошлого месяца
+        # сама — вписать его нужно один раз, в месяце начала учёта. Вписанное
+        # вручную значение всегда побеждает расчётное (см. material_sheet).
+        materials = list(Material.objects.all().order_by("name"))
+        sheet_manual = collect_manual(materials)
+        sheet_received, sheet_sold = collect_flows(materials)
+        target_month = (opening_year, opening_month) if opening_year else None
 
         rows = []
-        for m in Material.objects.all().order_by("name"):
+        for m in materials:
             a = agg.get(m.id)
+            # Материал считаем в листах, если у него задана площадь листа, —
+            # заказчик ведёт склад именно листами. Иначе в его единице.
+            per_sheet = counting_unit(m)
+            in_units = lambda v: (v / per_sheet) if per_sheet else v  # noqa: E731
+
+            # Формула складского листа заказчика:
+            #   остаток на конец = остаток на начало + поступление − проданные.
+            if target_month:
+                opening, has_opening = opening_for(
+                    m.id, target_month,
+                    manual=sheet_manual, received=sheet_received, sold=sheet_sold,
+                )
+            else:
+                # Период не совпал с календарным месяцем — переносить неоткуда.
+                opening, has_opening = Decimal("0"), False
+            opening = q2(opening)
+            received_in_units = q2(in_units(received.get(m.id, Decimal("0"))))
+            sold_in_units = q2(in_units(a["area"] if a else Decimal("0")))
+            closing = opening + received_in_units - sold_in_units
             rows.append(
                 {
                     "id": m.id,
                     "name": m.name,
                     "category": _material_category(m),
+                    "production": m.production,
                     "orders": len(a["orders"]) if a else 0,
                     "sold_area": a["area"] if a else Decimal("0"),
                     "sold_sheets": a["sheets"] if a else Decimal("0"),
@@ -630,6 +760,21 @@ class MaterialReportView(APIView):
                     "received": received.get(m.id, Decimal("0")),
                     "stock": m.quantity,
                     "unit": m.unit,
+                    # Колонки складской таблицы заказчика, все в одной единице:
+                    # начало + поступление − проданные = конец.
+                    "counted_in": "SHEET" if per_sheet else m.unit,
+                    # Остаток на начало посчитан переносом с прошлого месяца;
+                    # флаг говорит, что его вписали руками (тогда он победил
+                    # расчёт) — интерфейс это помечает.
+                    "opening_is_manual": has_opening,
+                    "stock_start": opening,
+                    "stock_end": closing,
+                    "received_qty": received_in_units,
+                    "sold_qty": sold_in_units,
+                    "receipts": [
+                        {"date": day.isoformat(), "qty": q2(in_units(qty))}
+                        for day, qty in sorted(received_days.get(m.id, {}).items())
+                    ],
                 }
             )
 
@@ -645,11 +790,22 @@ class MaterialReportView(APIView):
             "material_revenue": sum((r["material_revenue"] for r in rows), Decimal("0")),
             "cut_revenue": sum((r["cut_revenue"] for r in rows), Decimal("0")),
             "received": sum((r["received"] for r in rows), Decimal("0")),
+            # Складские итоги — в штуках/листах, суммировать разные единицы
+            # смысла нет, но заказчику важна общая строка «ИТОГО», как в Excel.
+            "stock_start": sum((r["stock_start"] for r in rows), Decimal("0")),
+            "stock_end": sum((r["stock_end"] for r in rows), Decimal("0")),
+            "received_qty": sum((r["received_qty"] for r in rows), Decimal("0")),
+            "sold_qty": sum((r["sold_qty"] for r in rows), Decimal("0")),
         }
 
         return Response({
             "rows": rows,
             "totals": totals,
+            # Месяц, к которому привязан ручной остаток на начало. null —
+            # период не совпал с календарным месяцем, вводить некуда.
+            "opening_month": (
+                {"year": opening_year, "month": opening_month} if opening_year else None
+            ),
             "period": {
                 "from": d_from.isoformat() if d_from else None,
                 "to": d_to.isoformat() if d_to else None,

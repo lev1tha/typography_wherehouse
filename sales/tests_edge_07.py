@@ -4,7 +4,7 @@ from rest_framework.test import APITestCase
 
 from accounts.models import User
 from clients.models import Client
-from finance.models import Expense, FinanceSettings, FixedExpense
+from finance.models import ExpenseEntry, ExpenseKind, FinanceSettings
 from sales.models import Receipt, TransactionItem
 from services.models import PrintingService
 from warehouse.models import Material
@@ -122,7 +122,7 @@ class EdgeFinanceTests(APITestCase):
         начало, закуп, остаток на конец, транспорт, долг + подытог."""
         data = self._report()
         self.assertIn("materials", data)
-        for key in ("stock_start", "purchase", "stock_end", "transport", "debt", "total"):
+        for key in ("stock_start", "stock_end", "spend", "total"):
             self.assertIn(key, data["materials"], key)
 
     # ---- client_debt -------------------------------------------------------
@@ -275,19 +275,25 @@ class EdgeFinanceTests(APITestCase):
         # update_or_create so the values persist even on first touch — a bare
         # filter(pk=1).update() is a no-op when the row does not exist yet.
         FinanceSettings.objects.update_or_create(
-            pk=1, defaults={"material_purchase": Decimal("100")},
+            pk=1, defaults={"stock_start": Decimal("0")},
         )
-        # Постоянные расходы теперь записи с датами, а не поле настроек.
-        FixedExpense.objects.create(
-            category=FixedExpense.Category.RENT, amount=Decimal("50"),
-        )
-        Expense.objects.create(category=Expense.Category.CUTTER, amount=Decimal("30"))
-        Expense.objects.create(category=Expense.Category.OTHER, amount=Decimal("20"))
+        spend_kind = ExpenseKind.objects.get(code="MATERIAL_PURCHASE")
+        ExpenseEntry.objects.create(kind=spend_kind, amount=Decimal("100"))
+        # Постоянные расходы теперь записи с датами по видам расхода.
+        def spend(code, amount):
+            ExpenseEntry.objects.create(
+                kind=ExpenseKind.objects.get(code=code), amount=Decimal(amount)
+            )
+
+        spend("RENT", "50")
+        spend("CUTTER", "30")
+        spend("VAR_OTHER", "20")
         self._receipt(payment_status=Receipt.PaymentStatus.PAID, total="1000",
                       amount_paid="1000")
         data = self._report()
-        self.assertEqual(Decimal(str(data["variable"]["cutter"])), Decimal("30"))
-        self.assertEqual(Decimal(str(data["variable"]["other"])), Decimal("20"))
+        by_code = {r["code"]: Decimal(str(r["amount"])) for r in data["variable"]["rows"]}
+        self.assertEqual(by_code["CUTTER"], Decimal("30"))
+        self.assertEqual(by_code["VAR_OTHER"], Decimal("20"))
         self.assertEqual(Decimal(str(data["variable"]["total"])), Decimal("50"))
         self.assertEqual(Decimal(str(data["fixed"]["total"])), Decimal("50"))
         # Блок «Материалы» вернулся в расходы: закуп 100 из настроек участвует,

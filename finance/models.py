@@ -2,115 +2,132 @@ from decimal import Decimal
 
 from django.db import models
 from django.utils import timezone
+from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
 
 
-class Expense(models.Model):
-    """A variable cost / investment line — cutter consumables, equipment,
-    workshop improvement, other. Feeds the «Переменные расходы» section of the
-    financial report and is listed on the «Расходники/Инвестиции» page."""
+class ExpenseKind(models.Model):
+    """Вид расхода — одна строка финотчёта.
 
-    class Category(models.TextChoices):
-        CUTTER = "CUTTER", _("Расходники фреза")
-        TRANSPORT = "TRANSPORT", _("Транспортные расходы")
-        EQUIPMENT = "EQUIPMENT", _("Покупка оборудования")
-        IMPROVEMENT = "IMPROVEMENT", _("Улучшение цеха")
-        OTHER = "OTHER", _("Прочие расходы")
+    Раньше виды были зашиты в код двумя перечислениями (`FixedExpense.Category`
+    и `Expense.Category`), поэтому админ не мог завести «Рекламу» или «Налоги»
+    без правки исходников. Теперь это справочник: встроенные виды создаёт
+    миграция, свои добавляет админ.
 
-    category = models.CharField(max_length=20, choices=Category.choices)
-    name = models.CharField(_("название"), max_length=255, blank=True)
-    amount = models.DecimalField(_("сумма"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    spent_at = models.DateField(_("дата"), auto_now_add=True)
-    note = models.TextField(blank=True)
-    created_by = models.ForeignKey(
-        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="expenses"
+    `block` — в каком из трёх блоков Excel-отчёта показывается строка.
+    `in_profit` — уменьшает ли расход прибыль. Оборудование и улучшение цеха
+    видны в отчёте, но прибыль не уменьшают: это инвестиции, станок за 300 000
+    не должен делать месяц убыточным (решение заказчика).
+    """
+
+    class Block(models.TextChoices):
+        MATERIALS = "MATERIALS", _("Материалы")
+        FIXED = "FIXED", _("Постоянные расходы")
+        VARIABLE = "VARIABLE", _("Переменные расходы")
+
+    # Свои виды можно завести в любом блоке. В «Материалах» итог считается как
+    # остаток на начало + Σ(строки блока с «входит в прибыль») − остаток на
+    # конец, поэтому лишняя строка формулу не ломает: с флагом она добавится к
+    # расходу материала, без флага останется справочной (как «долг материала»).
+    USER_BLOCKS = (Block.MATERIALS, Block.FIXED, Block.VARIABLE)
+
+    code = models.SlugField(
+        _("код"), max_length=40, unique=True, allow_unicode=True,
+        help_text=_("Внутренний ключ. У встроенных видов постоянный, у своих — из названия."),
     )
+    name = models.CharField(_("название"), max_length=120)
+    block = models.CharField(_("блок отчёта"), max_length=12, choices=Block.choices)
+    in_profit = models.BooleanField(
+        _("входит в прибыль"), default=True,
+        help_text=_("Снято — расход виден в отчёте, но прибыль не уменьшает (как покупка оборудования)."),
+    )
+    # Встроенный вид нельзя удалить и нельзя перенести в другой блок: на его код
+    # опирается отчёт (транспорт — в блоке «Материалы», зарплаты — по сотрудникам).
+    is_builtin = models.BooleanField(_("встроенный"), default=False)
+    position = models.PositiveIntegerField(_("порядок в блоке"), default=100)
+    # Вид с записями не удаляется, а скрывается — иначе суммы прошлых месяцев
+    # поехали бы задним числом (так же устроено скрытие материалов на складе).
+    is_archived = models.BooleanField(_("скрыт"), default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        verbose_name = _("расход/инвестиция")
-        verbose_name_plural = _("расходы/инвестиции")
-        ordering = ["-spent_at", "-created_at"]
+        verbose_name = _("вид расхода")
+        verbose_name_plural = _("виды расходов")
+        ordering = ["block", "position", "id"]
+
+    # Коды встроенных видов, на которые смотрит отчёт.
+    TRANSPORT = "TRANSPORT"
+    SALARY = "SALARY"
+    MATERIAL_PURCHASE = "MATERIAL_PURCHASE"
+    MATERIAL_DEBT = "MATERIAL_DEBT"
 
     def __str__(self) -> str:
-        return f"{self.get_category_display()}: {self.name} — {self.amount}"
+        return self.name
+
+    @staticmethod
+    def make_code(name: str) -> str:
+        """Свободный код из названия («Реклама» → «реклама», «реклама-2», …)."""
+        base = slugify(name or "", allow_unicode=True)[:32] or "vid"
+        code, n = base, 2
+        while ExpenseKind.objects.filter(code=code).exists():
+            code = f"{base}-{n}"
+            n += 1
+        return code
 
 
-class FixedExpense(models.Model):
-    """Постоянный расход отдельной записью: «Аренда за июль», «Коммуналка».
+class ExpenseEntry(models.Model):
+    """Одна трата: вид, за что, сколько, когда.
 
-    Раньше это была одна сумма на каждый вид в настройках, которую отчёт
-    пропорционально резал под период. Теперь это записи с датами — видно
-    историю по месяцам и что именно входило в каждую трату.
+    Единая таблица для всех трёх блоков — раньше постоянные расходы, покупки и
+    зарплаты лежали в трёх разных моделях с одинаковыми полями.
     """
 
-    class Category(models.TextChoices):
-        RENT = "RENT", _("Аренда цеха")
-        UTILITIES = "UTILITIES", _("Коммунальные услуги")
-        INTERNET = "INTERNET", _("Интернет")
-        OTHER = "OTHER", _("Прочие постоянные")
-
-    category = models.CharField(max_length=20, choices=Category.choices)
-    name = models.CharField(_("за что / период"), max_length=255, blank=True)
+    kind = models.ForeignKey(
+        ExpenseKind, on_delete=models.PROTECT, related_name="entries", verbose_name=_("вид расхода")
+    )
+    # Для зарплат сюда пишется имя сотрудника: мастера и резчики не заводятся
+    # как пользователи системы, поэтому это свободный текст, а не ссылка.
+    name = models.CharField(_("за что / кому"), max_length=255, blank=True)
     amount = models.DecimalField(_("сумма"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    # Дату ставит пользователь (в отличие от Expense.spent_at): постоянные
-    # расходы часто вносят задним числом — «аренда за прошлый месяц».
+    # Дату ставит пользователь: расходы часто вносят задним числом («аренда за
+    # прошлый месяц»).
     spent_at = models.DateField(_("дата"), default=timezone.localdate)
     note = models.TextField(_("примечание"), blank=True)
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
-        related_name="fixed_expenses",
+        related_name="expense_entries",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        verbose_name = _("постоянный расход")
-        verbose_name_plural = _("постоянные расходы")
+        verbose_name = _("расход")
+        verbose_name_plural = _("расходы")
         ordering = ["-spent_at", "-created_at"]
+        indexes = [models.Index(fields=["kind", "spent_at"])]
 
     def __str__(self) -> str:
-        return f"{self.get_category_display()}: {self.name} — {self.amount}"
-
-
-class SalaryPayment(models.Model):
-    """Выплата зарплаты конкретному человеку.
-
-    Имя — свободный текст, а не ссылка на User: зарплату получают мастера и
-    резчики, у которых нет учётной записи в системе.
-    """
-
-    employee = models.CharField(_("сотрудник"), max_length=255)
-    amount = models.DecimalField(_("сумма"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    paid_at = models.DateField(_("дата выплаты"), default=timezone.localdate)
-    note = models.TextField(_("примечание"), blank=True)
-    created_by = models.ForeignKey(
-        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
-        related_name="salary_payments",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        verbose_name = _("выплата зарплаты")
-        verbose_name_plural = _("зарплаты")
-        ordering = ["-paid_at", "-created_at"]
-
-    def __str__(self) -> str:
-        return f"{self.employee}: {self.amount} ({self.paid_at})"
+        return f"{self.kind.name}: {self.name} — {self.amount}"
 
 
 class FinanceSettings(models.Model):
     """Singleton of manual P&L inputs that are not itemised expenses: material
-    balances / purchase / transport / supplier-debt and fixed monthly costs.
-    Computed values (stock-end, variable costs, revenue, profit) are NOT stored —
-    they are calculated live in the report endpoint."""
+    balances / purchase / supplier-debt. Computed values (stock-end, expenses,
+    revenue, profit) are NOT stored — they are calculated live in the report
+    endpoint."""
 
-    # Материалы
-    stock_start = models.DecimalField(_("остаток материалов на начало"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    material_purchase = models.DecimalField(_("закуп материала"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    transport = models.DecimalField(_("транспортные расходы"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    material_debt = models.DecimalField(_("долг материала"), max_digits=14, decimal_places=2, default=Decimal("0"))
-    # Постоянные расходы и зарплата переехали в модели FixedExpense и
-    # SalaryPayment (записи с датами) — здесь их больше нет.
+    # Материалы. Здесь остался только остаток на начало: это не трата, а
+    # состояние склада. Закуп, транспорт и долг материала стали видами расхода
+    # с записями по датам (ExpenseKind в блоке MATERIALS) — как остальные
+    # строки отчёта, чтобы было видно, что именно покупали и у кого.
+    # Пусто (null) — считается по складскому листу: Σ(остаток на начало месяца
+    # по каждому материалу × его закупочная цена). Число — ручное значение,
+    # которое побеждает расчёт. Ноль тут настоящий ноль, а не «не заполнено»,
+    # поэтому именно null, а не 0.
+    stock_start = models.DecimalField(
+        _("остаток материалов на начало"), max_digits=14, decimal_places=2,
+        null=True, blank=True,
+        help_text=_("Пусто — считается по складу автоматически."),
+    )
     # Реферальная программа
     referral_bonus = models.DecimalField(
         _("бонус за приведённого клиента"), max_digits=14, decimal_places=2, default=Decimal("0"),
