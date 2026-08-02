@@ -116,30 +116,39 @@ certbot --nginx -d chpucenter.com -d www.chpucenter.com
 
 ## Шаг 4. Запуск приложения
 
-> ⚠️ **Разово при переходе на схему без старых миграций.** Миграции пересобраны
-> с нуля (по одной `0001_initial` на приложение), поэтому на сервере, который
-> уже поднимался, имена в таблице `django_migrations` не совпадут и `migrate`
-> упадёт.
->
-> **Бизнес-данных на проде нет** — ни чеков, ни клиентов, ни приходов. Терять
-> нечего, дамп снимать незачем, просто пересоздайте базу:
->
-> ```bash
-> cd /opt/chpucenter
-> docker compose -f docker-compose.prod.yml down
-> docker volume ls | grep chpucenter          # найти том с данными Postgres
-> docker volume rm <имя_тома>
-> docker compose -f docker-compose.prod.yml up -d --build
-> ```
->
-> После этого — `seed` (см. ниже), чтобы завести аккаунты и каталог. Если к
-> моменту чтения в базе УЖЕ есть настоящие заказы, так делать нельзя: снимите
-> дамп и переносите данные вручную.
+Обычное обновление — одна команда:
 
 ```bash
-cd /opt/chpucenter
-docker compose -f docker-compose.prod.yml up -d --build
+cd /opt/chpucenter && docker compose -f docker-compose.prod.yml up -d --build
 ```
+
+### Если `migrate` упал с «relation … does not exist»
+
+Так выглядит база от старой схемы. Миграции пересобраны с нуля (по одной
+`0001_initial` на приложение), и на сервере, который уже поднимался, имена в
+`django_migrations` не совпадают: Django считает `0001_initial` применённой,
+пропускает создание таблиц и падает на первой же миграции с данными.
+
+Лечится пересозданием базы, но **сначала посмотрите, что в ней лежит** —
+команда только читает:
+
+```bash
+cd /opt/chpucenter && docker compose -f docker-compose.prod.yml exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select (select count(*) from sales_receipt) as чеки, (select count(*) from clients_client) as клиенты;"'
+```
+
+**Не нули — стоп.** Разберитесь, что это за записи, прежде чем сносить: дальше
+идёт необратимая команда. Однажды там нашлись 4 чека и 2 клиента, и хорошо, что
+их успели опознать как тестовые.
+
+Нули (или вы точно знаете, что записи выбрасываемые) — пересоздавайте.
+`down -v` удаляет только том `pgdata`; статика, медиа и фронтенд лежат в
+`/srv/chpucenter/*` на хосте и не пострадают:
+
+```bash
+cd /opt/chpucenter && docker compose -f docker-compose.prod.yml down -v && docker compose -f docker-compose.prod.yml up -d --build
+```
+
+После этого — `seed` (см. ниже), чтобы завести аккаунты и каталог-заготовку.
 
 При старте контейнер сам: дождётся базы → применит миграции → соберёт статику →
 выложит фронтенд в `/srv/chpucenter/frontend`.
