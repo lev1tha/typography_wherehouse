@@ -8,7 +8,7 @@
 ## Статус на 2026-08-03
 
 - Стек: **Python 3.13.5 + Django 6.0.6**, venv в `.venv/` настроен.
-  `python manage.py test` → **286/286 зелёных**.
+  `python manage.py test` → **288/288 зелёных**.
 - Система развёрнута в проде: https://chpucenter.com (сервер 167.233.170.216,
   Docker + PostgreSQL + nginx на хосте, Cloudflare).
 

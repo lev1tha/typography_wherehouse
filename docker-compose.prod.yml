@@ -44,7 +44,8 @@ services:
     healthcheck:
       # Обычная страница входа в админку: 200 = Django жив и отвечает.
       # Хост подставляем явно, иначе ALLOWED_HOSTS отдаст 400 на 127.0.0.1.
-      test: ["CMD-SHELL", "curl -fsS -H 'Host: chpucenter.com' http://127.0.0.1:8000/admin/login/ -o /dev/null"]
+      # Путь именно django-admin: на /admin/* висят экраны React-приложения.
+      test: ["CMD-SHELL", "curl -fsS -H 'Host: chpucenter.com' http://127.0.0.1:8000/django-admin/login/ -o /dev/null"]
       interval: 30s
       timeout: 10s
       retries: 3

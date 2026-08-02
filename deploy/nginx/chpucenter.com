@@ -64,7 +64,9 @@ server {
     index index.html;
 
     # --- Django ---
-    location ~ ^/(api|admin)/ {
+    # django-admin, а не admin: на /admin/* живут экраны самой системы (React),
+    # и отдавать их Django нельзя — он уводил на свою форму входа.
+    location ~ ^/(api|django-admin)/ {
         proxy_pass http://chpu_app;
         proxy_http_version 1.1;
 

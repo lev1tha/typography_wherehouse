@@ -8,7 +8,7 @@
 Интернет → Cloudflare → nginx на хосте (:443) ─┬─ /            → /srv/chpucenter/frontend  (React, статика)
                                                ├─ /static/     → /srv/chpucenter/static    (админка Django)
                                                ├─ /media/      → /srv/chpucenter/media     (фото материалов)
-                                               └─ /api/, /admin/ → 127.0.0.1:8001 → docker: gunicorn → Django
+                                               └─ /api/, /django-admin/ → 127.0.0.1:8001 → docker: gunicorn → Django
                                                                                     docker: PostgreSQL
 ```
 
@@ -161,7 +161,7 @@ docker compose -f docker-compose.prod.yml logs web | tail -20
 
 # Заголовок Host обязателен: ALLOWED_HOSTS разрешает только chpucenter.com,
 # поэтому запрос «просто на 127.0.0.1» вернёт 400 — это не поломка, а защита.
-curl -I -H 'Host: chpucenter.com' http://127.0.0.1:8001/admin/login/   # ожидаем 200
+curl -I -H 'Host: chpucenter.com' http://127.0.0.1:8001/django-admin/login/   # ожидаем 200
 ```
 
 Создать рабочие аккаунты (каталог + услуги + 2 пользователя):
@@ -236,7 +236,9 @@ gunzip -c backup-2026-07-31.sql.gz | \
 - [ ] https://chpucenter.com открывается, замок в браузере зелёный
 - [ ] www.chpucenter.com редиректит на основной домен
 - [ ] Вход админом работает, пароли по умолчанию **изменены**
-- [ ] `/admin/` открывается со стилями (значит `/static/` отдаётся)
+- [ ] `/django-admin/` открывается со стилями (значит `/static/` отдаётся)
+- [ ] `/admin/finance` после ПОЛНОЙ перезагрузки открывает систему, а не форму
+      входа Django (`/admin/*` — экраны React, Django туда лезть не должен)
 - [ ] Загрузка фото материала работает и картинка видна (значит `/media/` отдаётся)
 - [ ] Клиентский портал: вход по телефону + код, выданный из карточки
 - [ ] Финансовые экраны просят отдельный пароль
