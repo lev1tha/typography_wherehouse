@@ -116,6 +116,23 @@ certbot --nginx -d chpucenter.com -d www.chpucenter.com
 
 ## Шаг 4. Запуск приложения
 
+> ⚠️ **Разово при переходе на схему без старых миграций.** Миграции пересобраны
+> с нуля (по одной `0001_initial` на приложение), поэтому на сервере, который
+> уже поднимался, имена в таблице `django_migrations` не совпадут и `migrate`
+> упадёт. База там пустая — просто пересоздайте её:
+>
+> ```bash
+> cd /opt/chpucenter
+> docker compose -f docker-compose.prod.yml down
+> docker volume ls | grep chpucenter          # найти том с данными Postgres
+> docker volume rm <имя_тома>
+> docker compose -f docker-compose.prod.yml up -d --build
+> ```
+>
+> После этого — `seed` (см. ниже), чтобы завести аккаунты и каталог. Если к
+> моменту чтения в базе УЖЕ есть настоящие заказы, так делать нельзя: снимите
+> дамп и переносите данные вручную.
+
 ```bash
 cd /opt/chpucenter
 docker compose -f docker-compose.prod.yml up -d --build
