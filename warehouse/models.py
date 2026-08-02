@@ -354,10 +354,17 @@ class MaterialImage(models.Model):
 
 
 class InventoryLog(models.Model):
-    """Supply intake and inventory adjustments — the audit trail for stock."""
+    """Журнал движений склада — единственный ответ на «куда делся материал».
+
+    Пишется КАЖДОЕ изменение остатка, включая продажи. Раньше продажи в журнал
+    не попадали вовсе, и он не сходился сам с собой: возврат штучного материала
+    записывался приходом, а расхода, который он отменяет, в журнале не было.
+    """
 
     class Type(models.TextChoices):
         SUPPLY = "SUPPLY", _("Поступление")
+        SALE = "SALE", _("Продажа")
+        RETURN = "RETURN", _("Возврат от клиента")
         ADJUSTMENT = "ADJUSTMENT", _("Корректировка/Инвентаризация")
         WRITE_OFF = "WRITE_OFF", _("Списание (порча/брак/утеря)")
 
@@ -379,6 +386,17 @@ class InventoryLog(models.Model):
         blank=True,
     )
     reason = models.TextField(_("причина"), null=True, blank=True)
+    # Чек, из-за которого материал ушёл со склада (или вернулся). Ссылка, а не
+    # номер текстом: из журнала видно не только «продажа», но и какой заказ, и
+    # при возврате мы находим парный расход по тому же чеку.
+    receipt = models.ForeignKey(
+        "sales.Receipt",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="inventory_logs",
+        verbose_name=_("чек"),
+    )
     created_by = models.ForeignKey(
         "accounts.User",
         on_delete=models.SET_NULL,

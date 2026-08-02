@@ -21,33 +21,67 @@ def _money(value: Decimal) -> Decimal:
     return Decimal(value).quantize(Decimal("0.01"))
 
 
-def _deduct(material, qty, user, reason="") -> Decimal:
+def _deduct(material, qty, user, reason="", receipt=None) -> Decimal:
     """Deduct stock, routing roll-materials through FIFO area consumption.
 
     Возвращает СЕБЕСТОИМОСТЬ списанного — её мы фиксируем на строке чека, чтобы
     прибыль считалась «выручка − себестоимость проданного», а не только за
     вычетом накладных расходов.
+
+    Каждое списание пишется в складской журнал типом ПРОДАЖА со ссылкой на чек:
+    иначе материал уходит со склада бесследно и на вопрос «куда делся» отвечать
+    нечем.
     """
     if qty <= 0:
         return Decimal("0")
     if material.is_roll_material:
         # FIFO знает, из каких именно партий ушёл материал и почём.
-        return consume_area(material, qty, user=user, reason=reason)
-    apply_stock_change(material, -qty, user=user)
+        return consume_area(
+            material, qty, user=user, reason=reason,
+            log_type=InventoryLog.Type.SALE, receipt=receipt,
+        )
+    apply_stock_change(
+        material, -qty, user=user, reason=reason,
+        log_type=InventoryLog.Type.SALE, receipt=receipt,
+    )
     # У штучных материалов партий нет — берём текущую закупочную цену.
     return qty * (material.purchase_price or Decimal("0"))
 
 
-def _restore(material, qty, user, reason="") -> Decimal:
+def _restore(material, qty, user, reason="", receipt=None) -> Decimal:
+    """Вернуть материал на склад при возврате заказа.
+
+    Тип ВОЗВРАТ, а не «корректировка»: корректировка — это инвентаризация, а
+    здесь у прихода есть парный расход по тому же чеку.
+    """
     if qty <= 0:
         return Decimal("0")
     if material.is_roll_material:
-        restore_area(material, qty, user=user, reason=reason)
+        restore_area(
+            material, qty, user=user, reason=reason,
+            log_type=InventoryLog.Type.RETURN, receipt=receipt,
+        )
     else:
         apply_stock_change(
-            material, qty, log_type=InventoryLog.Type.ADJUSTMENT, reason=reason, user=user
+            material, qty, log_type=InventoryLog.Type.RETURN,
+            reason=reason, user=user, receipt=receipt,
         )
     return Decimal("0")
+
+
+def _reason(receipt: Receipt, *, restore: bool, service=None) -> str:
+    """Причина движения для журнала — фраза, понятная без соседних колонок.
+
+    Журнал читают и в интерфейсе, и в админке, поэтому строка самодостаточная:
+    «Продажа по чеку №12 — Вывеска для кафе».
+    """
+    number = f"№{receipt.order_number}" if receipt.order_number else ""
+    tail = f" — {receipt.title}" if receipt.title else ""
+    if service is not None:
+        head = "Возврат материала услуги" if restore else "Расход материала на услугу"
+        return f"{head} «{service.name}», чек {number}".strip() + tail
+    head = "Возврат по чеку" if restore else "Продажа по чеку"
+    return f"{head} {number}".strip() + tail
 
 
 def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> None:
@@ -56,16 +90,23 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> Non
     Cutting now produces two separate lines (a MATERIAL line for the cut material
     and a SERVICE line for the master's work), so the MATERIAL line handles its
     own area; service lines only consume their recipe (technological-card) extras.
+
+    Каждое движение попадает в складской журнал со ссылкой на чек — и продажа
+    материала, и расход по техкарте услуги (клей, крепёж).
     """
     from services.models import ServiceRecipe
 
     fn = _restore if restore else _deduct
+    receipt = item.receipt
     if item.type == TransactionItem.Type.MATERIAL and item.material_id:
         # Whole-piece sales deduct the piece area; area/qty sales deduct quantity.
         qty = item.quantity
         if item.sale_mode == TransactionItem.SaleMode.PIECE and item.material.piece_area:
             qty = item.material.piece_area * item.quantity
-        cost = fn(item.material, qty, user)
+        cost = fn(
+            item.material, qty, user,
+            reason=_reason(receipt, restore=restore), receipt=receipt,
+        )
         if not restore:
             item.cost_total = _money(cost)
             item.save(update_fields=["cost_total"])
@@ -76,12 +117,13 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> Non
     # Extra recipe materials (e.g. fasteners for installation, glue, …) — их
     # себестоимость тоже относим на строку услуги.
     cost = Decimal("0")
+    reason = _reason(receipt, restore=restore, service=item.service)
     for recipe in item.service.recipes.select_related("material").all():
         if recipe.consumption_mode == ServiceRecipe.Mode.PER_SQM:
             consumed = recipe.consumption_per_unit * item.quantity
         else:  # FIXED per order
             consumed = recipe.consumption_per_unit
-        cost += fn(recipe.material, consumed, user)
+        cost += fn(recipe.material, consumed, user, reason=reason, receipt=receipt)
     if not restore and cost:
         item.cost_total = _money(cost)
         item.save(update_fields=["cost_total"])

@@ -115,12 +115,17 @@ def consume_area(
     *,
     user=None,
     reason: str = "",
-    log_type: str = InventoryLog.Type.ADJUSTMENT,
+    log_type: str | None = None,
+    receipt=None,
 ) -> Decimal:
     """Consume `area` кв.м from a roll-material, FIFO across rolls.
 
     Returns the total cost of goods consumed. Raises InsufficientStock if there
     is not enough remaining area across all rolls.
+
+    Запись в журнал делается по ``log_type`` — как в ``apply_stock_change``.
+    Раньше она стояла под непустым ``reason``, и продажа рулонного материала
+    (которая причину не передавала) уходила со склада незаметно для журнала.
     """
     locked = Material.objects.select_for_update().get(pk=material.pk)
     need = Decimal(area)
@@ -149,12 +154,13 @@ def consume_area(
     locked.quantity -= need
     locked.save(update_fields=["quantity", "updated_at"])
 
-    if reason:
+    if log_type:
         InventoryLog.objects.create(
             type=log_type,
             material=locked,
             quantity_changed=-need,
             reason=reason,
+            receipt=receipt,
             created_by=user,
         )
 
@@ -166,7 +172,15 @@ def consume_area(
 
 
 @transaction.atomic
-def restore_area(material: Material, area: Decimal, *, user=None, reason: str = "") -> None:
+def restore_area(
+    material: Material,
+    area: Decimal,
+    *,
+    user=None,
+    reason: str = "",
+    log_type: str | None = None,
+    receipt=None,
+) -> None:
     """Return `area` кв.м back to stock (refund).
 
     Mirrors the FIFO drawdown: refills lots oldest-first, each only up to its
@@ -200,11 +214,12 @@ def restore_area(material: Material, area: Decimal, *, user=None, reason: str = 
         newest.save(update_fields=["remaining_area"])
     locked.quantity += add
     locked.save(update_fields=["quantity", "updated_at"])
-    if reason:
+    if log_type:
         InventoryLog.objects.create(
-            type=InventoryLog.Type.ADJUSTMENT,
+            type=log_type,
             material=locked,
             quantity_changed=add,
             reason=reason,
+            receipt=receipt,
             created_by=user,
         )

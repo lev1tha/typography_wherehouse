@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
+import StockJournal from "../../components/StockJournal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
 // Module-level so they keep a stable identity across renders — defining these
@@ -28,12 +29,13 @@ const MaterialSelect = ({ value, onChange, materials, t }) => (
 
 const WRITEOFF_REASONS = ["DAMAGE", "DEFECT", "LOSS", "EXPIRY", "OTHER"];
 
-// «Движение»: инвентаризация (пересчёт) и списание (порча/брак/утеря). Приём
-// нового прихода вынесен на строку материала в «Материалах» (ReceiveStockModal).
+// «Движение»: журнал всех операций склада + две формы, инвентаризация
+// (пересчёт) и списание (порча/брак/утеря). Приём нового прихода вынесен на
+// строку материала в «Материалах» (ReceiveStockModal).
 export default function Supply({ embedded = false }) {
   const { t } = useTranslation();
   const { toast } = useUI();
-  const [tab, setTab] = useState("inventory");
+  const [tab, setTab] = useState("log");
   const [materials, setMaterials] = useState([]);
   const [busy, setBusy] = useState(false);
 
@@ -41,7 +43,10 @@ export default function Supply({ embedded = false }) {
   const [writeoff, setWriteoff] = useState({ material: "", quantity: "", reason_code: "DAMAGE", note: "" });
 
   function load() {
-    api.get("/warehouse/materials/", { params: { ordering: "name" } }).then((r) => setMaterials(r.data.results));
+    // page_size: каталог нужен целиком — это выпадающий список, а не таблица.
+    api
+      .get("/warehouse/materials/", { params: { ordering: "name", page_size: 200 } })
+      .then((r) => setMaterials(r.data.results));
   }
   useEffect(load, []);
 
@@ -87,6 +92,7 @@ export default function Supply({ embedded = false }) {
     });
 
   const TABS = [
+    ["log", t("journal.title")],
     ["inventory", t("supply.inventory")],
     ["writeoff", t("supply.writeoff")],
   ];
@@ -101,6 +107,8 @@ export default function Supply({ embedded = false }) {
           </button>
         ))}
       </div>
+
+      {tab === "log" && <StockJournal />}
 
       {tab === "inventory" && (
         <div className="card" style={{ maxWidth: 520 }}>

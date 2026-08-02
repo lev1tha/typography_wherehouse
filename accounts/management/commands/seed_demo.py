@@ -163,6 +163,24 @@ def _aware(day: date):
     return timezone.make_aware(datetime.combine(day, datetime.min.time()))
 
 
+def _backdate(receipt, moment):
+    """Чек и его складские движения — задним числом.
+
+    Журнал пишется в момент списания, то есть «сейчас». Без этого демо-месяц
+    выглядел бы странно: чеки за июль, а движения по ним — сегодняшним числом.
+    В бою так и надо: материал уходит со склада тогда, когда его отдали.
+    """
+    Receipt.objects.filter(pk=receipt.pk).update(created_at=moment)
+    InventoryLog.objects.filter(receipt=receipt).update(happened_at=moment)
+
+
+def _backdate_return(receipt, moment):
+    """Возврат случился позже продажи — двигаем только записи возврата."""
+    InventoryLog.objects.filter(
+        receipt=receipt, type=InventoryLog.Type.RETURN
+    ).update(happened_at=moment)
+
+
 class Command(BaseCommand):
     help = "Наполняет систему реалистичным месяцем работы цеха (демо-данные)."
 
@@ -391,7 +409,7 @@ class Command(BaseCommand):
                 payment_method=Receipt.PaymentMethod.CASH,
                 items_data=entries, amount_paid=total_guess, title=title,
             )
-            Receipt.objects.filter(pk=receipt.pk).update(created_at=_aware(month.replace(day=day)))
+            _backdate(receipt, _aware(month.replace(day=day)))
             made += 1
         self.stdout.write(f"Заказов: {made} (есть долги и частичные оплаты)")
 
@@ -410,9 +428,9 @@ class Command(BaseCommand):
     def _supply_sale_and_refund(self, clients, month, user):
         """Продажа и возврат ШТУЧНОГО материала.
 
-        Ради него сид и держит крепёж: продажа штучного лога не пишет, а
-        возврат пишет ADJUSTMENT. В журнале появляется приход, которому не
-        соответствует ни один расход — журнал не сходится сам с собой.
+        Ради него сид и держит крепёж: штучный материал ходит мимо партий и
+        FIFO, и раньше именно на нём было видно, что журнал не сходится сам с
+        собой — возврат он записывал, а продажу нет.
         """
         material, _ = Material.objects.update_or_create(
             name=SUPPLY_NAME,
@@ -439,13 +457,14 @@ class Command(BaseCommand):
             }],
             amount_paid=D("9999999"), title=f"{SUPPLY_NAME} — 120 шт",
         )
-        Receipt.objects.filter(pk=receipt.pk).update(created_at=_aware(month.replace(day=20)))
+        _backdate(receipt, _aware(month.replace(day=20)))
         sale_service.refund_receipt(receipt, user=user)
+        _backdate_return(receipt, _aware(month.replace(day=21)))
         self.stdout.write(f"Штучный расходник: продажа 120 шт и возврат (заказ №{receipt.order_number})")
 
     def _refund(self, month, user):
-        """Возврат — из-за него в журнале появляется приход без парного расхода:
-        продажа лога не пишет, а возврат штучного материала пишет."""
+        """Возврат целого заказа: в журнале приход ВОЗВРАТ рядом с расходом
+        ПРОДАЖА по тому же чеку — обе стороны сходятся."""
         receipt = (
             Receipt.objects.filter(items__sale_mode=TransactionItem.SaleMode.PIECE)
             .order_by("-created_at").first()
@@ -453,6 +472,7 @@ class Command(BaseCommand):
         if not receipt:
             return
         sale_service.refund_receipt(receipt, user=user)
+        _backdate_return(receipt, _aware(month.replace(day=25)))
         self.stdout.write(f"Возврат: заказ №{receipt.order_number} целиком")
 
     def _expenses(self, month):
@@ -477,23 +497,30 @@ class Command(BaseCommand):
         w("")
         w(self.style.WARNING("── Что теперь видно на данных ──"))
 
-        # 1. Журнал не знает о продажах.
+        # 1. Журнал движений: сходится ли он с чеками.
         by_type = {
             t: InventoryLog.objects.filter(type=t).count()
-            for t in ("SUPPLY", "ADJUSTMENT", "WRITE_OFF")
+            for t in ("SUPPLY", "SALE", "RETURN", "ADJUSTMENT", "WRITE_OFF")
         }
-        sales = TransactionItem.objects.filter(
+        sold_lines = TransactionItem.objects.filter(
             type=TransactionItem.Type.MATERIAL, material__isnull=False
         ).count()
-        w(f"1. Складской журнал: приход {by_type['SUPPLY']}, списание {by_type['WRITE_OFF']}, "
-          f"корректировка {by_type['ADJUSTMENT']} — на {sales} товарных строк в чеках.")
-        w("   Ни одной записи о продаже: sale_service._deduct вызывает списание без")
-        w("   log_type и без reason, а логирование в stock.py/rolls.py стоит именно")
-        w("   под ними. «Куда делся материал» журнал не отвечает.")
-        w(f"   При этом корректировок {by_type['ADJUSTMENT']} — это возврат штучного крепежа:")
-        w("   возврат штучного пишется в журнал, а его продажа нет, и приходу не")
-        w("   соответствует ни один расход. У рулонных молчат обе стороны, поэтому")
-        w("   на них перекос не виден вовсе.")
+        returned_lines = TransactionItem.objects.filter(
+            type=TransactionItem.Type.MATERIAL, material__isnull=False, is_returned=True
+        ).count()
+        w(f"1. Складской журнал: приход {by_type['SUPPLY']}, продажа {by_type['SALE']}, "
+          f"возврат {by_type['RETURN']}, списание {by_type['WRITE_OFF']}, "
+          f"корректировка {by_type['ADJUSTMENT']}.")
+        ok = by_type["SALE"] == sold_lines and by_type["RETURN"] == returned_lines
+        w(f"   Товарных строк в чеках {sold_lines}, из них возвращено {returned_lines} — "
+          f"{'сходится' if ok else 'НЕ СХОДИТСЯ'}.")
+        if ok:
+            w("   Каждая продажа теперь пишется со ссылкой на чек, и у возврата есть")
+            w("   парный расход. Раньше продажи не писались вовсе: _deduct вызывал")
+            w("   списание без log_type, а логирование стояло именно под ним, — и")
+            w("   на вопрос «куда делся материал» журнал ответить не мог.")
+        else:
+            w("   Расхождение: движений по продажам не столько, сколько товарных строк.")
 
         # 2. Приходы датируются моментом ввода.
         w("")

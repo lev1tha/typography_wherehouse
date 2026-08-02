@@ -384,6 +384,26 @@
     "receivedOn": "Received on",
     "receivedOnHint": "Can be back-dated — the lot queues for consumption by its real date."
   },
+  "journal": {
+    "title": "Journal",
+    "date": "Date",
+    "type": "Operation",
+    "change": "Change",
+    "order": "Order",
+    "reason": "Reason",
+    "who": "By",
+    "allTypes": "All operations",
+    "allMaterials": "All materials",
+    "empty": "No movements yet",
+    "pageOf": "Page {{page}} of {{pages}} · {{count}} total"
+  },
+  "logType": {
+    "SUPPLY": "Intake",
+    "SALE": "Sale",
+    "RETURN": "Return",
+    "WRITE_OFF": "Write-off",
+    "ADJUSTMENT": "Stock-take"
+  },
   "writeoffReason": {
     "DAMAGE": "Damage",
     "DEFECT": "Defect",

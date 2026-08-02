@@ -168,7 +168,10 @@ REST_FRAMEWORK = {
         "rest_framework.filters.SearchFilter",
         "rest_framework.filters.OrderingFilter",
     ),
-    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    # ?page_size= разрешён: списки-выпадашки (материалы в журнале движений, в
+    # инвентаризации, в списании) грузятся одним запросом. Без него страница в
+    # 25 строк молча обрезала каталог, и материала №26 в выборе просто не было.
+    "DEFAULT_PAGINATION_CLASS": "config.pagination.SizedPageNumberPagination",
     "PAGE_SIZE": 25,
 }
 

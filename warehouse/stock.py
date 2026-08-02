@@ -23,6 +23,7 @@ def apply_stock_change(
     reason: str | None = None,
     user=None,
     happened_at=None,
+    receipt=None,
 ) -> Material:
     """Add `delta` (may be negative) to a material's quantity.
 
@@ -48,6 +49,7 @@ def apply_stock_change(
             quantity_changed=Decimal(delta),
             actual_price=actual_price,
             reason=reason,
+            receipt=receipt,
             created_by=user,
         )
         if happened_at:

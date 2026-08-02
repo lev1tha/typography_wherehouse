@@ -238,11 +238,43 @@ class MaterialImageViewSet(viewsets.ModelViewSet):
 
 
 class InventoryLogViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = InventoryLog.objects.select_related("material", "created_by").all()
+    """Журнал движений склада — лента «Движение».
+
+    Фильтры: ?type= (приход/продажа/возврат/списание/корректировка), ?material=,
+    ?year=&month=. Период НЕ обязателен: поставки вносят задним числом, и лента,
+    по умолчанию обрезанная текущим месяцем, прятала бы их в момент ввода.
+
+    Сортировка была по `created_at` — поля, которого у модели больше нет
+    (переименовано в `happened_at`, когда приходы научились датироваться задним
+    числом). Ни один экран журнал не показывал, поэтому 500 никто не замечал.
+    """
+
+    queryset = InventoryLog.objects.select_related(
+        "material", "created_by", "receipt"
+    ).all()
     serializer_class = InventoryLogSerializer
     permission_classes = [IsAuthenticated]
-    filterset_fields = ["material", "type"]
-    ordering = ["-created_at"]
+    filterset_fields = ["material", "type", "receipt"]
+    search_fields = ["material__name", "reason"]
+    ordering = ["-happened_at"]
+    ordering_fields = ["happened_at", "quantity_changed", "material__name"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        params = self.request.query_params
+
+        def as_int(name):
+            try:
+                return int(params.get(name) or 0)
+            except ValueError:
+                return 0
+
+        year, month = as_int("year"), as_int("month")
+        if year:
+            qs = qs.filter(happened_at__year=year)
+        if month:
+            qs = qs.filter(happened_at__month=month)
+        return qs
 
 
 class RollViewSet(viewsets.ReadOnlyModelViewSet):

@@ -22,8 +22,12 @@ class MaterialAdmin(TranslationAdmin):
 
 @admin.register(InventoryLog)
 class InventoryLogAdmin(admin.ModelAdmin):
-    list_display = ("happened_at", "type", "material", "quantity_changed", "created_by")
-    list_filter = ("type",)
+    list_display = (
+        "happened_at", "type", "material", "quantity_changed", "receipt", "created_by",
+    )
+    list_filter = ("type", "material")
+    search_fields = ("material__name", "reason")
+    raw_id_fields = ("receipt",)
 
 
 @admin.register(Roll)

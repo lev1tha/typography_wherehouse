@@ -94,17 +94,25 @@ class InventoryLogSerializer(serializers.ModelSerializer):
         source="created_by.username", read_only=True
     )
     material_name = serializers.CharField(source="material.name", read_only=True)
+    material_unit = serializers.CharField(source="material.unit", read_only=True)
+    type_display = serializers.CharField(source="get_type_display", read_only=True)
+    # Номер заказа, а не UUID: в ленте движений он и показывается.
+    order_number = serializers.IntegerField(source="receipt.order_number", read_only=True)
 
     class Meta:
         model = InventoryLog
         fields = [
             "id",
             "type",
+            "type_display",
             "material",
             "material_name",
+            "material_unit",
             "quantity_changed",
             "actual_price",
             "reason",
+            "receipt",
+            "order_number",
             "created_by",
             "created_by_username",
             "happened_at",
