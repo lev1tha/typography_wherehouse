@@ -98,6 +98,15 @@ class Material(models.Model):
         default=Decimal("0"),
         help_text=_("Стоимость работы резки за погонный метр для этого материала"),
     )
+    # Откуда возят материал — колонка «производство» в складской таблице
+    # заказчика (Бишкек, Глобал, …). Свободный текст: список поставщиков
+    # меняется, а заводить под него справочник смысла нет.
+    production = models.CharField(
+        _("производство"),
+        max_length=120,
+        blank=True,
+        help_text=_("Откуда возят: напр. Бишкек, Глобал"),
+    )
     # Материал, который больше не продаём. Удалить его нельзя, если по нему были
     # продажи или поступления (иначе поедут суммы в старых чеках и отчётах),
     # поэтому прячем из каталога и кассы, а историю оставляем целой.
@@ -150,6 +159,47 @@ class Material(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class MaterialMonthOpening(models.Model):
+    """Остаток материала на начало месяца — вводится РУКАМИ, как в Excel заказчика.
+
+    Заказчик ведёт склад листами и каждый месяц переносит остаток с прошлого
+    месяца сам. Считать его откатом от текущего остатка нельзя: это требует,
+    чтобы каждое движение склада за всю историю было записано без единой дыры,
+    а на практике цифры разъезжаются и в таблице появляются отрицательные
+    остатки. Дальше всё считается по формуле листа:
+    ``начало + поступление − проданные = конец``.
+    """
+
+    material = models.ForeignKey(
+        Material, on_delete=models.CASCADE, related_name="month_openings"
+    )
+    year = models.PositiveSmallIntegerField(_("год"))
+    month = models.PositiveSmallIntegerField(_("месяц"))
+    # В той же единице, в которой материал считают в таблице: листы, если у
+    # материала задана площадь листа, иначе его собственная единица.
+    quantity = models.DecimalField(
+        _("остаток на начало месяца"), max_digits=12, decimal_places=2, default=Decimal("0")
+    )
+    updated_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="month_openings",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = _("остаток на начало месяца")
+        verbose_name_plural = _("остатки на начало месяца")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["material", "year", "month"], name="unique_material_month_opening"
+            )
+        ]
+        ordering = ["-year", "-month"]
+
+    def __str__(self) -> str:
+        return f"{self.material.name} {self.month:02d}.{self.year}: {self.quantity}"
 
 
 class MaterialImage(models.Model):

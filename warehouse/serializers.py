@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import InventoryLog, Material, MaterialImage, Roll
+from .models import InventoryLog, Material, MaterialMonthOpening, MaterialImage, Roll
 
 
 class MaterialImageSerializer(serializers.ModelSerializer):
@@ -40,6 +40,7 @@ class MaterialSerializer(serializers.ModelSerializer):
             "wholesale_price",
             "wholesale_min_qty",
             "cut_rate_per_pm",
+            "production",
             "sqm_price",
             "sheets_remaining",
             "is_below_critical",
@@ -208,3 +209,23 @@ class RollIntakeSerializer(serializers.Serializer):
                     "Для листа укажите ширину, высоту и количество листов."
                 )
         return attrs
+
+
+class MaterialMonthOpeningSerializer(serializers.ModelSerializer):
+    """Остаток материала на начало месяца — ручной ввод, как в Excel."""
+
+    material_name = serializers.CharField(source="material.name", read_only=True)
+
+    class Meta:
+        model = MaterialMonthOpening
+        fields = ["id", "material", "material_name", "year", "month", "quantity", "updated_at"]
+        read_only_fields = ["updated_at"]
+        # Уникальность (материал, год, месяц) в модели есть, но проверять её
+        # здесь нельзя: вьюха делает upsert, а валидатор отклонял бы повторный
+        # ввод той же клетки как «уже существует».
+        validators = []
+
+    def validate_month(self, value):
+        if not 1 <= value <= 12:
+            raise serializers.ValidationError("Месяц должен быть от 1 до 12.")
+        return value

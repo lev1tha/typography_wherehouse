@@ -11,9 +11,10 @@ from rest_framework.response import Response
 from accounts.permissions import IsAdmin, IsAdminOrReadOnly
 from audit.models import AuditLog
 
-from .models import InventoryLog, Material, MaterialImage, Roll
+from .models import InventoryLog, Material, MaterialImage, MaterialMonthOpening, Roll
 from .rolls import receive_lot
 from .serializers import (
+    MaterialMonthOpeningSerializer,
     AdjustmentSerializer,
     InventoryLogSerializer,
     MaterialImageSerializer,
@@ -229,3 +230,27 @@ class RollViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     filterset_fields = ["material"]
     ordering = ["received_at"]
+
+
+class MaterialMonthOpeningViewSet(viewsets.ModelViewSet):
+    """Остаток материала на начало месяца — ручной ввод, как в Excel заказчика.
+
+    Создание делает upsert по (материал, год, месяц): фронт просто отправляет
+    значение клетки, не выясняя предварительно, заводили её раньше или нет.
+    """
+
+    queryset = MaterialMonthOpening.objects.select_related("material")
+    serializer_class = MaterialMonthOpeningSerializer
+    permission_classes = [IsAdmin]
+    filterset_fields = ["material", "year", "month"]
+    pagination_class = None
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        row, _created = MaterialMonthOpening.objects.update_or_create(
+            material=data["material"], year=data["year"], month=data["month"],
+            defaults={"quantity": data["quantity"], "updated_by": request.user},
+        )
+        return Response(self.get_serializer(row).data, status=status.HTTP_200_OK)
