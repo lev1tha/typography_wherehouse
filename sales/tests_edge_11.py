@@ -21,7 +21,7 @@ class _Base(APITestCase):
         # Оплата долга и откат оплаты доступны только админу.
         self.client.force_authenticate(self.admin)
         self.material = Material.objects.create(
-            name="Acryl u11", category="Plastic", unit="SQM",
+            name="Acryl u11", unit="SQM",
             quantity=Decimal("100"), price_per_unit=Decimal("3700"),
         )
         self.customer = Client.objects.create(

@@ -30,14 +30,14 @@ class EdgeRefundTests(APITestCase):
 
         # Whole-piece-capable area material (sold by sheet => area deduction).
         self.acrylic = Material.objects.create(
-            name="Акрил 3мм", category="Акрил", unit="SQM",
+            name="Акрил 3мм", unit="SQM",
             quantity=Decimal("100"), price_per_unit=Decimal("0"),
             price_per_sqm=Decimal("1400"), piece_price=Decimal("3700"),
             piece_area=Decimal("2.00"),
         )
         # Simple piece material for multi-line / partial-refund scenarios.
         self.bolt = Material.objects.create(
-            name="Крепёж", category="Фурнитура", unit="PIECE",
+            name="Крепёж", unit="PIECE",
             quantity=Decimal("50"), price_per_unit=Decimal("100"),
         )
         self.customer = Client.objects.create(

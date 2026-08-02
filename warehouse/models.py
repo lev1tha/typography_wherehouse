@@ -1,19 +1,66 @@
 from decimal import Decimal
 
 from django.db import models
+from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
+
+
+class MaterialType(models.Model):
+    """Тип материала: Форекс, Акрил, Оргстекло, Алюкобонд, Ромарк.
+
+    Раньше типа не было вовсе: он был зашит в название («форекс 8мм»), а отчёт
+    по резке угадывал его подстрокой. На реальной номенклатуре угадывание
+    ошибалось — «синий бишкек», «день ночь» и «салатовый» это акрил, но в
+    отчёте они падали в «Прочее».
+
+    Справочник, а не перечисление в коде: новый тип админ заводит сам, как
+    вид расхода в финотчёте.
+    """
+
+    code = models.SlugField(
+        _("код"), max_length=40, unique=True, allow_unicode=True,
+        help_text=_("Внутренний ключ. У встроенных постоянный, у своих — из названия."),
+    )
+    name = models.CharField(_("название"), max_length=80)
+    # Встроенный тип нельзя удалить: на нём висит каталог и разбивка отчётов.
+    is_builtin = models.BooleanField(_("встроенный"), default=False)
+    position = models.PositiveIntegerField(_("порядок"), default=100)
+    is_archived = models.BooleanField(_("скрыт"), default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("тип материала")
+        verbose_name_plural = _("типы материалов")
+        ordering = ["position", "name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+    @staticmethod
+    def make_code(name: str) -> str:
+        base = slugify(name or "", allow_unicode=True)[:32] or "tip"
+        code, n = base, 2
+        while MaterialType.objects.filter(code=code).exists():
+            code = f"{base}-{n}"
+            n += 1
+        return code
 
 
 class Material(models.Model):
     """Raw material stocked in the warehouse (paper, ink, cardboard, ...).
 
-    `name` and `category` are registered for translation in translation.py so
-    the catalogue can be served in RU / KY / EN.
+    `name` is registered for translation in translation.py so the catalogue can
+    be served in RU / KY / EN.
 
     Roll materials (``is_roll_material=True``) are received as rolls (lots) and
     sold by area (кв.м). Their ``quantity`` is the sum of remaining roll areas,
     ``price_per_unit`` is the retail price per кв.м, and ``purchase_price`` the
     cost per кв.м. See the ``Roll`` model and warehouse.rolls.
+
+    Свойства материала — тип, толщина, цвет, артикул, размер листа — лежат в
+    отдельных полях, а не в названии. Заказчик писал их строкой («Орг стекло
+    2мм 180*121см», «ЖЕЛТЫЙ лимон 2,5ММ 237»), поэтому ни отфильтровать по
+    толщине, ни вывести площадь листа из размера было нельзя.
     """
 
     class Unit(models.TextChoices):
@@ -24,7 +71,27 @@ class Material(models.Model):
         LITER = "LITER", _("л")
 
     name = models.CharField(_("название"), max_length=255)
-    category = models.CharField(_("категория"), max_length=120, db_index=True)
+    # --- разобранная номенклатура -------------------------------------------
+    type = models.ForeignKey(
+        MaterialType, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="materials", verbose_name=_("тип"),
+    )
+    thickness_mm = models.DecimalField(
+        _("толщина, мм"), max_digits=6, decimal_places=2, null=True, blank=True,
+    )
+    color = models.CharField(_("цвет"), max_length=80, blank=True, db_index=True)
+    article = models.CharField(
+        _("артикул"), max_length=40, blank=True,
+        help_text=_("Код цвета поставщика, напр. 237"),
+    )
+    # Размер листа в метрах. Из него считается площадь листа — раньше её
+    # вводили руками, хотя она выводится из размера.
+    sheet_width = models.DecimalField(
+        _("ширина листа, м"), max_digits=6, decimal_places=3, null=True, blank=True,
+    )
+    sheet_height = models.DecimalField(
+        _("высота листа, м"), max_digits=6, decimal_places=3, null=True, blank=True,
+    )
     unit = models.CharField(
         _("единица измерения"), max_length=10, choices=Unit.choices, default=Unit.PIECE
     )
@@ -34,7 +101,7 @@ class Material(models.Model):
         help_text=_("Приходит рулонами, продаётся по кв.м, списывается из партий"),
     )
     quantity = models.DecimalField(
-        _("остаток"), max_digits=12, decimal_places=2, default=Decimal("0")
+        _("остаток"), max_digits=14, decimal_places=4, default=Decimal("0")
     )
     critical_balance = models.DecimalField(
         _("критический остаток"),
@@ -71,11 +138,11 @@ class Material(models.Model):
         help_text=_("Фикс. цена за целую штуку. 0 — продажа штукой недоступна"),
     )
     piece_area = models.DecimalField(
-        _("площадь штуки, кв.м"),
+        _("площадь листа, кв.м"),
         max_digits=12,
-        decimal_places=2,
+        decimal_places=4,
         default=Decimal("0"),
-        help_text=_("Площадь одного листа/рулона — списывается при продаже «целиком»"),
+        help_text=_("Считается из размера листа; вводится вручную только без размера"),
     )
     wholesale_price = models.DecimalField(
         _("оптовая цена за лист"),
@@ -118,6 +185,35 @@ class Material(models.Model):
         verbose_name = _("материал")
         verbose_name_plural = _("материалы")
         ordering = ["name"]
+
+    def save(self, *args, **kwargs):
+        # Площадь листа выводится из его размера. Раньше её вводили руками,
+        # хотя размер известен: лишнее поле в форме и лишний повод ошибиться.
+        if self.sheet_width and self.sheet_height:
+            self.piece_area = (self.sheet_width * self.sheet_height).quantize(
+                Decimal("0.0001")
+            )
+        if not (self.name or "").strip():
+            self.name = self.suggested_name()
+        super().save(*args, **kwargs)
+
+    def suggested_name(self) -> str:
+        """Название из полей: «Акрил белый 2,5 мм 237 · 1.22×2.44».
+
+        Подставляется в форму, но остаётся редактируемым: у заказчика свои
+        привычные подписи («синий бишкек»), и отнимать их нельзя.
+        """
+        def trim(value):
+            text = f"{value:f}".rstrip("0").rstrip(".")
+            return text.replace(".", ",")
+
+        parts = [self.type.name if self.type_id else "", self.color]
+        if self.thickness_mm:
+            parts.append(f"{trim(self.thickness_mm)} мм")
+        parts.append(self.article)
+        if self.sheet_width and self.sheet_height:
+            parts.append(f"{trim(self.sheet_width)}×{trim(self.sheet_height)}")
+        return " ".join(p for p in parts if p).strip()
 
     @property
     def is_below_critical(self) -> bool:
@@ -243,8 +339,8 @@ class InventoryLog(models.Model):
     )
     quantity_changed = models.DecimalField(
         _("изменение количества"),
-        max_digits=12,
-        decimal_places=2,
+        max_digits=14,
+        decimal_places=4,
         help_text=_("Положительное — приход, отрицательное — списание"),
     )
     actual_price = models.DecimalField(
@@ -297,10 +393,10 @@ class Roll(models.Model):
     height = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
     sheet_count = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     initial_area = models.DecimalField(
-        _("площадь при поступлении, кв.м"), max_digits=12, decimal_places=2
+        _("площадь при поступлении, кв.м"), max_digits=14, decimal_places=4
     )
     remaining_area = models.DecimalField(
-        _("остаток, кв.м"), max_digits=12, decimal_places=2
+        _("остаток, кв.м"), max_digits=14, decimal_places=4
     )
     purchase_cost = models.DecimalField(
         _("себестоимость рулона"), max_digits=12, decimal_places=2,

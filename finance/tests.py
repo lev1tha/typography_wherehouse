@@ -403,7 +403,7 @@ class CogsTests(APITestCase):
         self.client.force_authenticate(self.admin)
 
         self.mat = Material.objects.create(
-            name="Акрил", category="Акрил", unit=Material.Unit.SQM,
+            name="Акрил", unit=Material.Unit.SQM,
             is_roll_material=True, price_per_sqm=Decimal("1000"),
         )
         # Партия: 10 кв.м за 2000 → 200 сом/кв.м себестоимость.
@@ -509,7 +509,7 @@ class MaterialsBlockTests(APITestCase):
         entry("MATERIAL_DEBT", "700", timezone.localdate())
         # Остаток на конец = склад по закупочной цене: 10 × 200 = 2000.
         Material.objects.create(
-            name="Акрил", category="Акрил", quantity=Decimal("10"),
+            name="Акрил", quantity=Decimal("10"),
             purchase_price=Decimal("200"),
         )
 
@@ -624,7 +624,7 @@ class MaterialStockReportTests(APITestCase):
         # Лист 1×2 м = 2 кв.м. Заказчик ведёт склад листами, поэтому отчёт
         # пересчитывает кв.м в листы.
         self.material = Material.objects.create(
-            name="Форекс 8мм", category="Форекс", unit="SQM", is_roll_material=True,
+            name="Форекс 8мм", unit="SQM", is_roll_material=True,
             piece_area=Decimal("2"), purchase_price=Decimal("100"),
             price_per_sqm=Decimal("200"), piece_price=Decimal("400"),
             production="Бишкек",
@@ -809,7 +809,7 @@ class AutoComputedInputsTests(APITestCase):
         self.client.force_authenticate(self.admin)
         FinanceSettings.objects.update_or_create(pk=1, defaults={"stock_start": None})
         self.material = Material.objects.create(
-            name="Форекс 8мм", category="Форекс", unit="SQM", is_roll_material=True,
+            name="Форекс 8мм", unit="SQM", is_roll_material=True,
             piece_area=Decimal("2"), purchase_price=Decimal("50"),
         )
 

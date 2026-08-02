@@ -25,7 +25,7 @@ class CheckoutClientAPITests(APITestCase):
         )
         self.client.force_authenticate(self.user)
         self.material = Material.objects.create(
-            name="Акрил", category="Пластик", unit="SQM",
+            name="Акрил", unit="SQM",
             quantity=Decimal("100"), price_per_unit=Decimal("360"),
         )
         self.referrer = Client.objects.create(
@@ -121,7 +121,7 @@ class CuttingPricingAPITests(APITestCase):
         self.client.force_authenticate(self.user)
         # Area material sold both by кв.м and whole sheet.
         self.acrylic = Material.objects.create(
-            name="Акрил 3мм", category="Акрил", unit="SQM",
+            name="Акрил 3мм", unit="SQM",
             quantity=Decimal("100"), price_per_unit=Decimal("0"),
             price_per_sqm=Decimal("1400"), piece_price=Decimal("3700"),
             piece_area=Decimal("2.98"), cut_rate_per_pm=Decimal("20"),

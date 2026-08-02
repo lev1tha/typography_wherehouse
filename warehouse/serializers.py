@@ -1,6 +1,13 @@
 from rest_framework import serializers
 
-from .models import InventoryLog, Material, MaterialMonthOpening, MaterialImage, Roll
+from .models import (
+    InventoryLog,
+    Material,
+    MaterialImage,
+    MaterialMonthOpening,
+    MaterialType,
+    Roll,
+)
 
 
 class MaterialImageSerializer(serializers.ModelSerializer):
@@ -21,13 +28,23 @@ class MaterialSerializer(serializers.ModelSerializer):
     stock_value = serializers.DecimalField(
         max_digits=14, decimal_places=2, read_only=True
     )
+    type_name = serializers.CharField(source="type.name", read_only=True)
+    # Подсказка для формы: как назвался бы материал по заполненным полям.
+    suggested_name = serializers.CharField(read_only=True)
 
     class Meta:
         model = Material
         fields = [
             "id",
             "name",
-            "category",
+            "type",
+            "type_name",
+            "thickness_mm",
+            "color",
+            "article",
+            "sheet_width",
+            "sheet_height",
+            "suggested_name",
             "unit",
             "is_roll_material",
             "quantity",
@@ -229,3 +246,23 @@ class MaterialMonthOpeningSerializer(serializers.ModelSerializer):
         if not 1 <= value <= 12:
             raise serializers.ValidationError("Месяц должен быть от 1 до 12.")
         return value
+
+
+class MaterialTypeSerializer(serializers.ModelSerializer):
+    """Тип материала: Форекс, Акрил, Оргстекло… Справочник, а не список в коде."""
+
+    materials_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MaterialType
+        fields = ["id", "code", "name", "is_builtin", "position", "is_archived", "materials_count"]
+        read_only_fields = ["code", "is_builtin"]
+
+    def get_materials_count(self, obj) -> int:
+        annotated = getattr(obj, "materials_total", None)
+        return annotated if annotated is not None else obj.materials.count()
+
+    def create(self, validated_data):
+        validated_data["code"] = MaterialType.make_code(validated_data.get("name", ""))
+        validated_data["is_builtin"] = False
+        return super().create(validated_data)

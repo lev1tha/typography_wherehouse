@@ -19,6 +19,7 @@
 В конце команда печатает диагностику: где цифры уже разъезжаются и почему.
 Это не украшение, а главный смысл — увидеть расхождения на данных.
 """
+import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -37,6 +38,7 @@ from warehouse.models import (
     InventoryLog,
     Material,
     MaterialMonthOpening,
+    MaterialType,
     Roll,
 )
 from warehouse.rolls import receive_lot
@@ -230,11 +232,15 @@ class Command(BaseCommand):
             material, _ = Material.objects.update_or_create(
                 name=name,
                 defaults={
-                    "category": self._category(name),
+                    "type": self._type(name),
+                    "thickness_mm": self._thickness(name),
+                    "color": self._color(name),
+                    "article": self._article(name),
+                    "sheet_width": width,
+                    "sheet_height": height,
                     "unit": Material.Unit.SQM,
                     "is_roll_material": True,
                     "production": production,
-                    "piece_area": area,
                     "purchase_price": D(cost),
                     "price_per_sqm": D(retail),
                     "piece_price": (D(retail) * area).quantize(D("1")),
@@ -247,15 +253,43 @@ class Command(BaseCommand):
         return out
 
     @staticmethod
-    def _category(name: str) -> str:
+    def _type(name: str):
+        """Тип из справочника. У заказчика он зашит в название, но сама система
+        держит его отдельным полем — иначе ни отфильтровать, ни сгруппировать."""
         low = name.lower()
+        code = "ACRYL"
         if "форекс" in low:
-            return "Форекс"
-        if "акрил" in low:
-            return "Акрил"
-        if "стекло" in low:
-            return "Оргстекло"
-        return "Прочее"
+            code = "FOREX"
+        elif "стекло" in low:
+            code = "ORGGLASS"
+        elif "ромарк" in low:
+            code = "ROMARK"
+        return MaterialType.objects.filter(code=code).first()
+
+    @staticmethod
+    def _thickness(name: str):
+        """Толщина из названия — только для сида; в системе это отдельное поле."""
+        m = re.search(r"(\d+[.,]?\d*)\s*мм", name, re.IGNORECASE)
+        return D(m.group(1).replace(",", ".")) if m else None
+
+    @staticmethod
+    def _color(name: str) -> str:
+        for color in ("белый", "прозрачный", "жёлтый", "желтый", "красный", "салатовый",
+                      "бирюзовый", "синий", "чёрный", "черный", "голубой", "оранжевый",
+                      "зеленый", "зелёный", "серебро", "темно жёлтый", "темно желтый"):
+            if color in name.lower():
+                return color.capitalize()
+        return ""
+
+    @staticmethod
+    def _article(name: str) -> str:
+        """Артикул — три цифры В КОНЦЕ названия («ЖЕЛТЫЙ лимон 2,5ММ 237»).
+
+        Искать их где угодно нельзя: в «Орг стекло 2мм 180*121см» первым
+        совпадением идёт 180 из размера, и лист получает артикул из ширины.
+        """
+        m = re.search(r"(\d{3})\s*$", name)
+        return m.group(1) if m else ""
 
     def _clients(self) -> dict:
         out = {}
@@ -392,7 +426,8 @@ class Command(BaseCommand):
         material, _ = Material.objects.update_or_create(
             name=SUPPLY_NAME,
             defaults={
-                "category": "Прочее", "unit": Material.Unit.PIECE,
+                "type": MaterialType.objects.filter(code="OTHER").first(),
+                "unit": Material.Unit.PIECE,
                 "is_roll_material": False, "production": "Бишкек",
                 "purchase_price": D(SUPPLY_PRICE), "price_per_unit": D(SUPPLY_RETAIL),
                 "critical_balance": D("50"),
@@ -515,20 +550,28 @@ class Command(BaseCommand):
         w("   ответит «недостаточно». Этот сид пришлось чинить именно так —")
         w("   заводить настоящие партии под остаток на начало.")
 
-        # 5. Целые листы не переживают путешествие через кв.м.
+        # 5. Целые листы должны оставаться целыми после пути через кв.м.
         w("")
-        w("5. Приняли целое число листов — в таблице дробь:")
-        for name in ("белый акрил 2,5 мм", "орг стекло 1,3мм", "ромарк серебро"):
+        w("5. Целое число листов после пересчёта через кв.м:")
+        bad = []
+        for name in materials:
             material = fresh[name]
             sheets = sum((D(n) for d, mat, n in INTAKES if mat == name), D("0"))
             if not sheets:
                 continue
             got = received_by.get(material.id, {}).get(key, D("0"))
-            w(f"   {name:26} принято {sheets:>5} -> показано {got:8.2f}")
-        w("   Склад хранится в кв.м, а площадь листа округлена до сотых")
-        w("   (1.22 × 2.44 = 2.9768, в базе 2.98 — piece_area/initial_area имеют")
-        w("   decimal_places=2). Пересчёт листы → кв.м → листы теряет ~0.1%.")
-        w("   Заказчик сверяет эту колонку со своим Excel и видит 49,95 вместо 50.")
+            mark = "ok" if got == sheets else "РАСХОЖДЕНИЕ"
+            if got != sheets:
+                bad.append(name)
+            w(f"   {name:26} принято {sheets:>5} -> показано {got:8.2f}  {mark}")
+        if bad:
+            w("   Склад хранится в кв.м; если площадь листа округлена грубее, чем")
+            w("   нужно, целые листы превращаются в дробь именно в той колонке,")
+            w("   которую заказчик сверяет со своим Excel.")
+        else:
+            w("   Сходится. Площадь листа считается из размера и хранится с")
+            w("   точностью до десятитысячных: 1.22 × 2.44 = 2.9768, и 50 листов")
+            w("   возвращаются как ровно 50. При двух знаках выходило 49.95.")
 
         w("")
         w(f"Открыть: Склад → «Остатки по месяцам», выбрать {month.strftime('%m.%Y')};")

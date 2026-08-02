@@ -11,7 +11,16 @@ from django.db import transaction
 
 from accounts.models import User
 from services.models import PricingSettings, PrintingService, ServiceRecipe
-from warehouse.models import Material
+from warehouse.models import Material, MaterialType
+
+
+def _type(key):
+    """Тип материала из справочника — по коду или по названию категории."""
+    return (
+        MaterialType.objects.filter(code=key).first()
+        or MaterialType.objects.filter(name=key).first()
+        or MaterialType.objects.filter(code="OTHER").first()
+    )
 
 
 class Command(BaseCommand):
@@ -47,7 +56,7 @@ class Command(BaseCommand):
         paper, _ = Material.objects.get_or_create(
             name="Бумага офсетная",
             defaults={
-                "category": "Бумага",
+                "type": _type("OTHER"),
                 "quantity": Decimal("500"),
                 "critical_balance": Decimal("50"),
                 "purchase_price": Decimal("30"),
@@ -57,7 +66,7 @@ class Command(BaseCommand):
         Material.objects.get_or_create(
             name="Картон матовый",
             defaults={
-                "category": "Картон",
+                "type": _type("OTHER"),
                 "quantity": Decimal("3"),
                 "critical_balance": Decimal("10"),
                 "purchase_price": Decimal("80"),
@@ -67,7 +76,7 @@ class Command(BaseCommand):
         Material.objects.get_or_create(
             name="Краска чёрная",
             defaults={
-                "category": "Краска",
+                "type": _type("OTHER"),
                 "quantity": Decimal("40"),
                 "critical_balance": Decimal("5"),
                 "purchase_price": Decimal("250"),
@@ -78,13 +87,13 @@ class Command(BaseCommand):
         # Consumable materials (non-area): glue for volumetric letters, fasteners.
         glue, _ = Material.objects.get_or_create(
             name="Клей",
-            defaults={"category": "Расходники", "unit": Material.Unit.LITER,
+            defaults={"type": _type("OTHER"), "unit": Material.Unit.LITER,
                       "quantity": Decimal("20"), "critical_balance": Decimal("3"),
                       "purchase_price": Decimal("400"), "price_per_unit": Decimal("0")},
         )
         fasteners, _ = Material.objects.get_or_create(
             name="Крепёж",
-            defaults={"category": "Расходники", "unit": Material.Unit.PIECE,
+            defaults={"type": _type("OTHER"), "unit": Material.Unit.PIECE,
                       "quantity": Decimal("500"), "critical_balance": Decimal("50"),
                       "purchase_price": Decimal("10"), "price_per_unit": Decimal("0")},
         )
@@ -118,7 +127,7 @@ class Command(BaseCommand):
         # A self-adhesive roll material (was used for interior mounting demos).
         film, _ = Material.objects.get_or_create(
             name="Самоклейка",
-            defaults={"category": "Плёнка", "unit": Material.Unit.SQM,
+            defaults={"type": _type("FILM"), "unit": Material.Unit.SQM,
                       "is_roll_material": True, "critical_balance": Decimal("5")},
         )
         if not film.price_per_sqm:
@@ -128,7 +137,7 @@ class Command(BaseCommand):
         # Real ЧПУ catalogue (prices from the dealer report, median per кв.м and
         # cutting rate per погонный метр). Area materials: sold by кв.м (вырезка)
         # or whole sheet (piece_price), cut work billed per пог.м at cut_rate.
-        # (category, name, sqm_price, cut_rate_per_pm, piece_price, piece_area)
+        # (тип, name, sqm_price, cut_rate_per_pm, piece_price, piece_area)
         D = Decimal
         SHEET_AREA = D("2.98")  # лист 1.22×2.44
         catalogue = [
@@ -156,7 +165,7 @@ class Command(BaseCommand):
             m, created = Material.objects.get_or_create(
                 name=name,
                 defaults={
-                    "category": cat, "unit": Material.Unit.SQM,
+                    "type": _type(cat), "unit": Material.Unit.SQM,
                     "is_roll_material": True, "critical_balance": D("2"),
                     "purchase_price": D("0"),
                     "price_per_sqm": D(sqm), "cut_rate_per_pm": D(cut),
@@ -164,12 +173,12 @@ class Command(BaseCommand):
                 },
             )
             if not created and not m.price_per_sqm:
-                m.category = cat
+                m.type = _type(cat)
                 m.price_per_sqm = D(sqm)
                 m.cut_rate_per_pm = D(cut)
                 m.piece_price = D(piece)
                 m.piece_area = area
-                m.save(update_fields=["category", "price_per_sqm", "cut_rate_per_pm", "piece_price", "piece_area"])
+                m.save(update_fields=["type", "price_per_sqm", "cut_rate_per_pm", "piece_price", "piece_area"])
 
         # Shop-wide pricing settings (master's wage % of cutting work).
         PricingSettings.objects.get_or_create(pk=1, defaults={"master_commission_percent": Decimal("4")})
@@ -182,16 +191,13 @@ class Command(BaseCommand):
         language switcher translates dynamic content, not just the chrome."""
         materials = {
             "Бумага офсетная": {
-                "name_ky": "Офсеттик кагаз", "name_en": "Offset paper",
-                "category_ky": "Кагаз", "category_en": "Paper",
+                "name_ky": "Офсеттик кагаз", "name_en": "Offset paper", "category_en": "Paper",
             },
             "Картон матовый": {
-                "name_ky": "Күңүрт картон", "name_en": "Matte cardboard",
-                "category_ky": "Картон", "category_en": "Cardboard",
+                "name_ky": "Күңүрт картон", "name_en": "Matte cardboard", "category_en": "Cardboard",
             },
             "Краска чёрная": {
-                "name_ky": "Кара боёк", "name_en": "Black ink",
-                "category_ky": "Боёк", "category_en": "Ink",
+                "name_ky": "Кара боёк", "name_en": "Black ink", "category_en": "Ink",
             },
         }
         for name_ru, tr in materials.items():

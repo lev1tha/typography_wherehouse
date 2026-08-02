@@ -14,7 +14,6 @@ import { useUI } from "../../components/UIProvider.jsx";
 
 const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
 const q2 = (n) => Number(n || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
-const CAT = { forex: "Форекс", alukobond: "Алюкобонд", acryl: "Акрил", other: "Прочее" };
 
 // Границы выбранного месяца. month = null → весь период (без дат).
 function periodParams({ year, month }) {
@@ -114,7 +113,7 @@ export default function Finance() {
 
   function downloadCsv() {
     const head = [
-      t("common.name"), t("common.category"), t("finance.colOrders"),
+      t("common.name"), t("warehouse.type"), t("finance.colOrders"),
       t("finance.colSoldArea"), t("finance.colSoldSheets"),
       t("finance.colMatSum"), t("finance.colCutSum"), t("finance.colReceived"),
       t("finance.colStock"),
@@ -123,7 +122,7 @@ export default function Finance() {
     for (const r of filteredMat) {
       lines.push([
         r.name,
-        CAT[r.category] || r.category,
+        r.type || "",
         r.orders,
         Number(r.sold_area || 0).toFixed(2),
         Number(r.sold_sheets || 0).toFixed(2),
@@ -155,7 +154,7 @@ export default function Finance() {
   // прежняя таблица продаж и резки по материалам.
   const matColumns = [
     { key: "name", label: t("common.name"), render: (r) => <strong>{r.name}</strong> },
-    { key: "category", label: t("common.category"), render: (r) => <span className="chip">{CAT[r.category] || r.category}</span> },
+    { key: "type", label: t("warehouse.type"), render: (r) => (r.type ? <span className="chip">{r.type}</span> : "—") },
     { key: "orders", label: t("finance.colOrders") },
     { key: "sold_area", label: t("finance.colSoldArea"), render: (r) => q2(r.sold_area) },
     { key: "sold_sheets", label: t("finance.colSoldSheets"), render: (r) => q2(r.sold_sheets) },
@@ -403,11 +402,12 @@ export default function Finance() {
       <div className="card" style={{ marginTop: 16 }}>
         <h3>{t("finance.cuttingTitle")}</h3>
         <div className="stat-grid">
+          {/* Разбивка по типам из справочника: показываем только те, по которым
+              в периоде реально резали, — пустые карточки ничего не сообщают. */}
           <Stat label={t("finance.cuttingTotal")} value={som(report.cutting?.total)} />
-          <Stat label="Форекс" value={som(report.cutting?.forex)} />
-          <Stat label="Алюкобонд" value={som(report.cutting?.alukobond)} />
-          <Stat label="Акрил" value={som(report.cutting?.acryl)} />
-          <Stat label="Прочее" value={som(report.cutting?.other)} />
+          {(report.cutting?.rows || []).map((row) => (
+            <Stat key={row.id ?? "none"} label={row.name} value={som(row.amount)} />
+          ))}
         </div>
       </div>
 

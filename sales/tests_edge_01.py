@@ -26,7 +26,7 @@ class EdgeCuttingTests(APITestCase):
         )
         self.client.force_authenticate(self.user)
         self.acrylic = Material.objects.create(
-            name="Акрил 3мм", category="Акрил", unit="SQM",
+            name="Акрил 3мм", unit="SQM",
             quantity=Decimal("100"), price_per_unit=Decimal("0"),
             price_per_sqm=Decimal("1400"), piece_price=Decimal("3700"),
             piece_area=Decimal("2.98"), cut_rate_per_pm=Decimal("20"),
@@ -279,7 +279,7 @@ class NoPrepaymentMeansDebtTests(APITestCase):
         )
         self.client.force_authenticate(self.store)
         self.material = Material.objects.create(
-            name="Лист", category="Пластик", unit="SQM",
+            name="Лист", unit="SQM",
             quantity=Decimal("100"), price_per_unit=Decimal("1000"),
         )
 

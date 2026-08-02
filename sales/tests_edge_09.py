@@ -40,7 +40,7 @@ class EdgeRolesTests(APITestCase):
 
         # A non-roll material for supply/adjust/write-off payloads.
         self.material = Material.objects.create(
-            name="Бумага", category="Бумага", unit="PIECE",
+            name="Бумага", unit="PIECE",
             quantity=Decimal("50"), price_per_unit=Decimal("10"),
             purchase_price=Decimal("5"),
         )

@@ -21,13 +21,13 @@ class EdgeStockRollTests(APITestCase):
             type=Client.Type.PHYSICAL, full_name="Buyer", phone="+790001"
         )
         self.mat = Material.objects.create(
-            name="Banner", category="Rolls", unit=Material.Unit.SQM,
+            name="Banner", unit=Material.Unit.SQM,
             is_roll_material=True, quantity=Decimal("0"),
             price_per_sqm=Decimal("300"), piece_price=Decimal("1000"),
             piece_area=Decimal("2.00"),
         )
         self.plain = Material.objects.create(
-            name="Tape", category="Misc", unit=Material.Unit.PIECE,
+            name="Tape", unit=Material.Unit.PIECE,
             quantity=Decimal("5"), price_per_unit=Decimal("50"),
         )
 

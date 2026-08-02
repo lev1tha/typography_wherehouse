@@ -28,7 +28,7 @@ class EdgeAddItemsCustomerTests(APITestCase):
         )
         # Material продаётся листами: piece_area задаёт списание по площади.
         self.acrylic = Material.objects.create(
-            name="Акрил 3мм edge", category="Акрил", unit="SQM",
+            name="Акрил 3мм edge", unit="SQM",
             quantity=Decimal("100"), price_per_unit=Decimal("0"),
             price_per_sqm=Decimal("1400"), piece_price=Decimal("3700"),
             piece_area=Decimal("2.00"),

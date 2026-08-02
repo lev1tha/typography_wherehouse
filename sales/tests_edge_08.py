@@ -30,7 +30,6 @@ class EdgeReceiptStatsTests(APITestCase):
         # A simple piece material (3700/sheet) for material-only receipts.
         self.material = Material.objects.create(
             name="Акрил лист",
-            category="Акрил",
             unit=Material.Unit.SQM,
             quantity=Decimal("100"),
             price_per_unit=Decimal("0"),

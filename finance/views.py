@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 
 from accounts.permissions import IsAdmin
 from sales.models import Receipt, TransactionItem
-from warehouse.models import InventoryLog, Material
+from warehouse.models import InventoryLog, Material, MaterialType
 
 from .material_sheet import (
     collect_flows,
@@ -49,18 +49,6 @@ class FinanceUnlockView(APIView):
         if expected and secrets.compare_digest(supplied, expected):
             return Response({"ok": True})
         return Response({"detail": "Неверный пароль."}, status=status.HTTP_403_FORBIDDEN)
-
-
-def _material_category(material):
-    """Map a material to a cutting-report category by its name."""
-    n = (getattr(material, "name", "") or "").lower()
-    if "форекс" in n or "forex" in n:
-        return "forex"
-    if "алюк" in n or "aluk" in n or "aluc" in n:
-        return "alukobond"
-    if "акрил" in n or "acryl" in n or "акрел" in n:
-        return "acryl"
-    return "other"
 
 
 def _parse_date(value):
@@ -393,7 +381,11 @@ class FinanceReportView(APIView):
 
         # Сумма резки по материалам: выручку услуги «Резка» каждого чека относим
         # к категории материала этого чека (Форекс / Алюкобонд / Акрил / Прочее).
-        cutting = {"total": Decimal("0"), "forex": Decimal("0"), "alukobond": Decimal("0"), "acryl": Decimal("0"), "other": Decimal("0")}
+        # Разбивка идёт по ТИПУ материала из справочника. Раньше тип угадывался
+        # подстрокой в названии и на реальной номенклатуре ошибался: «синий
+        # бишкек», «день ночь» и «салатовый» — акрил, а падали в «Прочее».
+        cut_by_type = defaultdict(lambda: Decimal("0"))
+        cutting_total = Decimal("0")
         cut_receipts = (
             by_created(
                 Receipt.objects.filter(
@@ -403,7 +395,7 @@ class FinanceReportView(APIView):
                 ).exclude(status=Receipt.Status.CANCELLED)
             )
             .distinct()
-            .prefetch_related("items__material", "items__service")
+            .prefetch_related("items__material__type", "items__service")
         )
         for r in cut_receipts:
             items = list(r.items.all())
@@ -426,8 +418,21 @@ class FinanceReportView(APIView):
                 ),
                 None,
             )
-            cutting["total"] += cut_rev
-            cutting[_material_category(mat) if mat else "other"] += cut_rev
+            cutting_total += cut_rev
+            cut_by_type[mat.type_id if mat and mat.type_id else None] += cut_rev
+
+        # Строки — только типы, по которым в периоде что-то резали, плюс
+        # «Без типа», если такой материал попался.
+        type_names = dict(MaterialType.objects.values_list("id", "name"))
+        cutting = {
+            "total": cutting_total,
+            "rows": [
+                {"id": type_id, "name": type_names.get(type_id) or "Без типа", "amount": amount}
+                for type_id, amount in sorted(
+                    cut_by_type.items(), key=lambda kv: -kv[1]
+                )
+            ],
+        }
 
         return Response(
             {
@@ -750,7 +755,7 @@ class MaterialReportView(APIView):
                 {
                     "id": m.id,
                     "name": m.name,
-                    "category": _material_category(m),
+                    "type": m.type.name if m.type_id else "",
                     "production": m.production,
                     "orders": len(a["orders"]) if a else 0,
                     "sold_area": a["area"] if a else Decimal("0"),

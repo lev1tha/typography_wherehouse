@@ -187,7 +187,7 @@ class ClientListFilteringTests(APITestCase):
         )
         self.client.force_authenticate(self.staff)
 
-        self.mat = Material.objects.create(name="М", category="К", quantity=Decimal("100"))
+        self.mat = Material.objects.create(name="М", quantity=Decimal("100"))
         self.a = Client.objects.create(
             type=Client.Type.PHYSICAL, full_name="Анара", phone="+996700111000"
         )

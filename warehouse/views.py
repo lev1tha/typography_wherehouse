@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.db.models import Count
 from django.shortcuts import get_object_or_404
 
 from rest_framework import status, viewsets
@@ -11,10 +12,18 @@ from rest_framework.response import Response
 from accounts.permissions import IsAdmin, IsAdminOrReadOnly
 from audit.models import AuditLog
 
-from .models import InventoryLog, Material, MaterialImage, MaterialMonthOpening, Roll
+from .models import (
+    InventoryLog,
+    Material,
+    MaterialImage,
+    MaterialMonthOpening,
+    MaterialType,
+    Roll,
+)
 from .rolls import receive_lot
 from .serializers import (
     MaterialMonthOpeningSerializer,
+    MaterialTypeSerializer,
     AdjustmentSerializer,
     InventoryLogSerializer,
     MaterialImageSerializer,
@@ -31,16 +40,16 @@ from .stock import apply_stock_change
 class MaterialViewSet(viewsets.ModelViewSet):
     """Warehouse catalogue. Read for all staff; create/edit for admins.
 
-    Supports ?search=<name> and ?ordering=name|quantity|price_per_unit|category
-    and ?category=<value>, matching the storekeeper/admin warehouse screens.
+    Supports ?search=<name|цвет|артикул>, ?ordering=name|quantity|price_per_unit
+    and filters ?type=&color=&thickness_mm=, matching the warehouse screens.
     """
 
     queryset = Material.objects.prefetch_related("images").all()
     serializer_class = MaterialSerializer
     permission_classes = [IsAdminOrReadOnly]
-    filterset_fields = ["category"]
-    search_fields = ["name", "category"]
-    ordering_fields = ["name", "quantity", "price_per_unit", "purchase_price", "category"]
+    filterset_fields = ["type", "color", "thickness_mm"]
+    search_fields = ["name", "color", "article"]
+    ordering_fields = ["name", "quantity", "price_per_unit", "purchase_price", "thickness_mm"]
     ordering = ["name"]
 
     def get_queryset(self):
@@ -254,3 +263,35 @@ class MaterialMonthOpeningViewSet(viewsets.ModelViewSet):
             defaults={"quantity": data["quantity"], "updated_by": request.user},
         )
         return Response(self.get_serializer(row).data, status=status.HTTP_200_OK)
+
+
+class MaterialTypeViewSet(viewsets.ModelViewSet):
+    """Справочник типов материала. Читают все, правит админ.
+
+    Встроенный тип удалить нельзя; тип, на котором висят материалы, скрывается,
+    а не удаляется — иначе каталог осиротел бы (FK стоит на PROTECT).
+    """
+
+    serializer_class = MaterialTypeSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    pagination_class = None
+
+    def get_queryset(self):
+        qs = MaterialType.objects.annotate(materials_total=Count("materials"))
+        if self.request.query_params.get("archived") == "1":
+            return qs
+        return qs.filter(is_archived=False)
+
+    def destroy(self, request, *args, **kwargs):
+        material_type = self.get_object()
+        if material_type.is_builtin:
+            return Response(
+                {"detail": "Встроенный тип удалить нельзя — его можно скрыть."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if material_type.materials.exists():
+            material_type.is_archived = True
+            material_type.save(update_fields=["is_archived"])
+            return Response({"archived": True}, status=status.HTTP_200_OK)
+        material_type.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

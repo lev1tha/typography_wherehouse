@@ -21,7 +21,7 @@ class EdgeWholesaleTests(APITestCase):
         self.client.force_authenticate(self.user)
         # Лист продаётся целиком (piece_price=3700), площадь листа 2.98 кв.м.
         self.acrylic = Material.objects.create(
-            name="Акрил 3мм опт", category="Акрил", unit="SQM",
+            name="Акрил 3мм опт", unit="SQM",
             quantity=Decimal("1000"), price_per_unit=Decimal("0"),
             price_per_sqm=Decimal("1400"), piece_price=Decimal("3700"),
             piece_area=Decimal("2.98"),

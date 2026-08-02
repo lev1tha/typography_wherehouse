@@ -12,10 +12,10 @@ class MaterialImageInline(admin.TabularInline):
 @admin.register(Material)
 class MaterialAdmin(TranslationAdmin):
     list_display = (
-        "name", "category", "quantity", "critical_balance",
+        "name", "type", "thickness_mm", "color", "quantity", "critical_balance",
         "price_per_unit", "price_per_sqm", "piece_price", "cut_rate_per_pm",
     )
-    list_filter = ("category",)
+    list_filter = ("type", "color")
     search_fields = ("name",)
     inlines = [MaterialImageInline]
 

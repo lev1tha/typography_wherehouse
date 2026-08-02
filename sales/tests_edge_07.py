@@ -7,7 +7,7 @@ from clients.models import Client
 from finance.models import ExpenseEntry, ExpenseKind, FinanceSettings
 from sales.models import Receipt, TransactionItem
 from services.models import PrintingService
-from warehouse.models import Material
+from warehouse.models import Material, MaterialType
 
 
 class EdgeFinanceTests(APITestCase):
@@ -35,14 +35,17 @@ class EdgeFinanceTests(APITestCase):
             type=Client.Type.PHYSICAL, full_name="Заказчик", phone="+700001"
         )
 
-        # Материалы разных категорий (категория определяется по name в _material_category).
+        # Тип материала теперь ПОЛЕ, а не угадывание по названию: раньше
+        # «синий бишкек» и «день ночь» — акрил — падали в «Прочее».
+        self.forex_type = MaterialType.objects.get(code="FOREX")
+        self.acryl_type = MaterialType.objects.get(code="ACRYL")
         self.forex = Material.objects.create(
-            name="Форекс 3мм", category="Пластик", unit="SQM",
+            name="Форекс 3мм", type=self.forex_type, unit="SQM",
             quantity=Decimal("10"), purchase_price=Decimal("50"),
             price_per_unit=Decimal("0"), piece_area=Decimal("2.98"),
         )
         self.acryl = Material.objects.create(
-            name="Акрил 5мм", category="Акрил", unit="SQM",
+            name="Акрил 5мм", type=self.acryl_type, unit="SQM",
             quantity=Decimal("3"), purchase_price=Decimal("100"),
             price_per_unit=Decimal("0"), piece_area=Decimal("2.98"),
         )
@@ -149,8 +152,8 @@ class EdgeFinanceTests(APITestCase):
         data = self._report()
         self.assertEqual(Decimal(str(data["client_debt"])), Decimal("500"))
 
-    # ---- cutting split by material category --------------------------------
-    def test_cutting_split_by_material_category(self):
+    # ---- cutting split by material type ------------------------------------
+    def test_cutting_split_by_material_type(self):
         # Чек с резкой + материал Форекс → резка идёт в forex.
         r1 = self._receipt(payment_status=Receipt.PaymentStatus.PAID, total="555",
                            amount_paid="555")
@@ -168,11 +171,14 @@ class EdgeFinanceTests(APITestCase):
 
         data = self._report()
         cutting = data["cutting"]
-        self.assertEqual(Decimal(str(cutting["forex"])), Decimal("200"))
-        self.assertEqual(Decimal(str(cutting["acryl"])), Decimal("150"))
-        self.assertEqual(Decimal(str(cutting["other"])), Decimal("90"))
-        self.assertEqual(Decimal(str(cutting["alukobond"])), Decimal("0"))
+        by_name = {row["name"]: Decimal(str(row["amount"])) for row in cutting["rows"]}
+        self.assertEqual(by_name["Форекс"], Decimal("200"))
+        self.assertEqual(by_name["Акрил"], Decimal("150"))
+        # Резка без материала — типа нет, отдельной строкой.
+        self.assertEqual(by_name["Без типа"], Decimal("90"))
         self.assertEqual(Decimal(str(cutting["total"])), Decimal("440"))
+        # Типы, по которым в периоде не резали, строкой не появляются.
+        self.assertNotIn("Алюкобонд", by_name)
 
     def test_cutting_excludes_cancelled_receipt(self):
         r = self._receipt(payment_status=Receipt.PaymentStatus.PAID,
@@ -181,7 +187,7 @@ class EdgeFinanceTests(APITestCase):
         self._material_item(r, self.forex, qty="1", price="0")
         data = self._report()
         self.assertEqual(Decimal(str(data["cutting"]["total"])), Decimal("0"))
-        self.assertEqual(Decimal(str(data["cutting"]["forex"])), Decimal("0"))
+        self.assertEqual(data["cutting"]["rows"], [])
 
     # ---- material-report: PIECE vs SQM ------------------------------------
     def test_material_report_piece_mode_area_and_sheets(self):
@@ -195,7 +201,7 @@ class EdgeFinanceTests(APITestCase):
         self.assertEqual(Decimal(str(row["sold_area"])), Decimal("5.96"))
         self.assertEqual(Decimal(str(row["material_revenue"])), Decimal("7400"))
         self.assertEqual(row["orders"], 1)
-        self.assertEqual(row["category"], "forex")
+        self.assertEqual(row["type"], "Форекс")
 
     def test_material_report_sqm_mode_area_and_sheets(self):
         r = self._receipt(payment_status=Receipt.PaymentStatus.PAID, total="0")
@@ -209,7 +215,7 @@ class EdgeFinanceTests(APITestCase):
 
     def test_material_report_sqm_zero_piece_area_no_division(self):
         no_area = Material.objects.create(
-            name="Прочий", category="Прочее", unit="SQM",
+            name="Прочий", unit="SQM",
             quantity=Decimal("5"), purchase_price=Decimal("10"),
             piece_area=Decimal("0"),
         )

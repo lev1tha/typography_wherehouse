@@ -12,7 +12,12 @@ import { apiError } from "../../api/errors.js";
 
 const EMPTY = {
   name: "",
-  category: "",
+  type: "",
+  thickness_mm: "",
+  color: "",
+  article: "",
+  sheet_width: "",
+  sheet_height: "",
   unit: "PIECE",
   is_roll_material: false,
   critical_balance: "0",
@@ -21,6 +26,21 @@ const EMPTY = {
 };
 
 const UNITS = ["SQM", "METER", "PIECE", "KG", "LITER"];
+
+// Как назвался бы материал по заполненным полям. Подсказка, а не замена:
+// у заказчика свои привычные подписи вроде «синий бишкек», отнимать их нельзя.
+const trim = (v) => String(v).replace(/\.?0+$/, "").replace(".", ",");
+// Число для показа: до сотых, без хвостовых нулей. В базе остаток лежит с
+// четырьмя знаками — так целое количество листов не превращается в дробь.
+const qty = (v) => Number(v || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+function suggestedName(m, types) {
+  const type = types.find((x) => String(x.id) === String(m.type));
+  const parts = [type?.name || "", m.color || ""];
+  if (m.thickness_mm) parts.push(`${trim(m.thickness_mm)} мм`);
+  if (m.article) parts.push(m.article);
+  if (m.sheet_width && m.sheet_height) parts.push(`${trim(m.sheet_width)}×${trim(m.sheet_height)}`);
+  return parts.filter(Boolean).join(" ").trim();
+}
 
 // Module-level so inputs keep a stable identity (no focus loss on keystroke).
 const NumField = ({ label, value, onChange, grow }) => (
@@ -50,7 +70,11 @@ export default function Catalog({ embedded = false }) {
   const [materials, setMaterials] = useState([]);
   const [search, setSearch] = useState("");
   const [ordering, setOrdering] = useState("name");
-  const [category, setCategory] = useState("");
+  // Фильтры по разобранным полям вместо свободной категории: раньше тип,
+  // толщина и цвет были зашиты в название, и отфильтровать было нечем.
+  const [typeId, setTypeId] = useState("");
+  const [color, setColor] = useState("");
+  const [types, setTypes] = useState([]);
   const [gallery, setGallery] = useState(null);
   const [editing, setEditing] = useState(null);
   const [receiving, setReceiving] = useState(null);
@@ -58,7 +82,8 @@ export default function Catalog({ embedded = false }) {
   function load() {
     const params = { ordering };
     if (search) params.search = search;
-    if (category) params.category = category;
+    if (typeId) params.type = typeId;
+    if (color) params.color = color;
     api.get("/warehouse/materials/", { params }).then((r) => setMaterials(r.data.results));
   }
 
@@ -66,9 +91,13 @@ export default function Catalog({ embedded = false }) {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, ordering, category]);
+  }, [search, ordering, typeId, color]);
 
-  const categories = [...new Set(materials.map((m) => m.category))];
+  useEffect(() => {
+    api.get("/warehouse/material-types/").then((r) => setTypes(r.data.results || r.data));
+  }, []);
+
+  const colors = [...new Set(materials.map((m) => m.color).filter(Boolean))];
 
   // Товар с историей продаж удалить нельзя — сервер прячет его из каталога,
   // чтобы суммы в старых чеках и отчётах не поехали задним числом.
@@ -117,13 +146,23 @@ export default function Catalog({ embedded = false }) {
         </>
       ),
     },
-    { key: "category", label: t("common.category"), render: (m) => <span className="chip">{m.category}</span> },
+    {
+      key: "type",
+      label: t("warehouse.type"),
+      render: (m) => (
+        <span>
+          {m.type_name && <span className="chip">{m.type_name}</span>}
+          {m.thickness_mm != null && <span className="muted"> {trim(m.thickness_mm)} мм</span>}
+          {m.color && <span className="muted">{m.thickness_mm != null ? " · " : " "}{m.color}</span>}
+        </span>
+      ),
+    },
     {
       key: "quantity",
       label: t("common.quantity"),
       render: (m) => (
         <>
-          {m.quantity} <span className="muted">{t(`unit.${m.unit}`)}</span>
+          {qty(m.quantity)} <span className="muted">{t(`unit.${m.unit}`)}</span>
           {m.sheets_remaining != null && (
             <span className="muted"> · ≈{Math.round(Number(m.sheets_remaining))} {t("warehouse.sheetsShort")}</span>
           )}
@@ -184,19 +223,25 @@ export default function Catalog({ embedded = false }) {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <select value={category} onChange={(e) => setCategory(e.target.value)}>
-          <option value="">{t("common.all")}</option>
-          {categories.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
+        <select value={typeId} onChange={(e) => setTypeId(e.target.value)}>
+          <option value="">{t("warehouse.allTypes")}</option>
+          {types.map((x) => (
+            <option key={x.id} value={x.id}>{x.name}</option>
           ))}
         </select>
+        {colors.length > 1 && (
+          <select value={color} onChange={(e) => setColor(e.target.value)}>
+            <option value="">{t("warehouse.allColors")}</option>
+            {colors.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        )}
         <select value={ordering} onChange={(e) => setOrdering(e.target.value)}>
           <option value="name">{t("common.name")}</option>
           <option value="quantity">{t("common.quantity")}</option>
           <option value="price_per_unit">{t("warehouse.retailPrice")}</option>
-          <option value="category">{t("common.category")}</option>
+          <option value="thickness_mm">{t("warehouse.thickness")}</option>
         </select>
       </div>
 
@@ -236,16 +281,67 @@ export default function Catalog({ embedded = false }) {
             </>
           }
         >
-          <div className="field">
-            <label>{t("common.name")}</label>
-            <input value={editing.name ?? ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+          {/* Свойства материала — отдельными полями. Раньше тип, толщина, цвет
+              и размер писались внутрь названия, поэтому ни отфильтровать по
+              толщине, ни вывести площадь листа из размера было нельзя. */}
+          <div className="row">
+            <div className="field grow" style={{ margin: 0 }}>
+              <label>{t("warehouse.type")}</label>
+              <select
+                value={editing.type ?? ""}
+                onChange={(e) => setEditing({ ...editing, type: e.target.value ? Number(e.target.value) : null })}
+              >
+                <option value="">—</option>
+                {types.map((x) => (
+                  <option key={x.id} value={x.id}>{x.name}</option>
+                ))}
+              </select>
+            </div>
+            <NumField grow label={t("warehouse.thickness")} value={editing.thickness_mm} onChange={setF("thickness_mm")} />
           </div>
 
           <div className="row">
             <div className="field grow" style={{ margin: 0 }}>
-              <label>{t("common.category")}</label>
-              <input value={editing.category ?? ""} onChange={(e) => setEditing({ ...editing, category: e.target.value })} />
+              <label>{t("warehouse.color")}</label>
+              <input value={editing.color ?? ""} onChange={(e) => setEditing({ ...editing, color: e.target.value })} />
             </div>
+            <div className="field grow" style={{ margin: 0 }}>
+              <label>{t("warehouse.article")}</label>
+              <input
+                value={editing.article ?? ""}
+                onChange={(e) => setEditing({ ...editing, article: e.target.value })}
+                placeholder={t("warehouse.articlePh")}
+              />
+            </div>
+          </div>
+
+          <div className="row">
+            <NumField grow label={t("warehouse.sheetWidth")} value={editing.sheet_width} onChange={setF("sheet_width")} />
+            <NumField grow label={t("warehouse.sheetHeight")} value={editing.sheet_height} onChange={setF("sheet_height")} />
+          </div>
+          {editing.sheet_width && editing.sheet_height && (
+            <p className="muted" style={{ fontSize: 12, margin: "-4px 0 0" }}>
+              {t("warehouse.areaFromSize", {
+                value: (Number(editing.sheet_width) * Number(editing.sheet_height)).toFixed(4),
+              })}
+            </p>
+          )}
+
+          <div className="field">
+            <label>{t("common.name")}</label>
+            <input value={editing.name ?? ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+            {suggestedName(editing, types) && suggestedName(editing, types) !== editing.name && (
+              <button
+                className="ghost"
+                style={{ marginTop: 4, color: "var(--accent-strong)", padding: 0, height: "auto" }}
+                onClick={() => setEditing({ ...editing, name: suggestedName(editing, types) })}
+              >
+                {t("warehouse.useSuggested", { value: suggestedName(editing, types) })}
+              </button>
+            )}
+          </div>
+
+          <div className="row">
             <div className="field grow" style={{ margin: 0 }}>
               <label>{t("warehouse.unit")}</label>
               <select
@@ -308,7 +404,6 @@ export default function Catalog({ embedded = false }) {
 
               <SectionLabel>{t("warehouse.sheetSale")}</SectionLabel>
               <div className="row">
-                <NumField grow label={t("warehouse.pieceArea")} value={editing.piece_area} onChange={setF("piece_area")} />
                 <NumField grow label={t("warehouse.piecePrice")} value={editing.piece_price} onChange={setF("piece_price")} />
               </div>
               <div className="row">

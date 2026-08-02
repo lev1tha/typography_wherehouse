@@ -131,7 +131,18 @@
     "deleted": "Material deleted",
     "production": "Made in / supplier",
     "productionPh": "e.g. Bishkek, Global",
-    "tabSheet": "Monthly stock"
+    "tabSheet": "Monthly stock",
+    "type": "Type",
+    "thickness": "Thickness, mm",
+    "color": "Colour",
+    "article": "Article",
+    "articlePh": "e.g. 237",
+    "sheetWidth": "Sheet width, m",
+    "sheetHeight": "Sheet height, m",
+    "areaFromSize": "Sheet area: {{value}} m² — derived from the size, no need to type it",
+    "useSuggested": "Use “{{value}}”",
+    "allTypes": "All types",
+    "allColors": "All colours"
   },
   "unit": {
     "SQM": "sqm",
