@@ -131,7 +131,25 @@ export default function Clients() {
   }
 
   const columns = [
-    { key: "display_name", label: t("common.name"), sortKey: "sort_name", render: (c) => <strong>{c.display_name}</strong> },
+    {
+      key: "display_name",
+      label: t("common.name"),
+      sortKey: "sort_name",
+      // Второй строкой — то, чего нет в основном названии: у юрлица контактное
+      // лицо, у физлица компания, от которой он заказывает. Раньше одно из двух
+      // просто не было видно, хотя в базе хранилось.
+      render: (c) => {
+        const second = c.type === "OSOO" ? c.full_name : c.company_name;
+        return (
+          <>
+            <strong>{c.display_name}</strong>
+            {second && second !== c.display_name && (
+              <div className="muted" style={{ fontSize: 12 }}>{second}</div>
+            )}
+          </>
+        );
+      },
+    },
     {
       key: "type",
       label: t("clients.type"),
@@ -493,21 +511,32 @@ export default function Clients() {
               <option value="OSOO">{t("clients.osoo")}</option>
             </select>
           </div>
+          {/* ФИО и компания — оба поля, а не «или-или».
+              Раньше форма показывала одно вместо другого: у ОсОО нельзя было
+              записать контактное лицо (кому звонить по заказу), а у физлица —
+              компанию, от которой он заказывает. При этом в базе есть оба поля
+              и заполнены оба — форма просто не давала их ввести. */}
           <div className="field">
-            <label>{creating.type === "OSOO" ? t("clients.companyName") : t("clients.fullName")}</label>
-            {creating.type === "OSOO" ? (
-              <input
-                value={creating.company_name}
-                onChange={(e) => setCreating({ ...creating, company_name: e.target.value })}
-                autoFocus
-              />
-            ) : (
-              <input
-                value={creating.full_name}
-                onChange={(e) => setCreating({ ...creating, full_name: e.target.value })}
-                autoFocus
-              />
-            )}
+            <label>{t("clients.fullName")}</label>
+            <input
+              value={creating.full_name}
+              onChange={(e) => setCreating({ ...creating, full_name: e.target.value })}
+              placeholder={creating.type === "OSOO" ? t("clients.contactPh") : ""}
+              autoFocus
+            />
+          </div>
+          <div className="field">
+            <label>
+              {t("clients.companyName")}
+              {creating.type !== "OSOO" && (
+                <span className="muted"> — {t("common.optional")}</span>
+              )}
+            </label>
+            <input
+              value={creating.company_name}
+              onChange={(e) => setCreating({ ...creating, company_name: e.target.value })}
+              placeholder={t("clients.companyPh")}
+            />
           </div>
           <div className="field">
             <label>{t("clients.phone")}</label>

@@ -33,7 +33,8 @@
     "saved": "Saved",
     "reset": "Reset",
     "month": "Month",
-    "allMonths": "All months"
+    "allMonths": "All months",
+    "optional": "optional"
   },
   "nav": {
     "dashboard": "Overview",
@@ -246,7 +247,9 @@
     "passHint": "Tell the client this password. They sign in with their phone number and it. Shown once — after that you can only issue a new one.",
     "reissuePassConfirm": "Issue a new password? The old one will stop working.",
     "needPhone": "Enter a phone number",
-    "created": "Client added"
+    "created": "Client added",
+    "contactPh": "contact person",
+    "companyPh": "e.g. Ak Zhol LLC"
   },
   "checkout": {
     "outOfStock": "Out of stock",
