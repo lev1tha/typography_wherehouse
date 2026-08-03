@@ -142,7 +142,9 @@
     "areaFromSize": "Sheet area: {{value}} m² — derived from the size, no need to type it",
     "useSuggested": "Use “{{value}}”",
     "allTypes": "All types",
-    "allColors": "All colours"
+    "allColors": "All colours",
+    "addRef": "+ add…",
+    "newRefPh": "Name, then Enter"
   },
   "unit": {
     "SQM": "sqm",

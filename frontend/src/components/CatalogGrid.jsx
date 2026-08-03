@@ -16,6 +16,7 @@ import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
+import RefSelect from "./RefSelect.jsx";
 import { useUI } from "./UIProvider.jsx";
 
 const trim = (v) => String(v).replace(/\.?0+$/, "").replace(".", ",");
@@ -54,7 +55,7 @@ function matchOption(options, text) {
   return hit ? String(hit.id) : raw;
 }
 
-export default function CatalogGrid({ types, sites, onDone, onClose }) {
+export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChanged }) {
   const { t } = useTranslation();
   const { toast } = useUI();
   const [rows, setRows] = useState(() => Array.from({ length: 8 }, () => ({ ...BLANK })));
@@ -68,13 +69,15 @@ export default function CatalogGrid({ types, sites, onDone, onClose }) {
   // уже сказала, о чём речь, и колонки от этого влезают на экран без прокрутки.
   const COLS = useMemo(() => [
     { key: "name", label: t("grid.name"), width: 168, sticky: true },
-    { key: "type", label: t("warehouse.type"), width: 104, options: types, group: "material" },
+    { key: "type", label: t("warehouse.type"), width: 104, options: types,
+      endpoint: "/warehouse/material-types/", group: "material" },
     { key: "color", label: t("warehouse.color"), width: 96, group: "material" },
     // Единицу видно из группы («Лист, м», «Цены, сом»), а у толщины своей группы
     // нет — миллиметры остаются подсказкой на заголовке.
     { key: "thickness_mm", label: t("grid.thickness"), hint: t("warehouse.thickness"), width: 68, num: true, group: "material" },
     { key: "article", label: t("warehouse.article"), width: 68, group: "material" },
-    { key: "production", label: t("grid.production"), width: 104, options: sites, group: "material" },
+    { key: "production", label: t("grid.production"), width: 104, options: sites,
+      endpoint: "/warehouse/production-sites/", group: "material" },
     { key: "sheet_width", label: t("grid.width"), width: 70, num: true, group: "sheet" },
     { key: "sheet_height", label: t("grid.height"), width: 70, num: true, group: "sheet" },
     { key: "piece_price", label: t("grid.piecePrice"), width: 86, num: true, group: "price" },
@@ -245,23 +248,15 @@ export default function CatalogGrid({ types, sites, onDone, onClose }) {
                 {COLS.map((col, colIndex) => (
                   <td key={col.key} className={col.sticky ? "grid-sticky" : ""}>
                     {col.options ? (
-                      <select
+                      <RefSelect
                         data-cell={`${rowIndex}-${colIndex}`}
                         value={row[col.key]}
-                        onChange={(e) => setCell(rowIndex, col.key, e.target.value)}
+                        options={col.options}
+                        endpoint={col.endpoint}
+                        onCreated={onRefsChanged}
+                        onChange={(v) => setCell(rowIndex, col.key, v)}
                         onPaste={(e) => handlePaste(e, rowIndex, colIndex)}
-                      >
-                        <option value="">—</option>
-                        {col.options.map((option) => (
-                          <option key={option.id} value={option.id}>{option.name}</option>
-                        ))}
-                        {/* Вставили название, которого нет в справочнике —
-                            показываем как есть, иначе ячейка выглядит пустой. */}
-                        {row[col.key] &&
-                          !col.options.some((o) => String(o.id) === String(row[col.key])) && (
-                            <option value={row[col.key]}>{row[col.key]} — ?</option>
-                          )}
-                      </select>
+                      />
                     ) : (
                       <input
                         data-cell={`${rowIndex}-${colIndex}`}

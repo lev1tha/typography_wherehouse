@@ -8,6 +8,7 @@ import GalleryModal from "../../components/GalleryModal.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
 import ReceiveStockModal from "../../components/ReceiveStockModal.jsx";
+import RefSelect from "../../components/RefSelect.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { apiError } from "../../api/errors.js";
 
@@ -96,9 +97,18 @@ export default function Catalog({ embedded = false }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, ordering, typeId, color]);
 
+  // Справочники перечитываются и после того, как завели новое значение прямо
+  // в форме материала или в сетке (RefSelect), иначе свежий тип не появился бы
+  // в остальных выпадашках до перезагрузки страницы.
+  function loadRefs() {
+    return Promise.all([
+      api.get("/warehouse/material-types/").then((r) => setTypes(r.data.results || r.data)),
+      api.get("/warehouse/production-sites/").then((r) => setSites(r.data.results || r.data)),
+    ]);
+  }
   useEffect(() => {
-    api.get("/warehouse/material-types/").then((r) => setTypes(r.data.results || r.data));
-    api.get("/warehouse/production-sites/").then((r) => setSites(r.data.results || r.data));
+    loadRefs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const colors = [...new Set(materials.map((m) => m.color).filter(Boolean))];
@@ -293,6 +303,7 @@ export default function Catalog({ embedded = false }) {
           <CatalogGrid
             types={types}
             sites={sites}
+            onRefsChanged={loadRefs}
             onClose={() => setBulk(false)}
             onDone={() => {
               setBulk(false);
@@ -321,15 +332,13 @@ export default function Catalog({ embedded = false }) {
           <div className="row">
             <div className="field grow" style={{ margin: 0 }}>
               <label>{t("warehouse.type")}</label>
-              <select
-                value={editing.type ?? ""}
-                onChange={(e) => setEditing({ ...editing, type: e.target.value ? Number(e.target.value) : null })}
-              >
-                <option value="">—</option>
-                {types.map((x) => (
-                  <option key={x.id} value={x.id}>{x.name}</option>
-                ))}
-              </select>
+              <RefSelect
+                value={editing.type}
+                options={types}
+                endpoint="/warehouse/material-types/"
+                onCreated={loadRefs}
+                onChange={(v) => setEditing({ ...editing, type: v ? Number(v) : null })}
+              />
             </div>
             <NumField grow label={t("warehouse.thickness")} value={editing.thickness_mm} onChange={setF("thickness_mm")} />
           </div>
@@ -394,15 +403,13 @@ export default function Catalog({ embedded = false }) {
               Справочник, а не текст — опечатка иначе заводила бы ещё одно. */}
           <div className="field">
             <label>{t("warehouse.production")}</label>
-            <select
-              value={editing.production ?? ""}
-              onChange={(e) => setEditing({ ...editing, production: e.target.value ? Number(e.target.value) : null })}
-            >
-              <option value="">—</option>
-              {sites.map((x) => (
-                <option key={x.id} value={x.id}>{x.name}</option>
-              ))}
-            </select>
+            <RefSelect
+              value={editing.production}
+              options={sites}
+              endpoint="/warehouse/production-sites/"
+              onCreated={loadRefs}
+              onChange={(v) => setEditing({ ...editing, production: v ? Number(v) : null })}
+            />
           </div>
 
           <label className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
