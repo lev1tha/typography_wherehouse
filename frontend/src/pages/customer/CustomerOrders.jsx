@@ -33,7 +33,10 @@ export default function CustomerOrders() {
       <div className="stat-grid" style={{ margin: "12px 0 18px" }}>
         <div className="stat">
           <div className="label">{t("myOrders.count")}</div>
-          <div className="value">{orders.length}</div>
+          {/* Считаем так же, как «Клиенты» у админа: возвращённый заказ —
+              не покупка. Иначе портал и админка называют разные числа об
+              одном и том же клиенте, и это первое, что он сверит. */}
+          <div className="value">{orders.filter((o) => o.status !== "CANCELLED").length}</div>
         </div>
         <div className="stat">
           <div className="label">{t("myOrders.totalDebt")}</div>
@@ -68,9 +71,14 @@ export default function CustomerOrders() {
               </div>
               <div style={{ margin: "8px 0" }}>
                 {o.items.map((it, i) => (
-                  <div className="crow" key={i}>
+                  <div
+                    className="crow"
+                    key={i}
+                    style={it.is_returned ? { textDecoration: "line-through", opacity: 0.55 } : undefined}
+                  >
                     <span className="k">
                       {it.title} × {Number(it.quantity)}
+                      {it.unit ? ` ${t(`unit.${it.unit}`)}` : ""}
                     </span>
                     <span>{som(it.line_total)}</span>
                   </div>
@@ -89,8 +97,12 @@ export default function CustomerOrders() {
               <div className="crow" style={{ marginTop: 6, gap: 8, justifyContent: "flex-start", flexWrap: "wrap" }}>
                 <span className="k">{t("myOrders.payLabel")}</span>
                 <PaymentBadge status={o.payment_status} />
-                <span className="k" style={{ marginLeft: 6 }}>{t("myOrders.fulfillLabel")}</span>
-                <FulfillmentBadge status={o.fulfillment_status} />
+                {o.status !== "CANCELLED" && (
+                  <>
+                    <span className="k" style={{ marginLeft: 6 }}>{t("myOrders.fulfillLabel")}</span>
+                    <FulfillmentBadge status={o.fulfillment_status} />
+                  </>
+                )}
               </div>
             </div>
           ))}

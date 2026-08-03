@@ -99,7 +99,8 @@
     "otherVariable": "Прочие переменные",
     "lowStockTitle": "Материалы на исходе",
     "remaining": "Остаток",
-    "critical": "Критический"
+    "critical": "Критический",
+    "noType": "Без типа"
   },
   "warehouse": {
     "title": "Склад",
@@ -311,7 +312,7 @@
     "status": "Статус",
     "method": "Оплата",
     "date": "Дата",
-    "cashier": "Складовщик",
+    "cashier": "Кто оформил",
     "refund": "Оформить возврат",
     "markReady": "Готово к выдаче",
     "markIssued": "Отметить выданным",
@@ -535,7 +536,8 @@
     "autoOverridden": "Вписано вручную; система насчитала {{value}}",
     "autoPlaceholderHint": "Пусто — берётся расчёт системы. Впишите своё, чтобы перебить.",
     "autoFromStock": "по приходам на склад: {{value}}",
-    "autoManualPart": "вручную {{value}}"
+    "autoManualPart": "вручную {{value}}",
+    "materialsBlock": "Материалы (итог блока)"
   },
   "expenses": {
     "amount": "Сумма",

@@ -99,7 +99,8 @@
     "otherVariable": "Other variable",
     "lowStockTitle": "Low-stock materials",
     "remaining": "Remaining",
-    "critical": "Critical"
+    "critical": "Critical",
+    "noType": "No type"
   },
   "warehouse": {
     "title": "Warehouse",
@@ -311,7 +312,7 @@
     "status": "Status",
     "method": "Payment",
     "date": "Date",
-    "cashier": "Cashier",
+    "cashier": "Issued by",
     "refund": "Issue refund",
     "markReady": "Ready for pickup",
     "markIssued": "Mark as issued",
@@ -535,7 +536,8 @@
     "autoOverridden": "Entered by hand; the system computed {{value}}",
     "autoPlaceholderHint": "Empty means the system's figure is used. Type your own to override.",
     "autoFromStock": "from stock intakes: {{value}}",
-    "autoManualPart": "by hand {{value}}"
+    "autoManualPart": "by hand {{value}}",
+    "materialsBlock": "Materials (block total)"
   },
   "expenses": {
     "amount": "Amount",

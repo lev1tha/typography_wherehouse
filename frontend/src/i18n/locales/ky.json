@@ -99,7 +99,8 @@
     "otherVariable": "Башка өзгөрмө",
     "lowStockTitle": "Түгөнүп жаткан материалдар",
     "remaining": "Калдык",
-    "critical": "Критикалык"
+    "critical": "Критикалык",
+    "noType": "Түрү жок"
   },
   "warehouse": {
     "title": "Кампа",
@@ -311,7 +312,7 @@
     "status": "Статус",
     "method": "Төлөм",
     "date": "Күнү",
-    "cashier": "Кампачы",
+    "cashier": "Ким тариздеген",
     "refund": "Кайтарууну тариздөө",
     "markReady": "Берүүгө даяр",
     "markIssued": "Берилди деп белгилөө",
@@ -535,7 +536,8 @@
     "autoOverridden": "Кол менен жазылган; система {{value}} эсептеди",
     "autoPlaceholderHint": "Бош болсо — система эсептейт. Өзгөртүү үчүн өз санын жазыңыз.",
     "autoFromStock": "кампага келип түшүү боюнча: {{value}}",
-    "autoManualPart": "кол менен {{value}}"
+    "autoManualPart": "кол менен {{value}}",
+    "materialsBlock": "Материалдар (блок жыйынтыгы)"
   },
   "expenses": {
     "amount": "Сумма",

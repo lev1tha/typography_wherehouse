@@ -167,7 +167,9 @@ export default function Clients() {
             {Number(c.debt).toLocaleString("ru-RU")} сом
           </span>
         ) : (
-          <span className="paid" style={{ color: "var(--ok, #067647)" }}>0</span>
+          // Ноль долга — не достижение, а обычное состояние: приглушённый
+          // прочерк вместо зелёного «0» без единицы рядом с «540 сом».
+          <span className="muted">—</span>
         ),
     },
     {

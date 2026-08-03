@@ -7,12 +7,18 @@ const COLORS = ["#e8853a", "#ffc592", "#2a9d99", "#d6b6f6", "#7a4a1e", "#1aae39"
 
 // Расходы финотчёта одним списком — те виды, что уменьшают прибыль. Вложения
 // (оборудование, улучшение цеха) идут отдельной карточкой, поэтому здесь их нет.
-const expenseRows = (fin) =>
-  [
-    ...(fin.materials?.rows || []),
-    ...(fin.fixed?.rows || []),
-    ...(fin.variable?.rows || []),
-  ].filter((r) => r.in_profit);
+//
+// Блок «Материалы» идёт ОДНОЙ строкой — своим итогом, а не составляющими.
+// Раньше сюда высыпались его входные данные (закуп, транспорт, долг), и рядом
+// с итогом «Расходы 265 092» стояла строка «Закуп материала 1 177 792»:
+// со стороны это выглядит арифметической ошибкой, хотя в прибыль идёт итог
+// блока (начало + закуп + транспорт − конец), а не закуп сам по себе.
+const expenseRows = (fin, materialsLabel) => [
+  ...(Number(fin.materials?.total)
+    ? [{ id: "materials", name: materialsLabel, amount: fin.materials.total }]
+    : []),
+  ...[...(fin.fixed?.rows || []), ...(fin.variable?.rows || [])].filter((r) => r.in_profit),
+];
 
 function Stat({ label, value, suffix, color }) {
   return (
@@ -81,7 +87,11 @@ export default function Dashboard() {
   }
 
   useEffect(() => {
-    api.get("/warehouse/materials/", { params: { ordering: "name" } }).then((r) => setMaterials(r.data.results));
+    // page_size: без него в разбивку попадали первые 25 материалов из каталога,
+    // и сумма по типам не сходилась со «Стоимостью склада» вверху той же страницы.
+    api
+      .get("/warehouse/materials/", { params: { ordering: "name", page_size: 500 } })
+      .then((r) => setMaterials(r.data.results));
   }, []);
 
   useEffect(() => {
@@ -89,16 +99,21 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [from, to]);
 
+  // Группируем по ТИПУ материала. Раньше группировка шла по `m.category` —
+  // полю, которое удалили, когда номенклатуру разобрали на отдельные поля.
+  // Все материалы попадали в один ключ, и на видном месте финансового отчёта
+  // висела подпись «undefined».
   const byCategory = useMemo(() => {
     const map = {};
     for (const m of materials) {
-      const v = Number(m.stock_value || 0);
-      map[m.category] = (map[m.category] || 0) + v;
+      const key = m.type_name || t("dashboard.noType");
+      map[key] = (map[key] || 0) + Number(m.stock_value || 0);
     }
     return Object.entries(map)
       .map(([category, value]) => ({ category, value }))
+      .filter((row) => row.value > 0)
       .sort((a, b) => b.value - a.value);
-  }, [materials]);
+  }, [materials, t]);
 
   if (error) return <div className="error">{error}</div>;
   if (!data) return <p className="muted">{t("common.loading")}</p>;
@@ -132,7 +147,7 @@ export default function Dashboard() {
       push("", "");
       // Строки — виды расхода из отчёта, поэтому свои виды («Реклама»,
       // «Налоги») попадают в выгрузку сами, без правки этого списка.
-      for (const row of expenseRows(fin)) push(row.name, Math.round(Number(row.amount)));
+      for (const row of expenseRows(fin, t("finance.materialsBlock"))) push(row.name, Math.round(Number(row.amount)));
       push(t("finance.cogs"), Math.round(Number(fin.cogs)));
       push(t("finance.grossMargin"), Math.round(Number(fin.gross_margin)));
       push(t("finance.expenses"), Math.round(Number(fin.total_expenses)));
@@ -208,7 +223,7 @@ export default function Dashboard() {
             {/* Расходы детально */}
             <div className="card">
               <h3>{t("dashboard.expensesBreakdown")}</h3>
-              {expenseRows(fin).map((row) => (
+              {expenseRows(fin, t("finance.materialsBlock")).map((row) => (
                 <div className="crow" key={row.id}>
                   <span className="k">{row.name}</span><span>{som(row.amount)}</span>
                 </div>
@@ -288,7 +303,7 @@ export default function Dashboard() {
       {data.low_stock_items?.length > 0 && (
         <div className="card" style={{ marginTop: 16 }}>
           <h3>{t("dashboard.lowStockTitle")}</h3>
-          <table className="table">
+          <table className="table plain-table">
             <thead>
               <tr>
                 <th>{t("common.name")}</th>
@@ -299,8 +314,16 @@ export default function Dashboard() {
             <tbody>
               {data.low_stock_items.map((m) => (
                 <tr key={m.id}>
-                  <td><strong>{m.name}</strong></td>
-                  <td style={{ color: "var(--danger)", fontWeight: 600 }}>
+                  <td>
+                    <strong>{m.name}</strong>
+                    {/* «Нет в наличии» и «на исходе» — разные состояния, а список
+                        общий: без пометки владелец видит в «на исходе» позиции,
+                        которых просто ещё не закупали. */}
+                    <span className={`badge ${Number(m.quantity) > 0 ? "warn" : ""}`} style={{ marginLeft: 6 }}>
+                      {Number(m.quantity) > 0 ? t("warehouse.lowStock") : t("checkout.outOfStock")}
+                    </span>
+                  </td>
+                  <td style={{ color: Number(m.quantity) > 0 ? "var(--danger)" : "var(--ink-muted)", fontWeight: 600 }}>
                     {Number(m.quantity).toFixed(2)} {t(`unit.${m.unit}`)}
                     {m.sheets_remaining != null ? ` · ≈${Math.round(Number(m.sheets_remaining))} ${t("warehouse.sheetsShort")}` : ""}
                   </td>
@@ -316,7 +339,7 @@ export default function Dashboard() {
       <div className="card" style={{ marginTop: 16 }}>
         <h3>{t("dashboard.clientMaterials")}</h3>
         {clientBuys.length ? (
-          <table className="table">
+          <table className="table plain-table">
             <thead>
               <tr>
                 <th>{t("common.name")}</th>

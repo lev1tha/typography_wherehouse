@@ -1432,6 +1432,17 @@ label {
   .grid-table {
     display: table;
   }
+  /* То же и для простых таблиц «Обзора» (материалы на исходе, покупки по
+     клиентам): они не через DataTable, карточек у них нет, и на телефоне от
+     блока оставался один заголовок. */
+  .plain-table {
+    display: table;
+    font-size: 13px;
+  }
+  .plain-table th,
+  .plain-table td {
+    padding: 8px 10px;
+  }
   .grid-table input,
   .grid-table select {
     height: 38px;

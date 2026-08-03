@@ -162,7 +162,14 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
             # Опт: при заказе от wholesale_min_qty листов цена за лист сама
             # переключается на оптовую (если её задал админ). Ручной override
             # цены (если есть) всегда в приоритете.
-            price = _priced("material_price", material.piece_price_for_qty(qty))
+            piece = material.piece_price_for_qty(qty)
+            # У ШТУЧНОГО материала (крепёж, клей) цены «за лист» не существует —
+            # там она всегда 0, и продажа уходила за 0 сом. Цена за штуку у него
+            # обычная розничная. У листового материала 0 в piece_price означает
+            # другое — «продажа листом недоступна», и подменять его нельзя.
+            if not piece and not material.is_roll_material:
+                piece = material.price_per_unit
+            price = _priced("material_price", piece)
         else:
             mode = TransactionItem.SaleMode.SQM
             price = _priced(

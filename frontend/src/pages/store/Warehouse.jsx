@@ -5,26 +5,38 @@ import api from "../../api/api.js";
 import GalleryModal from "../../components/GalleryModal.jsx";
 import Icon from "../../components/Icon.jsx";
 
+// Остаток до сотых, без хвостовых нулей — как в каталоге админа. В базе он
+// хранится с четырьмя знаками, чтобы целые листы не превращались в дробь.
+const qty = (v) => Number(v || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+// Толщина без хвостовых нулей и с запятой — «2,5 мм», как её пишет заказчик.
+const trim = (v) => String(v).replace(/\.?0+$/, "").replace(".", ",");
+
 export default function Warehouse() {
   const { t } = useTranslation();
   const [materials, setMaterials] = useState([]);
   const [search, setSearch] = useState("");
-  const [category, setCategory] = useState("");
+  // Фильтр по ТИПУ материала. Раньше он строился по `category` — полю, которого
+  // после разбора номенклатуры не существует: список был пустым, а параметр
+  // запроса сервер игнорировал, то есть фильтр не работал вообще.
+  const [typeId, setTypeId] = useState("");
+  const [types, setTypes] = useState([]);
   const [gallery, setGallery] = useState(null);
 
   function load() {
-    const params = { ordering: "name" };
+    const params = { ordering: "name", page_size: 500 };
     if (search) params.search = search;
-    if (category) params.category = category;
+    if (typeId) params.type = typeId;
     api.get("/warehouse/materials/", { params }).then((r) => setMaterials(r.data.results));
   }
   useEffect(() => {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, category]);
+  }, [search, typeId]);
 
-  const categories = [...new Set(materials.map((m) => m.category))];
+  useEffect(() => {
+    api.get("/warehouse/material-types/").then((r) => setTypes(r.data.results || r.data));
+  }, []);
 
   return (
     <>
@@ -36,11 +48,11 @@ export default function Warehouse() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <select value={category} onChange={(e) => setCategory(e.target.value)}>
-          <option value="">{t("common.all")}</option>
-          {categories.map((c) => (
-            <option key={c} value={c}>
-              {c}
+        <select value={typeId} onChange={(e) => setTypeId(e.target.value)}>
+          <option value="">{t("warehouse.allTypes")}</option>
+          {types.map((x) => (
+            <option key={x.id} value={x.id}>
+              {x.name}
             </option>
           ))}
         </select>
@@ -99,18 +111,35 @@ export default function Warehouse() {
                   )
                 )}
               </div>
-              <div className="muted">{m.category}</div>
+              {/* Свойства материала: раньше здесь выводилось `m.category` —
+                  поле, удалённое при разборе номенклатуры на поля, то есть
+                  пустая строка. Показываем то же, что в каталоге админа. */}
+              <div className="muted">
+                {[m.type_name, m.thickness_mm != null ? `${trim(m.thickness_mm)} мм` : "", m.color]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </div>
               <div className="crow">
                 <span className="k">{t("common.quantity")}</span>
                 <span>
-                  {m.sheets_remaining != null
-                    ? `${m.quantity} кв.м · ≈${Math.round(Number(m.sheets_remaining))} ${t("warehouse.sheetsShort")}`
-                    : m.quantity}
+                  {/* Остаток лежит с четырьмя знаками (ради целых листов), но
+                      показывать «2.9768 кв.м» незачем — округляем, как в каталоге. */}
+                  {qty(m.quantity)} {t(`unit.${m.unit}`)}
+                  {m.sheets_remaining != null && (
+                    <> · ≈{Math.round(Number(m.sheets_remaining))} {t("warehouse.sheetsShort")}</>
+                  )}
                 </span>
               </div>
               <div className="crow">
                 <span className="k">{t("warehouse.retailPrice")}</span>
-                <span>{m.price_per_unit} сом</span>
+                {/* У листового материала цена лежит в цене за кв.м, а
+                    price_per_unit равен нулю — склад показывал «0.00 сом»
+                    на всей номенклатуре. */}
+                <span>
+                  {m.is_roll_material
+                    ? `${m.sqm_price} сом/кв.м`
+                    : `${m.price_per_unit} сом`}
+                </span>
               </div>
             </div>
           </div>

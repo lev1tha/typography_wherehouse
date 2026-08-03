@@ -174,7 +174,7 @@ function ReceiptsTab() {
       key: "created_at",
       label: t("receipts.date"),
       sortKey: "created_at",
-      render: (r) => new Date(r.created_at).toLocaleString("ru-RU"),
+      render: (r) => new Date(r.created_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }),
     },
   ];
 
@@ -188,7 +188,7 @@ function ReceiptsTab() {
           <div className="stat">
             <div className="label">{t("receipts.debt")}</div>
             <div className="value" style={Number(stats.debt) > 0 ? { color: "var(--danger)" } : undefined}>
-              {Math.round(Number(stats.debt)).toLocaleString("ru-RU")} сом
+              {Math.round(Number(stats.debt)).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })} сом
             </div>
           </div>
         </div>
@@ -268,7 +268,7 @@ function AuditTab() {
           <div className="feed-body">
             <div className="feed-action">{r.action}</div>
             <div className="feed-meta">
-              {r.username || "—"} · {new Date(r.created_at).toLocaleString("ru-RU")}
+              {r.username || "—"} · {new Date(r.created_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
             </div>
           </div>
         </div>

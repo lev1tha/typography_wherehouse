@@ -65,6 +65,14 @@ class CustomerItemSerializer(serializers.Serializer):
     title = serializers.SerializerMethodField()
     quantity = serializers.DecimalField(max_digits=12, decimal_places=2)
     line_total = serializers.DecimalField(max_digits=14, decimal_places=2)
+    unit = serializers.SerializerMethodField()
+    is_returned = serializers.BooleanField(read_only=True)
+
+    def get_unit(self, obj):
+        """Единица рядом с количеством: клиенту «× 0.99» ни о чём не говорит."""
+        if obj.material_id:
+            return obj.material.unit
+        return "METER" if getattr(obj.service, "uses_running_meter", False) else ""
 
     def get_title(self, obj):
         if obj.material_id:
@@ -89,12 +97,19 @@ class CustomerOrderSerializer(serializers.ModelSerializer):
             "total_price",
             "amount_paid",
             "debt",
+            "status",
             "items",
         ]
 
     def get_items(self, obj):
-        rows = [i for i in obj.items.all() if not i.is_returned]
-        return CustomerItemSerializer(rows, many=True).data
+        """ВСЕ позиции, включая возвращённые.
+
+        Раньше возвращённые отфильтровывались, и полностью возвращённый заказ
+        приезжал клиенту пустым: номер, «0 сом» и ни одной строки — выглядит
+        как сбой системы, а не как «мы вам всё вернули». Возврат помечается
+        флагом, интерфейс показывает его зачёркнутым.
+        """
+        return CustomerItemSerializer(obj.items.all(), many=True).data
 
 
 MIN_PORTAL_PASSWORD = 4

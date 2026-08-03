@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
@@ -42,7 +42,26 @@ export default function Finance() {
   // Раньше блоки считались за всё время, а списки трат фильтровались отдельно —
   // цифры сверху и снизу жили в разных периодах.
   const [period, setPeriod] = useState({ year: now.getFullYear(), month: now.getMonth() + 1 });
+  // Открываемся на месяце ПОСЛЕДНЕГО чека, а не на календарном текущем.
+  // Первого числа (и вообще в любой месяц, где ещё не продавали) отчёт
+  // встречал нулями во всех строках, и это читается как «система пустая»,
+  // хотя данные есть — просто в прошлом месяце.
+  useEffect(() => {
+    api
+      .get("/sales/receipts/", { params: { ordering: "-created_at", page_size: 1 } })
+      .then((r) => {
+        const last = (r.data.results || [])[0];
+        if (!last) return;
+        const d = new Date(last.created_at);
+        const y = d.getFullYear();
+        const m = d.getMonth() + 1;
+        if (y !== now.getFullYear() || m !== now.getMonth() + 1) setPeriod({ year: y, month: m });
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [report, setReport] = useState(null);
+  const reportFor = useRef("");   // какой месяц ждём — чтобы не осел ответ устаревшего запроса
   const [settings, setSettings] = useState(null);
   // Открытые диалоги: записи вида и настройка вида.
   const [openKind, setOpenKind] = useState(null);
@@ -63,9 +82,17 @@ export default function Finance() {
   const matParams = matDay ? { date_from: matDay, date_to: matDay } : params || {};
 
   function loadReport() {
+    // Отчёт за месяц запрашивается дважды подряд при первой загрузке: сразу за
+    // календарный месяц, а следом за месяц последнего чека. Ответы возвращаются
+    // не в том порядке, в каком ушли, и без этой отметки на экране оседал отчёт
+    // первого запроса — селектор показывал один месяц, цифры другой.
+    const wanted = `${period.year}-${period.month}`;
+    reportFor.current = wanted;
     api
       .get("/finance/report/", { params: params || {} })
-      .then((r) => setReport(r.data))
+      .then((r) => {
+        if (reportFor.current === wanted) setReport(r.data);
+      })
       .catch(() => toast(t("common.error"), "error"));
   }
   // Траты поменяли: перечитываем отчёт и толкаем график по дням.
