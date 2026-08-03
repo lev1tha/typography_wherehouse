@@ -170,10 +170,21 @@ export default function Catalog({ embedded = false }) {
           {m.sheets_remaining != null && (
             <span className="muted"> · ≈{Math.round(Number(m.sheets_remaining))} {t("warehouse.sheetsShort")}</span>
           )}
-          {m.is_below_critical && (
-            <span className="badge warn" style={{ marginLeft: 6 }}>
-              {t("warehouse.lowStock")}
+          {/* Пусто и «на исходе» — разные вещи. Только что заведённый каталог
+              весь стоит на нуле, и красным он выглядит как авария, хотя просто
+              ещё ничего не приходило. Красное — когда материал заканчивается,
+              то есть остаток есть, но упал до порога; ноль — спокойный факт.
+              Касса это уже различает, теперь и склад говорит так же. */}
+          {Number(m.quantity) <= 0 ? (
+            <span className="badge" style={{ marginLeft: 6 }}>
+              {t("checkout.outOfStock")}
             </span>
+          ) : (
+            m.is_below_critical && (
+              <span className="badge warn" style={{ marginLeft: 6 }}>
+                {t("warehouse.lowStock")}
+              </span>
+            )
           )}
         </>
       ),
@@ -257,7 +268,7 @@ export default function Catalog({ embedded = false }) {
       <DataTable
         columns={columns}
         rows={materials}
-        rowClass={(m) => (m.is_below_critical ? "warn" : "")}
+        rowClass={(m) => (Number(m.quantity) > 0 && m.is_below_critical ? "warn" : "")}
       />
 
       {gallery && (

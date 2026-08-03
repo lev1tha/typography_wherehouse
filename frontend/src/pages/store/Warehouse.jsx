@@ -54,7 +54,12 @@ export default function Warehouse() {
             style={{
               padding: 0,
               overflow: "hidden",
-              background: m.is_below_critical ? "var(--warn-bg)" : "var(--surface)",
+              // Красным — только то, что заканчивается. Нулевой остаток у ещё
+              // не закупленного материала не авария (см. Catalog.jsx).
+              background:
+                Number(m.quantity) > 0 && m.is_below_critical
+                  ? "var(--warn-bg)"
+                  : "var(--surface)",
             }}
           >
             {m.primary_image ? (
@@ -86,7 +91,13 @@ export default function Warehouse() {
             <div style={{ padding: 14 }}>
               <div className="row" style={{ justifyContent: "space-between" }}>
                 <strong>{m.name}</strong>
-                {m.is_below_critical && <span className="badge warn">{t("warehouse.lowStock")}</span>}
+                {Number(m.quantity) <= 0 ? (
+                  <span className="badge">{t("checkout.outOfStock")}</span>
+                ) : (
+                  m.is_below_critical && (
+                    <span className="badge warn">{t("warehouse.lowStock")}</span>
+                  )
+                )}
               </div>
               <div className="muted">{m.category}</div>
               <div className="crow">
