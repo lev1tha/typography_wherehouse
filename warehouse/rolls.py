@@ -117,6 +117,7 @@ def consume_area(
     reason: str = "",
     log_type: str | None = None,
     receipt=None,
+    happened_at=None,
 ) -> Decimal:
     """Consume `area` кв.м from a roll-material, FIFO across rolls.
 
@@ -126,6 +127,12 @@ def consume_area(
     Запись в журнал делается по ``log_type`` — как в ``apply_stock_change``.
     Раньше она стояла под непустым ``reason``, и продажа рулонного материала
     (которая причину не передавала) уходила со склада незаметно для журнала.
+
+    ``happened_at`` — дата операции (заказ мог быть оформлен задним числом). Она
+    попадает В ЖУРНАЛ, но НЕ меняет выбор партий: списываем из тех рулонов,
+    которые лежат на складе сейчас, а не из тех, что лежали на ту дату. Отматывать
+    склад назад пришлось бы по всей истории движений, и на живых данных это
+    расходится (см. остаток на начало месяца в складском листе).
     """
     locked = Material.objects.select_for_update().get(pk=material.pk)
     need = Decimal(area)
@@ -155,7 +162,7 @@ def consume_area(
     locked.save(update_fields=["quantity", "updated_at"])
 
     if log_type:
-        InventoryLog.objects.create(
+        entry = InventoryLog(
             type=log_type,
             material=locked,
             quantity_changed=-need,
@@ -163,6 +170,9 @@ def consume_area(
             receipt=receipt,
             created_by=user,
         )
+        if happened_at:
+            entry.happened_at = happened_at
+        entry.save()
 
     if was_above and locked.quantity <= locked.critical_balance:
         from integrations.telegram import notify_low_stock
@@ -180,6 +190,7 @@ def restore_area(
     reason: str = "",
     log_type: str | None = None,
     receipt=None,
+    happened_at=None,
 ) -> None:
     """Return `area` кв.м back to stock (refund).
 
@@ -222,4 +233,5 @@ def restore_area(
             reason=reason,
             receipt=receipt,
             created_by=user,
+            **({"happened_at": happened_at} if happened_at else {}),
         )

@@ -224,13 +224,34 @@ class MaterialViewSet(viewsets.ModelViewSet):
         data = serializer.validated_data
         material = data["material"]
         delta = Decimal(data["counted_quantity"]) - material.quantity
-        material = apply_stock_change(
-            material,
-            delta,
-            log_type=InventoryLog.Type.ADJUSTMENT,
-            reason=data.get("reason") or "Инвентаризация",
-            user=request.user,
-        )
+        reason = data.get("reason") or "Инвентаризация"
+        if material.is_roll_material:
+            # У рулонного материала остаток хранится ДВАЖДЫ: числом в материале и
+            # площадями партий, из которых FIFO берёт себестоимость. Двигать
+            # только число нельзя — они разъедутся, и дальше врать начнёт
+            # себестоимость проданного: партии «знают» больше материала, чем есть.
+            # Списание брака это уже делает правильно, инвентаризация — нет.
+            from .rolls import consume_area, restore_area
+
+            if delta < 0:
+                consume_area(
+                    material, -delta, user=request.user,
+                    reason=reason, log_type=InventoryLog.Type.ADJUSTMENT,
+                )
+            elif delta > 0:
+                restore_area(
+                    material, delta, user=request.user,
+                    reason=reason, log_type=InventoryLog.Type.ADJUSTMENT,
+                )
+            material.refresh_from_db()
+        else:
+            material = apply_stock_change(
+                material,
+                delta,
+                log_type=InventoryLog.Type.ADJUSTMENT,
+                reason=reason,
+                user=request.user,
+            )
         AuditLog.record(
             request.user,
             f"Инвентаризация «{material.name}»: расхождение {delta}",
