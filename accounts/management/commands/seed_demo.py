@@ -42,7 +42,7 @@ from warehouse.models import (
     ProductionSite,
     Roll,
 )
-from warehouse.rolls import receive_lot
+from warehouse.rolls import consume_area, receive_lot
 from warehouse.stock import apply_stock_change
 
 D = Decimal
@@ -107,14 +107,17 @@ INTAKES = [
 ]
 
 # Заказы: (день, клиент, материал, режим, количество, погонных метров реза,
-#          сколько заплатили: None = весь заказ в долг, "all" = полностью)
+#          сколько заплатили: None = весь заказ в долг, "all" = ровно по счёту,
+#          число = столько и принесли — меньше счёта уйдёт в долг, больше в сдачу)
 ORDERS = [
     (2,  "Айбек",   "форекс 8мм",              "cut",   D("1.22"), D("2.44"), 14, "all"),
     (3,  "ОсОО Ак", "белый акрил 2,5 мм",      "piece", 4, None, None, "all"),
     (4,  "Нурлан",  "форекс 4,5мм",            "cut",   D("0.60"), D("1.20"), 7,  "all"),
     (7,  "Айбек",   "орг стекло 1,3мм",        "piece", 12, None, None, "all"),
-    (9,  "ОсОО Ак", "форекс 8мм",              "cut",   D("1.22"), D("1.22"), 9,  D("5000")),
-    (11, "Нурлан",  "ТЕМНО ЖЕЛТЫЙ  2,5ММ",     "cut",   D("0.80"), D("0.60"), 4,  "all"),
+    (9,  "ОсОО Ак", "форекс 8мм",              "cut",   D("1.22"), D("1.22"), 9,  D("1000")),
+    # Дал две тысячи с заказа под тысячу — сдачи в кассе не нашлось. Ровно тот
+    # случай, ради которого сдача и считается: деньги у цеха, и он их должен.
+    (11, "Нурлан",  "ТЕМНО ЖЕЛТЫЙ  2,5ММ",     "cut",   D("0.80"), D("0.60"), 4,  D("2000")),
     (15, "Айбек",   "форекс 8мм",              "piece", 20, None, None, "all"),
     (17, "ОсОО Ак", "прозрачный акрил 2,5 мм", "cut",   D("1.00"), D("2.00"), 11, "all"),
     (18, "Нурлан",  "салатовый",               "cut",   D("0.50"), D("0.50"), 3,  None),
@@ -398,16 +401,16 @@ class Command(BaseCommand):
                 }]
                 title = f"Резка: {name}"
 
-            total_guess = None
-            if paid == "all":
-                total_guess = D("9999999")   # обрежется до суммы чека
-            elif paid is not None:
-                total_guess = paid
-
+            # «Оплачено полностью» — флагом, а не заведомо большим числом:
+            # сумма чека известна только внутри create_sale, а переплата теперь
+            # запоминается сдачей, и прежний сентинел 9 999 999 превращался в
+            # девять миллионов сдачи клиенту.
             receipt = sale_service.create_sale(
                 client=clients[client_key], cashier=cashier,
                 payment_method=Receipt.PaymentMethod.CASH,
-                items_data=entries, amount_paid=total_guess, title=title,
+                items_data=entries, title=title,
+                pay_full=(paid == "all"),
+                amount_paid=(paid if paid not in ("all", None) else None),
             )
             _backdate(receipt, _aware(month.replace(day=day)))
             made += 1
@@ -417,8 +420,14 @@ class Command(BaseCommand):
         """Брак — то, что в складском листе заказчика теряется: его формула
         знает только «начало + поступление − проданные»."""
         material = materials["форекс 8мм"]
-        apply_stock_change(
-            material, -material.piece_area * 3,
+        # Через consume_area, а НЕ apply_stock_change: форекс рулонный, и его
+        # остаток хранится ещё и площадями партий. Прямое изменение числа
+        # оставляло партии нетронутыми — демо-база приезжала с расхождением
+        # 3 листа между остатком и партиями, то есть показывала заказчику
+        # цифры, которые сами с собой не сходятся. Боевое списание брака
+        # (POST /materials/write-off/) так и делает.
+        consume_area(
+            material, material.piece_area * 3,
             log_type=InventoryLog.Type.WRITE_OFF,
             reason="Списание: Брак. Повело при резке, 3 листа.", user=user,
             happened_at=_aware(month.replace(day=23)),
@@ -455,7 +464,7 @@ class Command(BaseCommand):
                 "type": TransactionItem.Type.MATERIAL, "material": material,
                 "mode": TransactionItem.SaleMode.PIECE, "quantity": D("120"),
             }],
-            amount_paid=D("9999999"), title=f"{SUPPLY_NAME} — 120 шт",
+            pay_full=True, title=f"{SUPPLY_NAME} — 120 шт",
         )
         _backdate(receipt, _aware(month.replace(day=20)))
         sale_service.refund_receipt(receipt, user=user)

@@ -52,6 +52,19 @@ class Command(BaseCommand):
         else:
             self.stdout.write("Складовщик уже существует — пропускаю.")
 
+        accountant, created = User.objects.get_or_create(
+            username="accountant",
+            defaults={"role": User.Role.ACCOUNTANT, "is_staff": True},
+        )
+        if created:
+            accountant.set_password("acc12345")
+            accountant.save()
+            self.stdout.write(
+                self.style.SUCCESS("Создан бухгалтер: accountant / acc12345")
+            )
+        else:
+            self.stdout.write("Бухгалтер уже существует — пропускаю.")
+
         # Baseline catalogue
         paper, _ = Material.objects.get_or_create(
             name="Бумага офсетная",
@@ -105,9 +118,18 @@ class Command(BaseCommand):
             defaults={"kind": PrintingService.Kind.CUTTING},
         )
         cutting.kind = PrintingService.Kind.CUTTING
+        cutting.machine = PrintingService.Machine.CNC
         cutting.rate_flat = Decimal("200")  # работа мастера, сом/кв.м
         cutting.base_price = Decimal("0")
         cutting.save()
+        # Второй станок — лазер. Резка считается по станкам (ЧПУ / лазер), и на
+        # чистой базе второй должен быть сразу: иначе отчёт покажет одну строку
+        # и разделение выглядит несделанным. Ставка 0 — берётся у материала.
+        PrintingService.objects.get_or_create(
+            machine=PrintingService.Machine.LASER,
+            kind=PrintingService.Kind.CUTTING,
+            defaults={"name": "Резка лазером", "base_price": Decimal("0")},
+        )
         # Cutting no longer auto-consumes recipe materials — the cut material is a
         # separate sale line; drop legacy paper/glue recipes.
         cutting.recipes.all().delete()
