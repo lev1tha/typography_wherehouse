@@ -2,6 +2,7 @@ import uuid
 from decimal import ROUND_CEILING, Decimal
 
 from django.db import models
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 
@@ -78,6 +79,22 @@ class Receipt(models.Model):
     amount_paid = models.DecimalField(
         _("оплачено (предоплата)"), max_digits=14, decimal_places=2, default=Decimal("0")
     )
+    # Сдача, которую клиенту ЕЩЁ НЕ ОТДАЛИ. Заказ на 1500, принесли 3000, а в
+    # кассе не было мелочи — 1500 остались у цеха, и это долг цеха перед
+    # клиентом, зеркальный обычному долгу. Раньше переплата просто отбрасывалась
+    # (`min(amount_paid, total)`), и назавтра вспомнить, сколько за кем осталось,
+    # было нечем.
+    #
+    # Отдельным полем, а НЕ через `amount_paid > total`: `amount_paid` участвует
+    # в долге, статусе оплаты и во всех отчётах, и «оплачено 3000» по заказу на
+    # 1500 сделало бы выручку неверной.
+    change_due = models.DecimalField(
+        _("сдача клиенту"),
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0"),
+        help_text=_("Переплата, которую ещё не вернули на руки"),
+    )
     stock_deducted = models.BooleanField(
         _("склад списан"),
         default=False,
@@ -86,7 +103,15 @@ class Receipt(models.Model):
     # Online payment gateway reference / link, filled when method is ONLINE.
     payment_reference = models.CharField(max_length=255, blank=True)
     payment_url = models.URLField(blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    # Дата заказа. НЕ auto_now_add: заказчик заносит работы задним числом —
+    # заказ сделали на прошлой неделе, до компьютера дошли сегодня. Не указана —
+    # текущий момент, как и было.
+    #
+    # Это ОПОРНАЯ дата всей отчётности: по ней считаются выручка, прибыль по
+    # дням, себестоимость проданного и складской лист. Поэтому ставить её в
+    # прошлое может только админ (см. checkout) — задним числом двигаются деньги
+    # уже закрытых месяцев.
+    created_at = models.DateTimeField(_("дата заказа"), default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -126,6 +151,28 @@ class Receipt(models.Model):
             return Decimal("0")
         owed = self.total_price - self.amount_paid - self.refunded_amount
         return owed if owed > Decimal("0") else Decimal("0")
+
+    @property
+    def cost_total(self) -> Decimal:
+        """Себестоимость проданного по этому чеку.
+
+        Сумма снимков закупочной стоимости строк, зафиксированных в момент
+        списания со склада (для рулонных — по FIFO-партиям). Возвращённые строки
+        не считаем: материал вернулся на склад, себестоимости в заказе больше нет.
+        """
+        return sum(
+            (item.cost_total for item in self.items.all() if not item.is_returned),
+            Decimal("0"),
+        )
+
+    @property
+    def margin(self) -> Decimal:
+        """Сколько осталось от заказа после себестоимости материала.
+
+        Та же «валовая маржа», что в Финансах, но по одному чеку: до аренды,
+        зарплат и прочих расходов. Возвраты вычитаем — за них деньги отданы.
+        """
+        return self.total_price - self.refunded_amount - self.cost_total
 
     def __str__(self) -> str:
         label = f"№{self.order_number}" if self.order_number else str(self.id)
@@ -198,6 +245,53 @@ class TransactionItem(models.Model):
         # Цену строки округляем ВВЕРХ до целого сома (решение заказчика) — без
         # копеек. Итог чека = сумма таких целых строк, поэтому тоже целый.
         return (self.quantity * self.price_per_item).quantize(Decimal("1"), rounding=ROUND_CEILING)
+
+
+class Payment(models.Model):
+    """Принятая оплата долга — отдельной записью, а не только суммой в
+    ``Receipt.amount_paid``.
+
+    Нужна из-за того, как заказчик собирает деньги: клиент приходит и гасит
+    сразу несколько заказов одной суммой («общая выплата»), а провести её часто
+    нужно задним числом — деньги взяли в понедельник, до компьютера дошли в
+    четверг. Одно поле «оплачено» на чеке этого не помнит: на вопрос «когда и
+    сколько он реально принёс» отвечать нечем, а общая выплата вообще
+    рассыпается на несколько независимых правок.
+
+    Запись справочная: выручка, как и раньше, относится к ДАТЕ ЗАКАЗА, а не к
+    дате оплаты (решение заказчика — см. блок «Материалы» в Финансах). Дата
+    оплаты здесь нужна ему самому: сверить, кто когда рассчитался.
+    """
+
+    receipt = models.ForeignKey(
+        Receipt, on_delete=models.CASCADE, related_name="payments"
+    )
+    amount = models.DecimalField(_("сумма"), max_digits=14, decimal_places=2)
+    method = models.CharField(
+        _("способ оплаты"),
+        max_length=20,
+        choices=Receipt.PaymentMethod.choices,
+        default=Receipt.PaymentMethod.CASH,
+    )
+    # Дата, которой деньги считаются принятыми. Может быть в прошлом.
+    paid_on = models.DateField(_("дата оплаты"), default=timezone.localdate)
+    note = models.CharField(_("примечание"), max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="payments_taken",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("оплата")
+        verbose_name_plural = _("оплаты")
+        ordering = ["-paid_on", "-created_at"]
+
+    def __str__(self) -> str:
+        return f"Оплата {self.amount} сом по чеку №{self.receipt.order_number}"
 
     def __str__(self) -> str:
         target = self.material or self.service

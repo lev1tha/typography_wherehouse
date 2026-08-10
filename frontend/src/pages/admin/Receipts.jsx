@@ -2,23 +2,49 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
+import { useAuth } from "../../auth/AuthContext.jsx";
 import DataTable from "../../components/DataTable.jsx";
+import EditReceiptModal from "../../components/EditReceiptModal.jsx";
+import GiveChangeModal from "../../components/GiveChangeModal.jsx";
 import Icon from "../../components/Icon.jsx";
 import PayDebtModal from "../../components/PayDebtModal.jsx";
 import { FulfillmentBadge, PaymentBadge } from "../../components/StatusBadge.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
+const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+
 function ReceiptsTab() {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
+  const { isAdmin, isAccountant, seesMoney } = useAuth();
+  // Бухгалтер только смотрит: сервер его записи не примет, и показывать кнопки,
+  // которые гарантированно ответят 403, — это обещать то, чего нет.
+  const readOnly = isAccountant;
   const [rows, setRows] = useState([]);
   const [stats, setStats] = useState(null);
   const [method, setMethod] = useState("");
   const [pstatus, setPstatus] = useState("");
   const [search, setSearch] = useState("");
+  // Фильтр по клиенту и по датам ЕГО заказов: «покажи всё, что Тахир заказывал
+  // в июле» — через поиск по строке это не спрашивается, поиск ищет одно слово.
+  const [client, setClient] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  // «Кому мы должны отдать сдачу» — рабочий список кассира.
+  const [onlyChange, setOnlyChange] = useState(false);
+  const [clientsList, setClientsList] = useState([]);
   const [advancingId, setAdvancingId] = useState(null);
   const [paying, setPaying] = useState(null);
+  const [givingChange, setGivingChange] = useState(null);
+  const [editing, setEditing] = useState(null);
   const [sort, setSort] = useState({ key: "_debt", dir: "desc" });
+
+  const filtered = method || pstatus || search || client || dateFrom || dateTo || onlyChange;
+
+  function resetFilters() {
+    setMethod(""); setPstatus(""); setSearch("");
+    setClient(""); setDateFrom(""); setDateTo(""); setOnlyChange(false);
+  }
 
   function orderingParam() {
     // Вторичная сортировка по дате (кроме случая, когда уже сортируем по дате).
@@ -35,7 +61,13 @@ function ReceiptsTab() {
     if (method) params.payment_method = method;
     if (pstatus) params.payment_status = pstatus;
     if (search) params.search = search;
+    if (client) params.client = client;
+    if (dateFrom) params.date_from = dateFrom;
+    if (dateTo) params.date_to = dateTo;
+    if (onlyChange) params.has_change = "1";
     api.get("/sales/receipts/", { params: { ...params, ordering: orderingParam() } }).then((r) => setRows(r.data.results));
+    // Плитки сверху считаются по ТЕМ ЖЕ фильтрам: иначе «Долг» показывал бы
+    // общий долг цеха под отфильтрованным списком одного клиента.
     api.get("/sales/receipts/stats/", { params }).then((r) => setStats(r.data));
   }
 
@@ -56,6 +88,24 @@ function ReceiptsTab() {
     }
   }
 
+  // Удаление — не возврат: возврат клиент принёс обратно, и в отчётах он обязан
+  // остаться; удаление — это «такого заказа не было». Поэтому и текст
+  // подтверждения перечисляет последствия, а не спрашивает «уверены?».
+  async function removeReceipt(r, e) {
+    e?.stopPropagation();
+    const ok = await confirm(
+      t("receipts.deleteConfirm", { number: r.order_number, total: som(r.total_price) }),
+    );
+    if (!ok) return;
+    try {
+      await api.delete(`/sales/receipts/${r.id}/`);
+      load();
+      toast(t("receipts.deleted"));
+    } catch (err) {
+      toast(err.response?.data?.detail || t("common.error"), "error");
+    }
+  }
+
   async function undoPay(r, e) {
     e?.stopPropagation();
     if (!(await confirm(t("receipts.confirmUnpay")))) return;
@@ -72,7 +122,11 @@ function ReceiptsTab() {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [method, pstatus, search, sort]);
+  }, [method, pstatus, search, client, dateFrom, dateTo, onlyChange, sort]);
+
+  useEffect(() => {
+    api.get("/clients/clients/").then((r) => setClientsList(r.data.results)).catch(() => {});
+  }, []);
 
   const columns = [
     {
@@ -116,7 +170,7 @@ function ReceiptsTab() {
         r.has_service ? (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
             <FulfillmentBadge status={r.fulfillment_status} />
-            {r.fulfillment_status !== "ISSUED" && (
+            {r.fulfillment_status !== "ISSUED" && !readOnly && (
               <button
                 className="secondary"
                 style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
@@ -133,6 +187,38 @@ function ReceiptsTab() {
         ),
     },
     { key: "total_price", label: t("common.total"), sortKey: "total_price", render: (r) => `${r.total_price} сом` },
+    // Себестоимость проданного по заказу и что от него осталось. Снимок закупки
+    // на момент продажи — переоценка склада прошлые заказы не двигает. Видят
+    // владелец и бухгалтер: складовщик оформляет и выдаёт, но закупочных цен не
+    // знает.
+    ...(seesMoney
+      ? [
+          {
+            key: "cost_total",
+            label: t("receipts.cost"),
+            render: (r) =>
+              Number(r.cost_total) > 0 ? (
+                <span className="muted">{som(r.cost_total)}</span>
+              ) : (
+                // Ноль здесь значит «материала в заказе не было» (чистая услуга)
+                // либо старый заказ, оформленный до учёта себестоимости.
+                <span className="muted">—</span>
+              ),
+          },
+          {
+            key: "margin",
+            label: t("receipts.margin"),
+            render: (r) =>
+              r.margin == null ? (
+                <span className="muted">—</span>
+              ) : (
+                <strong style={{ color: Number(r.margin) < 0 ? "var(--danger)" : undefined }}>
+                  {som(r.margin)}
+                </strong>
+              ),
+          },
+        ]
+      : []),
     {
       key: "debt",
       label: t("receipts.debt"),
@@ -140,6 +226,7 @@ function ReceiptsTab() {
       render: (r) => {
         const hasDebt = Number(r.debt) > 0;
         const canUndo =
+          !readOnly &&
           (r.payment_status === "PAID" || Number(r.amount_paid) > 0) &&
           !["REFUNDED", "PARTIALLY_REFUNDED"].includes(r.payment_status) &&
           r.status !== "CANCELLED";
@@ -147,7 +234,7 @@ function ReceiptsTab() {
         return (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
             {hasDebt && <span style={{ color: "var(--danger)", fontWeight: 600 }}>{r.debt} сом</span>}
-            {hasDebt && (
+            {hasDebt && !readOnly && (
               <button
                 className="secondary"
                 style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
@@ -170,12 +257,63 @@ function ReceiptsTab() {
         );
       },
     },
+    // Сдача — долг цеха ПЕРЕД клиентом, зеркальный обычному долгу, поэтому
+    // стоит соседней колонкой и тем же способом: сумма плюс кнопка действия.
+    {
+      key: "change_due",
+      label: t("receipts.change"),
+      sortKey: "change_due",
+      render: (r) => {
+        const due = Math.round(Number(r.change_due) || 0);
+        if (due <= 0) return <span className="muted">0</span>;
+        return (
+          <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
+            <span style={{ color: "var(--accent-strong)", fontWeight: 600 }}>{som(due)}</span>
+            {!readOnly && isAdmin && (
+              <button
+                className="secondary row-btn"
+                onClick={(e) => { e.stopPropagation(); setGivingChange(r); }}
+              >
+                {t("receipts.changeGive")}
+              </button>
+            )}
+          </div>
+        );
+      },
+    },
     {
       key: "created_at",
       label: t("receipts.date"),
       sortKey: "created_at",
       render: (r) => new Date(r.created_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }),
     },
+    // Правка и удаление — только админу. Кнопки ПОДПИСАНЫ, а не одни иконки:
+    // на складе те же две иконки без подписей заказчик просто не нашёл и решил,
+    // что функции нет вовсе.
+    ...(isAdmin
+      ? [
+          {
+            key: "actions",
+            label: t("receipts.actions"),
+            render: (r) => (
+              <div className="row" style={{ gap: 6, alignItems: "center", margin: 0, flexWrap: "nowrap" }}>
+                <button
+                  className="secondary row-btn"
+                  onClick={(e) => { e.stopPropagation(); setEditing(r); }}
+                >
+                  <Icon name="pencil" size={14} /> {t("receipts.edit")}
+                </button>
+                <button
+                  className="ghost row-btn row-danger"
+                  onClick={(e) => removeReceipt(r, e)}
+                >
+                  <Icon name="trash" size={14} /> {t("receipts.delete")}
+                </button>
+              </div>
+            ),
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -188,7 +326,18 @@ function ReceiptsTab() {
           <div className="stat">
             <div className="label">{t("receipts.debt")}</div>
             <div className="value" style={Number(stats.debt) > 0 ? { color: "var(--danger)" } : undefined}>
-              {Math.round(Number(stats.debt)).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })} сом
+              {som(stats.debt)}
+            </div>
+          </div>
+          {/* Сдача — сколько цех должен клиентам. Стоит рядом с долгом: это две
+              стороны одного вопроса «кто кому остался должен». */}
+          <div className="stat">
+            <div className="label">{t("receipts.statChange")}</div>
+            <div
+              className="value"
+              style={Number(stats.change_due) > 0 ? { color: "var(--accent-strong)" } : undefined}
+            >
+              {som(stats.change_due)}
             </div>
           </div>
         </div>
@@ -215,14 +364,63 @@ function ReceiptsTab() {
             </option>
           ))}
         </select>
+        <select value={client} onChange={(e) => setClient(e.target.value)}>
+          <option value="">{t("checkout.client")}: {t("common.all")}</option>
+          {clientsList.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.display_name}
+            </option>
+          ))}
+        </select>
+        {/* Даты подписаны прямо в поле: без подписи два одинаковых календаря
+            рядом не читаются — непонятно, где «с», а где «по». */}
+        <label className="filter-date">
+          <span>{t("dashboard.from")}</span>
+          <input type="date" value={dateFrom} max={dateTo || undefined} onChange={(e) => setDateFrom(e.target.value)} />
+        </label>
+        <label className="filter-date">
+          <span>{t("dashboard.to")}</span>
+          <input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => setDateTo(e.target.value)} />
+        </label>
+        <button
+          className={onlyChange ? "" : "secondary"}
+          onClick={() => setOnlyChange((v) => !v)}
+        >
+          {t("receipts.onlyChange")}
+        </button>
+        {filtered && (
+          <button className="ghost" onClick={resetFilters}>
+            {t("common.reset")}
+          </button>
+        )}
       </div>
-      <DataTable columns={columns} rows={rows} sort={sort} onSort={onSort} />
+      {/* С себестоимостью и маржой колонок стало одиннадцать — таблица
+          прокручивается вбок сама, а не тянет за собой всю страницу. */}
+      <div className="table-wrap">
+        <DataTable columns={columns} rows={rows} sort={sort} onSort={onSort} />
+      </div>
 
       {paying && (
         <PayDebtModal
           receipt={paying}
           onClose={() => setPaying(null)}
           onPaid={() => { setPaying(null); load(); }}
+        />
+      )}
+
+      {givingChange && (
+        <GiveChangeModal
+          receipt={givingChange}
+          onClose={() => setGivingChange(null)}
+          onGiven={() => { setGivingChange(null); load(); }}
+        />
+      )}
+
+      {editing && (
+        <EditReceiptModal
+          receipt={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); load(); }}
         />
       )}
     </>

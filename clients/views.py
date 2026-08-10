@@ -21,10 +21,11 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from accounts.permissions import IsAdmin
+from accounts.permissions import IsAdmin, IsNotAccountant
 from audit.models import AuditLog
 
 from .customer import MIN_PORTAL_PASSWORD
+from .merge import MergeRejected, merge_clients, merge_summary
 from .models import Client, ReferralChangeRequest
 from .serializers import (
     ClientDetailSerializer,
@@ -52,12 +53,13 @@ class ClientViewSet(viewsets.ModelViewSet):
     """
 
     queryset = Client.objects.all()
-    permission_classes = [IsAuthenticated]
+    # Бухгалтер карточки клиентов не заводит и не правит — он проверяющий.
+    permission_classes = [IsAuthenticated, IsNotAccountant]
     filterset_fields = ["type"]
     # search_fields НЕ задаём: DRF SearchFilter использует icontains, который на
     # SQLite не находит кириллицу в другом регистре. Ищем сами в get_queryset.
     ordering = ["sort_name"]
-    ordering_fields = ["sort_name", "orders_count", "debt", "created_at"]
+    ordering_fields = ["sort_name", "orders_count", "debt", "change_due_total", "created_at"]
 
     def _period(self):
         return (
@@ -125,6 +127,14 @@ class ClientViewSet(viewsets.ModelViewSet):
                     Value(Decimal("0")),
                     output_field=DecimalField(max_digits=14, decimal_places=2),
                 ),
+                # Сдача — зеркало долга: сколько ЦЕХ должен клиенту. Считается
+                # так же, «на сейчас», и период её не режет: деньги лежат в
+                # кассе независимо от того, какой месяц выбран в фильтре.
+                change_due_total=Coalesce(
+                    Sum("receipts__change_due", filter=live),
+                    Value(Decimal("0")),
+                    output_field=DecimalField(max_digits=14, decimal_places=2),
+                ),
             )
             .prefetch_related(*prefetch)
             .order_by("sort_name")
@@ -145,6 +155,10 @@ class ClientViewSet(viewsets.ModelViewSet):
         # Фильтр «только должники» — по той же аннотации, что и сортировка.
         if self.request.query_params.get("has_debt") in ("1", "true", "True"):
             qs = qs.filter(debt__gt=0)
+
+        # «Кому мы должны сдачу» — обратный список к должникам.
+        if self.request.query_params.get("has_change") in ("1", "true", "True"):
+            qs = qs.filter(change_due_total__gt=0)
 
         # Фильтр «заказов от N». Кривое значение игнорируем, а не роняем список.
         try:
@@ -201,6 +215,143 @@ class ClientViewSet(viewsets.ModelViewSet):
         client.save(update_fields=["portal_password"])
         AuditLog.record(request.user, f"Выдан пароль кабинета клиенту «{client.display_name}»")
         return Response({"password": raw})
+
+    @action(detail=True, methods=["get"], url_path="merge-preview", permission_classes=[IsAdmin])
+    def merge_preview(self, request, pk=None):
+        """GET /clients/<id>/merge-preview/?from=<id> — что переедет при склейке.
+
+        Удаление карточки необратимо, поэтому объём показываем ДО подтверждения.
+        """
+        keep = self.get_object()
+        drop = Client.objects.filter(pk=request.query_params.get("from")).first()
+        if drop is None:
+            return Response({"detail": "Карточка не найдена."}, status=status.HTTP_404_NOT_FOUND)
+        if drop.pk == keep.pk:
+            return Response(
+                {"detail": "Нельзя объединить карточку с ней же."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(merge_summary(keep, drop))
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
+    def merge(self, request, pk=None):
+        """POST /clients/<id>/merge/ {"from": <id>} — склеить двойников.
+
+        Один человек, заведённый дважды (номер записали в разном формате), имел
+        две карточки, и его заказы с долгом лежали двумя стопками. Всё
+        переезжает на ЭТУ карточку, вторая удаляется.
+
+        Необратимо и трогает чужие заказы — поэтому только админ.
+        """
+        keep = self.get_object()
+        drop = Client.objects.filter(pk=request.data.get("from")).first()
+        if drop is None:
+            return Response({"detail": "Карточка не найдена."}, status=status.HTTP_404_NOT_FOUND)
+
+        summary = merge_summary(keep, drop)
+        try:
+            keep = merge_clients(keep, drop, user=request.user)
+        except MergeRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        AuditLog.record(
+            request.user,
+            f"Объединены карточки клиентов: «{summary['drop']}» ({summary['drop_phone']}) "
+            f"→ «{summary['keep']}»; перенесено заказов: {summary['orders']}",
+        )
+        return Response(
+            self.get_serializer(keep).data | {"merged": summary}
+        )
+
+    # Деньги — за админом, как и оплата по отдельному чеку.
+    @action(detail=True, methods=["post"], url_path="pay-debt", permission_classes=[IsAdmin])
+    def pay_debt(self, request, pk=None):
+        """POST /clients/<id>/pay-debt/ — общая выплата за несколько заказов.
+
+        Клиент приходит и отдаёт деньги «за всё», а не по одному чеку: одна
+        сумма гасит долги его заказов от старых к новым. Раньше это приходилось
+        разносить руками, открывая каждый заказ отдельно.
+
+        Тело: `amount` (пусто — закрыть выбранные заказы целиком),
+        `receipt_ids` (пусто — все заказы с долгом), `paid_on` (можно задним
+        числом), `method`. Возвращает, куда именно ушли деньги.
+        """
+        from sales.sale_service import (
+            PaymentRejected,
+            parse_amount,
+            parse_paid_on,
+            pay_client_debt,
+        )
+
+        client = self.get_object()
+
+        raw_ids = request.data.get("receipt_ids")
+        if raw_ids in (None, "", []):
+            receipt_ids = None
+        elif isinstance(raw_ids, (list, tuple)):
+            receipt_ids = raw_ids
+        else:
+            return Response(
+                {"detail": "Некорректный список заказов."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            allocations, change = pay_client_debt(
+                client,
+                parse_amount(request.data.get("amount")),
+                receipt_ids=receipt_ids,
+                user=request.user,
+                paid_on=parse_paid_on(request.data.get("paid_on")),
+                method=request.data.get("method") or None,
+            )
+        except PaymentRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        paid = sum((amount for _, amount in allocations), Decimal("0"))
+        numbers = ", ".join(f"№{r.order_number}" for r, _ in allocations)
+        AuditLog.record(
+            request.user,
+            f"Общая выплата клиента «{client.display_name}»: +{paid} сом ({numbers})",
+        )
+
+        # Долг пересчитываем СВЕЖИМ запросом: prefetch снят до оплаты и отдал бы
+        # старую цифру.
+        left = sum((r.debt for r in client.receipts.order_by("created_at")), Decimal("0"))
+
+        # Одно сообщение на всю выплату, а не по штуке на каждый заказ: клиент
+        # заплатил один раз, и пять уведомлений подряд выглядят сбоем.
+        if client.telegram_chat_id:
+            from integrations.telegram import notify_customer
+
+            tail = (
+                "Долгов больше нет. Спасибо!"
+                if left <= 0
+                else f"Остаток долга: {left} сом."
+            )
+            notify_customer(
+                client, f"💰 Принята оплата {paid} сом за заказы {numbers}. {tail}"
+            )
+
+        return Response(
+            {
+                "paid": paid,
+                # Сдача: принесли больше, чем висело долга. В долг не пишем —
+                # лишнее отдают на руки (то же правило, что в кассе).
+                "change": change,
+                "debt": left,
+                "allocations": [
+                    {
+                        "receipt": str(r.id),
+                        "order_number": r.order_number,
+                        "title": r.title,
+                        "amount": amount,
+                        "debt_after": r.debt,
+                    }
+                    for r, amount in allocations
+                ],
+            }
+        )
 
     @action(
         detail=True,

@@ -243,6 +243,16 @@ button.ghost:hover {
   background: #fdf1e3;
 }
 
+/* Деньги по материалу — своим цветом: количества и суммы в одной таблице иначе
+   сливаются, и «50» из колонки листов читается как сомы. */
+.sheet-table th.sheet-group-money {
+  background: #eaf6ee;
+}
+
+.sheet-table td.sheet-money {
+  background: #f5fbf7;
+}
+
 /* Числовые колонки — вправо и моноширинно, чтобы разряды читались столбиком. */
 .sheet-num {
   display: block;
@@ -598,6 +608,12 @@ label {
   box-shadow: var(--shadow-1);
 }
 
+/* Обёртка для таблиц, которым стало тесно: прокручивается вбок сама, вместо
+   того чтобы растягивать страницу (тогда вбок уезжает и меню, и шапка). */
+.table-wrap {
+  overflow-x: auto;
+}
+
 /* --- Table → cards under 600px --- */
 .table {
   width: 100%;
@@ -685,6 +701,65 @@ label {
 
 .toolbar select {
   min-width: 150px;
+}
+
+/* Кнопка внутри строки таблицы: мелкая, но С ПОДПИСЬЮ. Одни иконки без текста
+   заказчик не находит — так уже было с «Изменить»/«Удалить» у материала. */
+.row-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  height: auto;
+  min-height: 0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Не `.danger`: тот класс уже занят — он красит кнопку в сплошной красный, и
+   на строке таблицы такая кнопка кричит громче самой строки. Здесь нужен
+   красный ТЕКСТ на прозрачном фоне. */
+.row-btn.row-danger {
+  color: var(--danger);
+  background: transparent;
+}
+
+.row-btn.row-danger:hover {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+
+/* Дата в панели фильтров: подпись «С» / «По» стоит внутри поля, иначе два
+   одинаковых календаря рядом неотличимы. */
+.filter-date {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  height: 40px;
+}
+
+.filter-date span {
+  color: var(--ink-muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.filter-date input {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  height: auto;
+  min-height: 0;
+  width: 130px;
+}
+
+.filter-date input:focus {
+  outline: none;
+  box-shadow: none;
 }
 
 /* Modal */
@@ -1468,10 +1543,14 @@ label {
     height: 48px;
   }
   .toolbar .search,
-  .toolbar select {
+  .toolbar select,
+  .toolbar .filter-date {
     width: 100%;
     flex: 1 1 100%;
     max-width: none;
+  }
+  .filter-date input {
+    width: 100%;
   }
   .overlay {
     position: fixed;

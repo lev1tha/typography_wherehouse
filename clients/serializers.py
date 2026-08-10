@@ -18,6 +18,16 @@ def client_debt(client) -> Decimal:
     return sum((r.debt for r in client.receipts.all()), Decimal("0"))
 
 
+def client_change_due(client) -> Decimal:
+    """Сколько ЦЕХ должен клиенту сдачей — зеркало долга.
+
+    Клиент принёс больше, чем стоил заказ, а мелочи в кассе не было. Пока сдачу
+    не отдали, эти деньги его, и на вопрос «сколько за нами осталось» отвечать
+    должна система, а не память кассира.
+    """
+    return sum((r.change_due for r in client.receipts.all()), Decimal("0"))
+
+
 class ClientSerializer(serializers.ModelSerializer):
     display_name = serializers.CharField(read_only=True)
     is_telegram_linked = serializers.BooleanField(read_only=True)
@@ -25,6 +35,7 @@ class ClientSerializer(serializers.ModelSerializer):
     referred_by_name = serializers.CharField(source="referred_by.display_name", read_only=True)
     referrals_count = serializers.SerializerMethodField()
     debt = serializers.SerializerMethodField()
+    change_due = serializers.SerializerMethodField()
     orders_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -43,6 +54,7 @@ class ClientSerializer(serializers.ModelSerializer):
             "referred_by_name",
             "referrals_count",
             "debt",
+            "change_due",
             "orders_count",
             "created_at",
         ]
@@ -57,6 +69,10 @@ class ClientSerializer(serializers.ModelSerializer):
         # например из вложенных сериализаторов.
         annotated = getattr(obj, "debt", None)
         return annotated if annotated is not None else client_debt(obj)
+
+    def get_change_due(self, obj):
+        annotated = getattr(obj, "change_due_total", None)
+        return annotated if annotated is not None else client_change_due(obj)
 
     def get_orders_count(self, obj):
         annotated = getattr(obj, "orders_count", None)
@@ -81,6 +97,22 @@ class ClientSerializer(serializers.ModelSerializer):
                         "Реферал зафиксирован. Изменить его может только администратор "
                         "— подайте заявку на смену."
                     )
+        return value
+
+    def validate_phone(self, value):
+        """Тот же номер в другом написании — тот же клиент, а не новый.
+
+        Уникальность на поле проверяет СТРОКУ, поэтому `0555 111 222` спокойно
+        заводился поверх `+996555111222`, и один человек оказывался в списке
+        дважды. Ловим это по цифрам и говорим, под кем номер уже записан.
+        """
+        from .phones import find_client_by_phone
+
+        twin = find_client_by_phone(value)
+        if twin and (self.instance is None or twin.pk != self.instance.pk):
+            raise serializers.ValidationError(
+                f"Этот номер уже записан за клиентом «{twin.display_name}» ({twin.phone})."
+            )
         return value
 
     def validate(self, attrs):
@@ -145,6 +177,7 @@ class ClientDetailSerializer(ClientSerializer):
     stats = serializers.SerializerMethodField()
     referrals = serializers.SerializerMethodField()
     orders = serializers.SerializerMethodField()
+    payments = serializers.SerializerMethodField()
     pending_referral_request = serializers.SerializerMethodField()
 
     class Meta(ClientSerializer.Meta):
@@ -152,7 +185,39 @@ class ClientDetailSerializer(ClientSerializer):
             "stats",
             "referrals",
             "orders",
+            "payments",
             "pending_referral_request",
+        ]
+
+    def get_payments(self, obj):
+        """История оплат клиента: когда и сколько он реально принёс.
+
+        По полю «оплачено» на чеке этого не видно — особенно после общей выплаты
+        (одна сумма разошлась по нескольким заказам) и оплат задним числом.
+        Период фильтрует по ДАТЕ ОПЛАТЫ, а не по дате заказа.
+        """
+        from sales.models import Payment
+
+        d_from = self.context.get("date_from")
+        d_to = self.context.get("date_to")
+        qs = Payment.objects.filter(receipt__client=obj).select_related("receipt")
+        if d_from:
+            qs = qs.filter(paid_on__gte=d_from)
+        if d_to:
+            qs = qs.filter(paid_on__lte=d_to)
+        return [
+            {
+                "id": p.id,
+                "amount": p.amount,
+                "method": p.method,
+                "method_display": p.get_method_display(),
+                "paid_on": p.paid_on,
+                "order_number": p.receipt.order_number,
+                "order_title": p.receipt.title,
+            }
+            # Хвост истории обрезаем: у постоянного клиента это сотни строк,
+            # а карточка показывает последние оплаты.
+            for p in qs[:50]
         ]
 
     def get_orders(self, obj):
@@ -189,6 +254,7 @@ class ClientDetailSerializer(ClientSerializer):
                 "payment_status": r.payment_status,
                 "fulfillment_status": r.fulfillment_status,
                 "debt": r.debt,
+                "change_due": r.change_due,
                 "items": items,
             })
         return rows

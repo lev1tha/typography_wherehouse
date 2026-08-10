@@ -2,17 +2,29 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { useAuth } from "../auth/AuthContext.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+
+const EMPTY_CFG = {
+  qty: "1",
+  width: "",
+  length: "",
+  letter_type: "FLAT",
+  materialId: "",
+  running_meters: "",
+  cutRate: "",
+};
 
 /** Configure and append one item (дозаказ) to an existing receipt. */
 export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
   const { t } = useTranslation();
   const { toast } = useUI();
+  const { isAdmin } = useAuth();
   const [services, setServices] = useState([]);
   const [materials, setMaterials] = useState([]);
   const [pick, setPick] = useState(""); // "S<id>" | "M<id>"
-  const [cfg, setCfg] = useState({ qty: "1", width: "", length: "", letter_type: "FLAT", materialId: "" });
+  const [cfg, setCfg] = useState(EMPTY_CFG);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -29,15 +41,32 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
 
   const svc = sel?.type === "service" ? sel.obj : null;
   const usesArea = svc?.uses_area;
+  // Резка считается по ДЛИНЕ РЕЗА в погонных метрах, а не по площади куска.
+  const usesRunM = !!svc?.uses_running_meter;
   const cfgMat = materials.find((m) => m.id === Number(cfg.materialId));
+  // Ставка резки — у СТАНКА (ЧПУ / лазер), а если у него своей нет, то у
+  // материала, как было до разделения на станки. У прочих площадных услуг — у
+  // самой услуги. Админ может перебить ставку на месте, как и в кассе.
+  const baseRate = usesRunM
+    ? Number(svc?.rate_per_pm) || Number(cfgMat?.cut_rate_per_pm || 0)
+    : svc?.uses_letter_type && cfg.letter_type === "VOLUMETRIC"
+    ? Number(svc?.rate_volumetric || 0)
+    : Number(svc?.rate_flat || 0);
+  const rate = cfg.cutRate === "" ? baseRate : Number(cfg.cutRate) || 0;
+  const matSqmPrice = cfgMat
+    ? Number(cfgMat.sqm_price ?? cfgMat.price_per_sqm ?? cfgMat.price_per_unit ?? 0)
+    : 0;
 
-  // Live price preview.
+  // Live price preview — по той же формуле, что считает бэкенд.
   let preview = 0;
   if (sel?.type === "material") preview = Number(sel.obj.price_per_unit) * Number(cfg.qty || 0);
   else if (svc?.uses_area) {
     const area = Number(cfg.width) * Number(cfg.length) || 0;
-    const rate = svc.uses_letter_type && cfg.letter_type === "VOLUMETRIC" ? Number(svc.rate_volumetric) : Number(svc.rate_flat);
-    preview = (rate + (cfgMat ? Number(cfgMat.price_per_unit) : 0)) * area;
+    // Резка: работа = пог.м × ставка, материал = площадь × цена за кв.м. Пока
+    // погонные метры не введены, работа = 0 — площадь вместо длины реза давала
+    // цену втрое ниже реальной.
+    const work = usesRunM ? (Number(cfg.running_meters) || 0) * rate : area * rate;
+    preview = work + area * matSqmPrice;
   } else if (svc?.uses_pieces) preview = Number(svc.rate_per_piece) * Number(cfg.qty || 0);
   else if (svc) preview = Number(svc.base_price) * Number(cfg.qty || 0);
 
@@ -46,6 +75,8 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
     if (svc.uses_area) {
       const it = { type: "SERVICE", service: svc.id, material: Number(cfg.materialId), width: Number(cfg.width), length: Number(cfg.length) };
       if (svc.uses_letter_type) it.letter_type = cfg.letter_type;
+      if (usesRunM) it.running_meters = Number(cfg.running_meters) || 0;
+      if (isAdmin && cfg.cutRate !== "") it.cut_rate = Number(cfg.cutRate) || 0;
       return it;
     }
     return { type: "SERVICE", service: svc.id, quantity: Number(cfg.qty) };
@@ -85,11 +116,15 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
     >
       <div className="field">
         <label>{t("checkout.addItem")}</label>
-        <select value={pick} onChange={(e) => { setPick(e.target.value); setCfg({ qty: "1", width: "", length: "", letter_type: "FLAT", materialId: areaMaterials[0]?.id ? String(areaMaterials[0].id) : "" }); }}>
+        <select value={pick} onChange={(e) => { setPick(e.target.value); setCfg({ ...EMPTY_CFG, materialId: areaMaterials[0]?.id ? String(areaMaterials[0].id) : "" }); }}>
           <option value="">—</option>
           <optgroup label={t("checkout.service")}>
+            {/* У резки дописываем станок: две услуги резки рядом иначе
+                различаются только названием, а думает заказчик станками. */}
             {services.filter((s) => s.is_active !== false).map((s) => (
-              <option key={s.id} value={`S${s.id}`}>{s.name}</option>
+              <option key={s.id} value={`S${s.id}`}>
+                {s.machine_display ? `${s.name} · ${s.machine_display}` : s.name}
+              </option>
             ))}
           </optgroup>
           <optgroup label={t("checkout.material")}>
@@ -119,15 +154,45 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
             <label>{t("checkout.cutMaterial")}</label>
             <select value={cfg.materialId} onChange={(e) => setCfg({ ...cfg, materialId: e.target.value })}>
               <option value="">—</option>
+              {/* Цена за кв.м лежит в sqm_price; price_per_unit у листовых
+                  материалов нулевой, и в списке у всех стояло «0.00 сом/кв.м». */}
               {areaMaterials.map((m) => (
-                <option key={m.id} value={m.id}>{m.name} ({m.price_per_unit} сом/кв.м, ост. {m.quantity})</option>
+                <option key={m.id} value={m.id}>
+                  {m.name} ({Number(m.sqm_price ?? m.price_per_sqm ?? m.price_per_unit ?? 0)} сом/кв.м, ост. {m.quantity})
+                </option>
               ))}
             </select>
           </div>
           <div className="row">
-            <div className="field grow"><label>{t("supply.width")}</label><input type="number" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} /></div>
-            <div className="field grow"><label>{t("supply.length")}</label><input type="number" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} /></div>
+            <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} /></div>
+            <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} /></div>
           </div>
+          {/* Погонометр: длину реза вводит мастер, из размеров куска она не
+              выводится. Не введена — работа резки не начисляется, как в кассе. */}
+          {usesRunM && (
+            <div className="field">
+              <label>{t("checkout.runningMeters")}</label>
+              <input
+                type="number"
+                step="any"
+                value={cfg.running_meters}
+                onChange={(e) => setCfg({ ...cfg, running_meters: e.target.value })}
+              />
+              <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("checkout.runMetersHint")}</p>
+            </div>
+          )}
+          {isAdmin && usesRunM && (
+            <div className="field">
+              <label>{t("checkout.cutRateLabel")}</label>
+              <input
+                type="number"
+                step="any"
+                value={cfg.cutRate}
+                onChange={(e) => setCfg({ ...cfg, cutRate: e.target.value })}
+                placeholder={String(baseRate)}
+              />
+            </div>
+          )}
         </>
       )}
 

@@ -20,12 +20,22 @@ def _qr_data_uri(text: str) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
+def _is_admin(context) -> bool:
+    """Показывать ли закупочные цифры. Себестоимость и маржа — владельцу и
+    бухгалтеру: складовщик оформляет и выдаёт заказы, но почём цех купил
+    материал, ему знать незачем (те же правила, что у финансовых разделов).
+    Бухгалтеру наоборот: эти цифры и есть его работа."""
+    request = context.get("request")
+    return bool(request and getattr(request.user, "sees_money", False))
+
+
 class TransactionItemSerializer(serializers.ModelSerializer):
     material_name = serializers.CharField(source="material.name", read_only=True)
     service_name = serializers.CharField(source="service.name", read_only=True)
     line_total = serializers.DecimalField(
         max_digits=14, decimal_places=2, read_only=True
     )
+    cost_total = serializers.SerializerMethodField()
 
     class Meta:
         model = TransactionItem
@@ -39,11 +49,15 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             "quantity",
             "price_per_item",
             "line_total",
+            "cost_total",
             "sale_mode",
             "width",
             "length",
             "is_returned",
         ]
+
+    def get_cost_total(self, obj):
+        return obj.cost_total if _is_admin(self.context) else None
 
 
 class ReceiptSerializer(serializers.ModelSerializer):
@@ -55,6 +69,11 @@ class ReceiptSerializer(serializers.ModelSerializer):
     has_service = serializers.BooleanField(read_only=True)
     debt = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     payment_qr = serializers.SerializerMethodField()
+    # Себестоимость проданного по этому заказу и что от него осталось. Снимок
+    # закупки на момент продажи — переоценка склада прошлые заказы не двигает.
+    cost_total = serializers.SerializerMethodField()
+    margin = serializers.SerializerMethodField()
+    payments = serializers.SerializerMethodField()
 
     class Meta:
         model = Receipt
@@ -77,10 +96,15 @@ class ReceiptSerializer(serializers.ModelSerializer):
             "refunded_amount",
             "amount_paid",
             "debt",
+            # Сдача, которую клиенту ещё не отдали — долг цеха перед ним.
+            "change_due",
             "payment_reference",
             "payment_url",
             "payment_qr",
+            "cost_total",
+            "margin",
             "items",
+            "payments",
             "created_at",
             "updated_at",
         ]
@@ -90,6 +114,25 @@ class ReceiptSerializer(serializers.ModelSerializer):
         if obj.payment_url and obj.payment_status == Receipt.PaymentStatus.PENDING:
             return _qr_data_uri(obj.payment_url)
         return None
+
+    def get_cost_total(self, obj):
+        return obj.cost_total if _is_admin(self.context) else None
+
+    def get_margin(self, obj):
+        return obj.margin if _is_admin(self.context) else None
+
+    def get_payments(self, obj):
+        """Принятые оплаты по заказу: когда и сколько. Дата может быть задним
+        числом — общая выплата по клиенту проводится позже, чем берут деньги."""
+        return [
+            {
+                "id": p.id,
+                "amount": p.amount,
+                "method": p.method,
+                "paid_on": p.paid_on,
+            }
+            for p in obj.payments.all()
+        ]
 
 
 class SaleItemInputSerializer(serializers.Serializer):
@@ -149,11 +192,22 @@ class SaleCreateSerializer(serializers.Serializer):
     amount_paid = serializers.DecimalField(
         max_digits=14, decimal_places=2, min_value=0, required=False, allow_null=True
     )
+    # Дата заказа задним числом. Не указана — «сейчас». Право проверяет вьюха:
+    # по этой дате считается вся отчётность, ставить её в прошлое может админ.
+    order_date = serializers.DateField(required=False, allow_null=True)
     items = SaleItemInputSerializer(many=True)
 
     def validate_items(self, value):
         if not value:
             raise serializers.ValidationError("Добавьте хотя бы одну позицию.")
+        return value
+
+    def validate_order_date(self, value):
+        from django.utils import timezone
+
+        # Будущим числом заказ не оформляют — этой работы ещё не было.
+        if value and value > timezone.localdate():
+            raise serializers.ValidationError("Дата заказа не может быть в будущем.")
         return value
 
 

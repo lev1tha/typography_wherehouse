@@ -14,6 +14,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 from sales.models import Receipt
 
 from .models import Client
+from .phones import find_client_by_phone
 
 
 def _digits(value: str) -> str:
@@ -136,7 +137,10 @@ class CustomerLoginView(APIView):
         password = (request.data.get("password") or "").strip()
         if not phone:
             return Response({"detail": "Введите номер телефона"}, status=status.HTTP_400_BAD_REQUEST)
-        client = next((c for c in Client.objects.all() if _digits(c.phone) == phone), None)
+        # Тот же поиск, что и в кассе: клиент набирает свой номер как привык, а
+        # в базе он лежит в том написании, в каком его записал кассир. Пароль
+        # по-прежнему обязателен — послаблений тут нет, только формат номера.
+        client = find_client_by_phone(request.data.get("phone"))
         if not client:
             return Response(
                 {"detail": "Клиент с таким номером не найден"},

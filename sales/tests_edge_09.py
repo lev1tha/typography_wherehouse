@@ -4,7 +4,7 @@ Covers, with self-contained setUp (no fixtures):
   - IsAdmin gate on warehouse supply/adjust/receive-roll/write-off (storekeeper -> 403)
   - cross-scope JWT: customer token on staff endpoints -> 401; staff token on
     /api/customer/* -> 401; deleted-client customer token -> 401
-  - storekeeper sees only own receipts (list filtered, foreign detail -> 404)
+  - весь персонал видит все чеки (список и чужой чек по ссылке)
   - admin sees all receipts
   - customer sees only own orders
   - customer login by missing / empty / differently-formatted phone
@@ -156,19 +156,26 @@ class EdgeRolesTests(APITestCase):
         self.assertEqual(r.status_code, 401, getattr(r, "data", None))
 
     # ---- receipt isolation: storekeeper sees only own ------------------
-    def test_storekeeper_sees_only_own_receipts(self):
+    def test_storekeeper_sees_all_receipts(self):
+        """Чеки видит весь персонал, а не только тот, кто их оформил.
+
+        Раньше складовщику отдавались только его собственные, и в цехе на двух
+        человек это ломало выдачу: заказ принял админ — складовщик не может его
+        найти, у него пустой экран.
+        """
         self.client.force_authenticate(self.keeper)
         r = self.client.get("/api/sales/receipts/")
         self.assertEqual(r.status_code, 200, r.data)
         results = r.data["results"] if isinstance(r.data, dict) and "results" in r.data else r.data
         ids = {str(row["id"]) for row in results}
         self.assertIn(str(self.receipt_keeper.id), ids)
-        self.assertNotIn(str(self.receipt_keeper2.id), ids)
+        self.assertIn(str(self.receipt_keeper2.id), ids)
 
-    def test_storekeeper_cannot_open_foreign_receipt(self):
+    def test_storekeeper_opens_foreign_receipt(self):
+        """Чужой чек открывается: его нужно найти, чтобы выдать заказ."""
         self.client.force_authenticate(self.keeper)
         r = self.client.get(f"/api/sales/receipts/{self.receipt_keeper2.id}/")
-        self.assertEqual(r.status_code, 404, getattr(r, "data", None))
+        self.assertEqual(r.status_code, 200, getattr(r, "data", None))
 
     def test_admin_sees_all_receipts(self):
         self.client.force_authenticate(self.admin)

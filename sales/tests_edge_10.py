@@ -166,6 +166,67 @@ class EdgeAddItemsCustomerTests(APITestCase):
         self.assertEqual(Decimal(str(r.data["total_price"])), Decimal("7400.00"))
         self.assertEqual(len(r.data["items"]), 2)
 
+    # ---- дозаказ резки: работа считается по длине реза -------------------
+
+    def test_add_cutting_charges_work_by_running_meters(self):
+        """Резку можно дозаказать, и работа считается по ПОГОННЫМ МЕТРАМ.
+
+        Форма дозаказа погонометра не имела и вообще не отправляла длину реза —
+        работа мастера уходила в ноль, а в чеке оставался только материал.
+        """
+        cutting = PrintingService.objects.create(
+            name="Резка дозаказ", kind=PrintingService.Kind.CUTTING
+        )
+        self.acrylic.cut_rate_per_pm = Decimal("35")
+        self.acrylic.save(update_fields=["cut_rate_per_pm"])
+
+        self.client.force_authenticate(self.storekeeper)
+        receipt = self._make_receipt(payment_status=Receipt.PaymentStatus.PAID)
+        r = self.client.post(
+            self._add_items_url(receipt),
+            {"items": [{
+                "type": "SERVICE", "service": cutting.id, "material": self.acrylic.id,
+                "width": "1", "length": "2", "running_meters": "6",
+            }]},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+
+        work = receipt.items.get(type=TransactionItem.Type.SERVICE, service=cutting)
+        # 6 пог.м × 35 = 210 сом работы, а не 2 кв.м × 35 = 70.
+        self.assertEqual(work.quantity, Decimal("6.000"))
+        self.assertEqual(work.price_per_item, Decimal("35.00"))
+        self.assertEqual(work.line_total, Decimal("210"))
+        # Материал считается отдельной строкой по площади, как и в кассе.
+        material_line = receipt.items.filter(
+            type=TransactionItem.Type.MATERIAL, quantity=Decimal("2.000")
+        ).first()
+        self.assertIsNotNone(material_line)
+
+    def test_add_cutting_without_running_meters_charges_no_work(self):
+        """Длина реза не введена — работа 0. Раньше сюда подставлялась площадь и
+        умножалась на ставку за пог.м, то есть кв.м считались как пог.м."""
+        cutting = PrintingService.objects.create(
+            name="Резка дозаказ 2", kind=PrintingService.Kind.CUTTING
+        )
+        self.acrylic.cut_rate_per_pm = Decimal("35")
+        self.acrylic.save(update_fields=["cut_rate_per_pm"])
+
+        self.client.force_authenticate(self.storekeeper)
+        receipt = self._make_receipt(payment_status=Receipt.PaymentStatus.PAID)
+        r = self.client.post(
+            self._add_items_url(receipt),
+            {"items": [{
+                "type": "SERVICE", "service": cutting.id, "material": self.acrylic.id,
+                "width": "1", "length": "2",
+            }]},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        work = receipt.items.get(type=TransactionItem.Type.SERVICE, service=cutting)
+        self.assertEqual(work.quantity, Decimal("0.000"))
+        self.assertEqual(work.line_total, Decimal("0"))
+
     # ---- логин клиента: нормализация телефона ---------------------------
 
     def test_customer_login_normalizes_phone(self):

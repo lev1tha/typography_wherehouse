@@ -100,11 +100,12 @@ class EdgeReceiptStatsTests(APITestCase):
 
     # ---- role scoping ------------------------------------------------------
 
-    def test_storekeeper_stats_only_own_receipts(self):
+    def test_storekeeper_stats_cover_all_receipts(self):
+        """Сводка над списком считает то же, что в списке — все чеки цеха."""
         self._material_receipt(self.store_a)
-        self._material_receipt(self.store_b)  # foreign receipt
+        self._material_receipt(self.store_b)
         data = self._stats(self.store_a)
-        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["total"], 2)
 
     def test_admin_stats_sees_all_receipts(self):
         self._material_receipt(self.store_a)
@@ -223,15 +224,17 @@ class EdgeReceiptStatsTests(APITestCase):
             receipt.fulfillment_status, Receipt.FulfillmentStatus.READY
         )
 
-    def test_storekeeper_cannot_mark_ready_foreign_receipt(self):
+    def test_storekeeper_marks_ready_foreign_receipt(self):
+        """Готовность двигает любой сотрудник, а не только оформивший чек.
+
+        Заказ принимает один, режет и выдаёт другой — иначе статус некому
+        переключить.
+        """
         receipt = self._service_receipt(
             self.store_a, fulfillment=Receipt.FulfillmentStatus.PROCESSING
         )
-        # store_b is scoped to its own receipts → foreign one is invisible (404).
         self.client.force_authenticate(self.store_b)
         resp = self.client.post(f"/api/sales/receipts/{receipt.id}/mark-ready/")
-        self.assertEqual(resp.status_code, 404, getattr(resp, "data", resp))
+        self.assertEqual(resp.status_code, 200, getattr(resp, "data", resp))
         receipt.refresh_from_db()
-        self.assertEqual(
-            receipt.fulfillment_status, Receipt.FulfillmentStatus.PROCESSING
-        )
+        self.assertEqual(receipt.fulfillment_status, Receipt.FulfillmentStatus.READY)

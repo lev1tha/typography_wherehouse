@@ -48,6 +48,10 @@ function lineTotal(line) {
   return ceilSom(unitPrice(line) * lineQty(line));
 }
 
+// Сегодня в формате YYYY-MM-DD по МЕСТНОЙ дате: toISOString() отдаёт UTC и в
+// Бишкеке вечером показывал бы завтрашний день.
+const todayStr = () => new Date().toLocaleDateString("sv-SE");
+
 export default function Checkout() {
   const { t } = useTranslation();
   const { isAdmin } = useAuth();
@@ -60,6 +64,8 @@ export default function Checkout() {
   const [prepay, setPrepay] = useState("");
   const [orderTitle, setOrderTitle] = useState(""); // наименование заказа
   const [titleHints, setTitleHints] = useState([]); // ранее использованные
+  // Дата заказа: по умолчанию сегодня, админ может поставить прошедшую.
+  const [orderDate, setOrderDate] = useState(todayStr);
   const [client, setClient] = useState({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" });
   const [clientId, setClientId] = useState(null);
   const [referredBy, setReferredBy] = useState("");
@@ -114,7 +120,11 @@ export default function Checkout() {
       kind: "material",
       id: m.id,
       name: m.name,
-      category: m.category,
+      // Поля `category` у материала больше нет — номенклатура разобрана на
+      // поля, и его заменил ТИП из справочника (Акрил, Форекс, Оргстекло).
+      // Фильтр в кассе всё это время подставлял `undefined`: выпадашка была с
+      // одним пустым пунктом, а React ругался на key={undefined}.
+      category: m.type_name || "",
       price: Number(m.price_per_unit),
       sqm_price: Number(m.sqm_price ?? m.price_per_sqm ?? 0),
       piece_price: Number(m.piece_price ?? 0),
@@ -130,12 +140,24 @@ export default function Checkout() {
   }, [materials, services, t]);
 
   const areaMaterials = materials.filter((m) => m.is_roll_material);
-  const categories = [...new Set(materials.map((m) => m.category))];
-  // The cutting service (work priced per running metre at the material's rate).
-  const cuttingService = useMemo(
-    () => services.find((s) => s.uses_running_meter && s.is_active !== false),
+  const categories = [...new Set(materials.map((m) => m.type_name).filter(Boolean))].sort();
+  // Услуги резки — по одной на станок (ЧПУ, лазер). Работа считается по
+  // погонному метру; ставку берём у станка, а если у него своей нет — у
+  // материала (так было до разделения на станки).
+  const MACHINE_ORDER = { CNC: 0, LASER: 1 };
+  const cuttingServices = useMemo(
+    () =>
+      services
+        .filter((s) => s.uses_running_meter && s.is_active !== false)
+        .sort((a, b) => (MACHINE_ORDER[a.machine] ?? 9) - (MACHINE_ORDER[b.machine] ?? 9)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [services]
   );
+  const cuttingService = cuttingServices[0];
+
+  const rateFor = (svc, mat) =>
+    String(Number(svc?.rate_per_pm) || Number(mat?.cut_rate_per_pm) || 0);
+  const svcById = (id) => cuttingServices.find((s) => s.id === Number(id)) || cuttingService;
 
   const visibleProducts = products.filter((p) => {
     if (search && !p.name.toLowerCase().includes(search.toLowerCase())) return false;
@@ -183,7 +205,8 @@ export default function Checkout() {
           running_meters: "",
           qty: "1",
           matPrice: String(matSqm(m)),
-          cutRate: String(m.cut_rate_per_pm ?? 0),
+          cutServiceId: cuttingService?.id ?? "",
+          cutRate: rateFor(cuttingService, m),
         });
         return;
       }
@@ -240,10 +263,11 @@ export default function Checkout() {
         if (q > 1) setCart((prev) => prev.map((l) => (l.key === `M${m.id}-PIECE` ? { ...l, qty: q } : l)));
         // Целый лист тоже можно резать: отдельная строка работы (пог.м × ставка).
         const runM = Number(cut.running_meters) || 0;
-        if (cut.pieceCut && cuttingService && runM > 0) {
+        const pieceSvc = svcById(cut.cutServiceId);
+        if (cut.pieceCut && pieceSvc && runM > 0) {
           setCart((prev) => [...prev, {
             key: `CW${m.id}-${Date.now()}`, kind: "cut-work",
-            serviceId: cuttingService.id, name: cuttingService.name || "Резка",
+            serviceId: pieceSvc.id, name: pieceSvc.name || "Резка",
             materialId: m.id, materialName: m.name,
             rate: Number(cut.cutRate || 0), runM, qty: 1,
           }]);
@@ -269,9 +293,10 @@ export default function Checkout() {
         setCut(null);
         return;
       }
+      const areaSvc = svcById(cut.cutServiceId);
       setCart((prev) => [...prev, {
         key: `C${m.id}-${cart.length}`, kind: "cutting",
-        serviceId: cuttingService.id, name: cuttingService.name || "Резка",
+        serviceId: areaSvc.id, name: areaSvc.name || "Резка",
         materialId: m.id, materialName: m.name, materialPrice: matPrice,
         rate: Number(cut.cutRate || 0),
         width: w, length: l, area, runM, qty: 1,
@@ -345,6 +370,9 @@ export default function Checkout() {
     });
     const payload = { payment_method: paymentMethod, items };
     if (orderTitle.trim()) payload.title = orderTitle.trim();
+    // Дату шлём, только когда она не сегодняшняя: у складовщика этого поля нет,
+    // и лишний параметр упёрся бы в проверку прав на пустом месте.
+    if (isAdmin && orderDate && orderDate !== todayStr()) payload.order_date = orderDate;
     // Пустое поле = ничего не приняли, весь заказ уходит в долг. Раньше пустое
     // молча означало «оплачено полностью», и долг терялся.
     if (paymentMethod !== "ONLINE") payload.amount_paid = Math.max(0, Number(prepay) || 0);
@@ -360,6 +388,8 @@ export default function Checkout() {
       setReferredBy("");
       setPrepay("");
       setOrderTitle("");
+      // Дату НЕ сбрасываем: заказы задним числом заносят пачкой за один день,
+      // и возврат на сегодня после каждой продажи заставлял бы вводить её снова.
       api.get("/clients/clients/").then((r) => setClientsList(r.data.results));
     } catch (e) {
       setError(apiError(e, t("common.error")));
@@ -516,6 +546,24 @@ export default function Checkout() {
             </datalist>
           </div>
 
+          {/* Дата заказа задним числом — только админу: по ней считаются
+              выручка, прибыль по дням и складской лист, то есть она правит
+              деньги уже закрытых месяцев. Складовщик оформляет сегодняшним. */}
+          {isAdmin && (
+            <div className="field">
+              <label>{t("checkout.orderDate")}</label>
+              <input
+                type="date"
+                value={orderDate}
+                max={todayStr()}
+                onChange={(e) => setOrderDate(e.target.value)}
+              />
+              <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+                {orderDate !== todayStr() ? t("checkout.orderDateBack") : t("checkout.orderDateHint")}
+              </p>
+            </div>
+          )}
+
           <div className="row">
             <div className="field" style={{ width: 120, margin: 0 }}>
               <label>{t("clients.type")}</label>
@@ -618,10 +666,17 @@ export default function Checkout() {
                   </strong>
                 </div>
               )}
+              {/* Переплата больше не пропадает: она запоминается сдачей за
+                  клиентом. Отдали на месте — нажать «Выдать» в Чеках, и она
+                  спишется; не отдали (в кассе не было мелочи) — останется
+                  видна, пока не отдадут. */}
               {Number(prepay || 0) > total && total > 0 && (
                 <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
                   {t("checkout.change")}:{" "}
-                  <strong>{(Number(prepay) - total).toFixed(0)} сом</strong>
+                  <strong style={{ color: "var(--accent-strong)" }}>
+                    {(Number(prepay) - total).toFixed(0)} сом
+                  </strong>
+                  <div style={{ fontSize: 12 }}>{t("checkout.changeHint")}</div>
                 </div>
               )}
             </div>
@@ -674,6 +729,28 @@ export default function Checkout() {
                 </p>
               )}
             </>
+          )}
+
+          {/* Станок: ЧПУ или лазер. Показываем, только когда станков правда
+              несколько — если он один, спрашивать не о чем, и лишний ряд кнопок
+              в кассе только мешает. Смена станка подставляет ЕГО ставку. */}
+          {isMatModal && cuttingServices.length > 1 && (cut.saleMode === "AREA" || cut.pieceCut) && (
+            <div className="field">
+              <label>{t("checkout.cutMachine")}</label>
+              <div className="tabs" style={{ marginTop: 0 }}>
+                {cuttingServices.map((s) => (
+                  <button
+                    key={s.id}
+                    className={Number(cut.cutServiceId) === s.id ? "active" : ""}
+                    onClick={() =>
+                      setCut({ ...cut, cutServiceId: s.id, cutRate: rateFor(s, cut.material) })
+                    }
+                  >
+                    {s.machine_display || s.name}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
 
           {/* Interior-install service: material picker */}

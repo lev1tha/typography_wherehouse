@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
+import BulkPayModal from "../../components/BulkPayModal.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
@@ -12,6 +13,8 @@ import { useUI } from "../../components/UIProvider.jsx";
 
 // Сколько заказов показывать в карточке сразу — остальные под кнопкой.
 const ORDERS_PREVIEW = 5;
+// Оплат в карточке показываем столько же: история длиннее — в чеках.
+const PAYMENTS_PREVIEW = 5;
 
 export default function Clients() {
   const { t } = useTranslation();
@@ -26,10 +29,18 @@ export default function Clients() {
   const [day, setDay] = useState(""); // конкретный день внутри месяца
   const [sort, setSort] = useState({ key: "sort_name", dir: "asc" });
   const [showAllOrders, setShowAllOrders] = useState(false);
+  const [showAllPayments, setShowAllPayments] = useState(false);
   const [onlyDebt, setOnlyDebt] = useState(false);
   const [minOrders, setMinOrders] = useState("");
   // Клиента можно завести заранее, не дожидаясь продажи.
   const [creating, setCreating] = useState(null);
+  // Общая выплата — одна сумма сразу за несколько заказов.
+  const [payingClient, setPayingClient] = useState(null);
+  // Склейка двойников: {from, preview} — что именно переедет, показываем до
+  // подтверждения, потому что вторая карточка удаляется безвозвратно.
+  const [merging, setMerging] = useState(null);
+  // «Кому мы должны сдачу» — обратный список к должникам.
+  const [onlyChange, setOnlyChange] = useState(false);
 
   // День важнее месяца: выбран день — смотрим ровно его, иначе весь месяц.
   function periodParams() {
@@ -48,6 +59,7 @@ export default function Clients() {
       ...(search ? { search } : {}),
       ...periodParams(),
       ...(onlyDebt ? { has_debt: 1 } : {}),
+      ...(onlyChange ? { has_change: 1 } : {}),
       ...(Number(minOrders) > 0 ? { min_orders: Number(minOrders) } : {}),
       ordering: (sort.dir === "desc" ? "-" : "") + sort.key,
     };
@@ -58,7 +70,7 @@ export default function Clients() {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, period.year, period.month, day, onlyDebt, minOrders, sort.key, sort.dir]);
+  }, [search, period.year, period.month, day, onlyDebt, onlyChange, minOrders, sort.key, sort.dir]);
 
   function onSort(key) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "desc" }));
@@ -68,7 +80,17 @@ export default function Clients() {
     const { data } = await api.get(`/clients/clients/${c.id}/`, { params: periodParams() });
     setDetail(data);
     setShowAllOrders(false);
+    setShowAllPayments(false);
+    setMerging(null);
     setReqForm({ referred_by: "", reason: "" });
+  }
+
+  // После выплаты перечитываем карточку и список: изменились и долги заказов,
+  // и колонка «Долг» в таблице.
+  async function refreshDetail(id) {
+    const { data } = await api.get(`/clients/clients/${id}/`, { params: periodParams() });
+    setDetail(data);
+    load();
   }
 
   // Пароль кабинета выдаёт админ и диктует клиенту. Показывается один раз:
@@ -95,6 +117,40 @@ export default function Clients() {
       setCreating(null);
       load();
       toast(t("clients.created"));
+    } catch (e) {
+      toast(errMsg(e), "error");
+    }
+  }
+
+  // Смотрим, что переедет, ДО подтверждения: склейка удаляет вторую карточку
+  // и откатить её нечем.
+  async function previewMerge(fromId) {
+    if (!fromId) return setMerging(null);
+    try {
+      const { data } = await api.get(`/clients/clients/${detail.id}/merge-preview/`, {
+        params: { from: fromId },
+      });
+      setMerging({ from: fromId, preview: data });
+    } catch (e) {
+      toast(errMsg(e), "error");
+      setMerging(null);
+    }
+  }
+
+  async function doMerge() {
+    if (!merging) return;
+    const { preview } = merging;
+    const question = t("clients.mergeConfirm", {
+      drop: preview.drop,
+      keep: preview.keep,
+      orders: preview.orders,
+    });
+    if (!(await confirm(question))) return;
+    try {
+      await api.post(`/clients/clients/${detail.id}/merge/`, { from: merging.from });
+      setMerging(null);
+      await refreshDetail(detail.id);
+      toast(t("clients.mergeDone", { name: preview.drop }));
     } catch (e) {
       toast(errMsg(e), "error");
     }
@@ -190,6 +246,21 @@ export default function Clients() {
           <span className="muted">—</span>
         ),
     },
+    // Сдача — сколько ЦЕХ должен клиенту. Соседняя колонка к долгу: вопрос
+    // «кто кому остался должен» имеет две стороны, и вторую тоже надо видеть.
+    {
+      key: "change_due",
+      label: t("clients.changeDue"),
+      sortKey: "change_due_total",
+      render: (c) =>
+        Number(c.change_due) > 0 ? (
+          <span style={{ color: "var(--accent-strong)", fontWeight: 600 }}>
+            {Number(c.change_due).toLocaleString("ru-RU")} сом
+          </span>
+        ) : (
+          <span className="muted">—</span>
+        ),
+    },
     {
       key: "telegram",
       label: t("clients.telegram"),
@@ -248,21 +319,32 @@ export default function Clients() {
         </div>
         <div className="field" style={{ margin: 0 }}>
           <label>{t("clients.debtFilter")}</label>
-          <button
-            type="button"
-            className={onlyDebt ? "" : "secondary"}
-            onClick={() => setOnlyDebt((v) => !v)}
-          >
-            {t("clients.onlyDebtors")}
-          </button>
+          <div className="row" style={{ margin: 0, gap: 8 }}>
+            <button
+              type="button"
+              className={onlyDebt ? "" : "secondary"}
+              onClick={() => setOnlyDebt((v) => !v)}
+            >
+              {t("clients.onlyDebtors")}
+            </button>
+            {/* Сдача — зеркало долга, поэтому фильтр стоит той же парой. */}
+            <button
+              type="button"
+              className={onlyChange ? "" : "secondary"}
+              onClick={() => setOnlyChange((v) => !v)}
+            >
+              {t("clients.onlyChange")}
+            </button>
+          </div>
         </div>
-        {(day || period.month || onlyDebt || minOrders) && (
+        {(day || period.month || onlyDebt || onlyChange || minOrders) && (
           <button
             className="ghost"
             onClick={() => {
               setDay("");
               setPeriod({ ...period, month: null });
               setOnlyDebt(false);
+              setOnlyChange(false);
               setMinOrders("");
             }}
           >
@@ -300,14 +382,37 @@ export default function Clients() {
           </div>
           <div className="crow">
             <span className="k">{t("receipts.debt")}</span>
-            <span>
+            <span className="row" style={{ gap: 8, alignItems: "center", margin: 0 }}>
               {Number(detail.debt) > 0 ? (
                 <strong style={{ color: "var(--danger)" }}>{Number(detail.debt).toLocaleString("ru-RU")} сом</strong>
               ) : (
                 <span className="paid">0</span>
               )}
+              {/* Общая выплата: клиент гасит несколько заказов одной суммой.
+                  Деньги — за админом, как и оплата по отдельному чеку. */}
+              {isAdmin && Number(detail.debt) > 0 && (
+                <button
+                  type="button"
+                  className="secondary"
+                  style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
+                  onClick={() => setPayingClient(detail)}
+                >
+                  {t("clients.bulkPay")}
+                </button>
+              )}
             </span>
           </div>
+          {/* Сдача показывается ТОЛЬКО когда она есть: строка «сдача 0» у
+              каждого клиента — шум, а не информация. Выдаётся она в «Чеках», по
+              тому заказу, где переплатили: там видно, за что именно. */}
+          {Number(detail.change_due) > 0 && (
+            <div className="crow">
+              <span className="k">{t("clients.changeDue")}</span>
+              <strong style={{ color: "var(--accent-strong)" }}>
+                {Number(detail.change_due).toLocaleString("ru-RU")} сом
+              </strong>
+            </div>
+          )}
           <div className="crow">
             <span className="k">{t("clients.portalPass")}</span>
             <span className="row" style={{ gap: 8, alignItems: "center", margin: 0 }}>
@@ -358,6 +463,11 @@ export default function Clients() {
                         {t("receipts.debt")}: {Number(o.debt).toLocaleString("ru-RU")}
                       </span>
                     )}
+                    {Number(o.change_due) > 0 && (
+                      <span style={{ color: "var(--accent-strong)", fontSize: 13 }}>
+                        {t("receipts.change")}: {Number(o.change_due).toLocaleString("ru-RU")}
+                      </span>
+                    )}
                   </div>
                 </div>
               ))
@@ -376,6 +486,40 @@ export default function Clients() {
               </button>
             )}
           </div>
+
+          {/* История оплат: когда и сколько клиент реально принёс. По полю
+              «оплачено» на заказе этого не видно — общая выплата расходится
+              сразу по нескольким заказам, а дата может быть задним числом. */}
+          {detail.payments?.length > 0 && (
+            <div className="field" style={{ marginTop: 14 }}>
+              <label>{t("clients.paymentsList")}</label>
+              {(showAllPayments ? detail.payments : detail.payments.slice(0, PAYMENTS_PREVIEW)).map((p) => (
+                <div className="crow" key={p.id} style={{ fontSize: 13 }}>
+                  <span>
+                    <span className="muted">{new Date(p.paid_on).toLocaleDateString("ru-RU")}</span>
+                    {" · "}
+                    №{p.order_number}
+                    {p.order_title ? <span className="muted"> · {p.order_title}</span> : null}
+                  </span>
+                  <span>
+                    <strong>{Math.round(Number(p.amount)).toLocaleString("ru-RU")} сом</strong>
+                    <span className="muted" style={{ fontSize: 12 }}> · {p.method_display}</span>
+                  </span>
+                </div>
+              ))}
+              {detail.payments.length > PAYMENTS_PREVIEW && (
+                <button
+                  className="ghost"
+                  style={{ color: "var(--accent-strong)" }}
+                  onClick={() => setShowAllPayments((v) => !v)}
+                >
+                  {showAllPayments
+                    ? t("clients.ordersCollapse")
+                    : t("clients.paymentsShowAll", { count: detail.payments.length })}
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Who referred this client. Free to set once; changing a locked
               referral needs admin override or a moderated change request. */}
@@ -490,6 +634,58 @@ export default function Clients() {
               <span className="muted">{t("common.empty")}</span>
             )}
           </div>
+
+          {/* Склейка двойников. Один человек, заведённый дважды (номер записали
+              в разном формате), имел две карточки — и его заказы с долгом лежали
+              двумя стопками. Прячем под раскрывашку: карточка удаляется
+              безвозвратно, такому не место рядом с обычными полями. */}
+          {isAdmin && (
+            <details style={{ marginTop: 18 }} onToggle={() => setMerging(null)}>
+              <summary style={{ cursor: "pointer", fontSize: 13, color: "var(--ink-muted)" }}>
+                {t("clients.mergeTitle")}
+              </summary>
+              <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>{t("clients.mergeHint")}</p>
+              <select
+                value={merging?.from || ""}
+                onChange={(e) => previewMerge(e.target.value)}
+              >
+                <option value="">— {t("clients.mergePick")} —</option>
+                {clients
+                  .filter((c) => c.id !== detail.id)
+                  .map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.display_name} ({c.phone})
+                    </option>
+                  ))}
+              </select>
+
+              {merging?.preview && (
+                <div className="card" style={{ background: "var(--canvas)", padding: 12, marginTop: 8 }}>
+                  <div className="crow">
+                    <span className="k">{t("clients.mergeOrders")}</span>
+                    <strong>{merging.preview.orders}</strong>
+                  </div>
+                  {Number(merging.preview.debt) > 0 && (
+                    <div className="crow">
+                      <span className="k">{t("receipts.debt")}</span>
+                      <strong style={{ color: "var(--danger)" }}>
+                        {Number(merging.preview.debt).toLocaleString("ru-RU")} сом
+                      </strong>
+                    </div>
+                  )}
+                  {merging.preview.referrals > 0 && (
+                    <div className="crow">
+                      <span className="k">{t("clients.referrals")}</span>
+                      <strong>{merging.preview.referrals}</strong>
+                    </div>
+                  )}
+                  <button className="danger" style={{ marginTop: 10 }} onClick={doMerge}>
+                    {t("clients.mergeAction", { name: merging.preview.drop })}
+                  </button>
+                </div>
+              )}
+            </details>
+          )}
         </Modal>
       )}
 
@@ -548,6 +744,18 @@ export default function Clients() {
             />
           </div>
         </Modal>
+      )}
+
+      {payingClient && (
+        <BulkPayModal
+          client={payingClient}
+          orders={payingClient.orders}
+          onClose={() => setPayingClient(null)}
+          onPaid={() => {
+            setPayingClient(null);
+            refreshDetail(payingClient.id);
+          }}
+        />
       )}
 
       {issuedPassword && (
