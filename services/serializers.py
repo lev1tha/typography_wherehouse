@@ -26,14 +26,19 @@ class PrintingServiceSerializer(serializers.ModelSerializer):
     uses_running_meter = serializers.BooleanField(read_only=True)
     uses_pieces = serializers.BooleanField(read_only=True)
 
+    machine_display = serializers.CharField(source="get_machine_display", read_only=True)
+
     class Meta:
         model = PrintingService
         fields = [
             "id",
             "name",
             "kind",
+            "machine",
+            "machine_display",
             "base_price",
             "rate_flat",
+            "rate_per_pm",
             "rate_per_piece",
             "uses_area",
             "uses_material",

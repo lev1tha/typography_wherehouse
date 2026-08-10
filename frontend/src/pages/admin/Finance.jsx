@@ -23,13 +23,16 @@ function periodParams({ year, month }) {
   return { date_from: `${year}-${p(month)}-01`, date_to: `${year}-${p(month)}-${p(last)}` };
 }
 
-function Stat({ label, value, color }) {
+function Stat({ label, value, color, sub }) {
   return (
     <div className="stat">
       <div className="label">{label}</div>
       <div className="value" style={color ? { color: `var(--${color})` } : undefined}>
         {value}
       </div>
+      {/* Вторая строка — объём работы под суммой: 12 000 сом это много мелких
+          резов или один большой лист, по одной сумме не видно. */}
+      {sub ? <div className="muted" style={{ fontSize: 13, marginTop: 2 }}>{sub}</div> : null}
     </div>
   );
 }
@@ -428,14 +431,58 @@ export default function Finance() {
 
       <div className="card" style={{ marginTop: 16 }}>
         <h3>{t("finance.cuttingTitle")}</h3>
+        {/* Блок читался непонятно: три цифры подряд без единого слова о том,
+            что они значат. Объяснение стоит прямо здесь, а не в документации —
+            искать его никто не пойдёт. */}
+        <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.cuttingHint")}</p>
         <div className="stat-grid">
-          {/* Разбивка по типам из справочника: показываем только те, по которым
-              в периоде реально резали, — пустые карточки ничего не сообщают. */}
-          <Stat label={t("finance.cuttingTotal")} value={som(report.cutting?.total)} />
+          {/* ГЛАВНАЯ величина — квадратные метры, а не сумма: вопрос «сколько
+              наработал станок» это про объём работы, а деньги с него —
+              следствие ставки. Сумма и погонные метры ушли под цифру. */}
+          <Stat
+            label={t("finance.cuttingTotal")}
+            value={`${q2(report.cutting?.area)} ${t("finance.sqmShort")}`}
+            sub={t("finance.cuttingVolumeArea", {
+              pm: q2(report.cutting?.running_meters),
+              sum: som(report.cutting?.total),
+            })}
+          />
+          {/* Разбивка по СТАНКАМ: показываем только те, на которых в периоде
+              реально резали, — пустые карточки ничего не сообщают. */}
           {(report.cutting?.rows || []).map((row) => (
-            <Stat key={row.id ?? "none"} label={row.name} value={som(row.amount)} />
+            <Stat
+              key={row.id ?? "none"}
+              label={row.name}
+              value={`${q2(row.area)} ${t("finance.sqmShort")}`}
+              sub={t("finance.cuttingVolumeArea", {
+                pm: q2(row.running_meters),
+                sum: som(row.amount),
+              })}
+            />
           ))}
         </div>
+
+        {/* Кто сколько отрезал. Считается по тому, кто ОФОРМИЛ заказ — поля
+            «мастер за станком» в системе нет, и выдавать одно за другое
+            нельзя, поэтому так и подписано. */}
+        {(report.cutting?.by_user || []).length > 0 && (
+          <>
+            <h4 style={{ margin: "18px 0 2px" }}>{t("finance.cuttingByUser")}</h4>
+            <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
+              {t("finance.cuttingByUserHint")}
+            </p>
+            <div className="stat-grid">
+              {report.cutting.by_user.map((u) => (
+                <Stat
+                  key={u.id ?? "none"}
+                  label={u.name}
+                  value={`${q2(u.area)} ${t("finance.sqmShort")}`}
+                  sub={t("finance.cuttingUserPm", { pm: q2(u.running_meters) })}
+                />
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       {/* Складской лист заказчика («остаток в начале месяца · поступление ·
@@ -505,30 +552,21 @@ export default function Finance() {
         </div>
       </details>
 
-      {/* Списки трат по видам — вся история за период одним взглядом. Диалог по
-          клику на строку отчёта удобен для одного вида, но месяц целиком он не
-          показывает, поэтому списки остались на месте. */}
-      <ExpenseListSection
-        title={t("finance.blockFixed")}
-        subtitle={t("fixed.subtitle")}
-        kinds={fixedKinds}
-        period={params}
-        onChanged={reloadAll}
-      />
-      <ExpenseListSection
-        title={t("finance.salary")}
-        subtitle={t("salary.subtitle")}
-        kinds={salaryKinds}
-        period={params}
-        onChanged={reloadAll}
-      />
-      <ExpenseListSection
-        title={t("finance.tabPurchases")}
-        subtitle={t("expenses.subtitle")}
-        kinds={purchaseKinds}
-        period={params}
-        onChanged={reloadAll}
-      />
+      {/* ОДИН список всех трат за период. Раньше здесь стояли три секции —
+          постоянные, зарплаты, покупки, — и у каждой свой ряд плиток с суммами
+          по видам. Те же виды с теми же суммами уже перечислены в блоках отчёта
+          выше, поэтому страница заканчивалась тремя экранами нулей подряд.
+          Диалог по клику на строку отчёта показывает один вид, а этот список —
+          весь месяц сразу, поэтому он и остался, но уже один. */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <ExpenseListSection
+          title={t("finance.allExpensesTitle")}
+          subtitle={t("finance.allExpensesHint")}
+          kinds={[...fixedKinds, ...salaryKinds, ...purchaseKinds]}
+          period={params}
+          onChanged={reloadAll}
+        />
+      </div>
 
       {openKind && (
         <ExpenseKindModal

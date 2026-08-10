@@ -481,13 +481,40 @@ class CogsTests(APITestCase):
         # 10 кв.м из первой (×200) + 2 из второй (×500) = 2000 + 1000 = 3000.
         self.assertEqual(Decimal(str(receipt.items.get().cost_total)), Decimal("3000"))
 
-    def test_daily_report_puts_cost_on_sale_day(self):
-        self._sell(area="2")
+    def test_daily_report_uses_the_same_profit_formula_as_the_tiles(self):
+        """График по дням и плитки сверху должны считать ОДНО И ТО ЖЕ.
+
+        Раньше себестоимость проданного попадала в дневные расходы, а в плитки —
+        нет, и на одном экране стояли две «Прибыли», которые спорили друг с
+        другом (6 924 сверху и 939 в графике). Правило заказчика одно: прибыль =
+        выручка − (Материалы + Постоянные + Переменные), себестоимость
+        справочная. График живёт по нему же.
+        """
+        self._sell(area="2")  # себестоимость 400, записей трат нет
         today = timezone.localdate()
         r = self.client.get("/api/finance/daily/", {"year": today.year, "month": today.month})
         self.assertEqual(r.status_code, 200, r.data)
         row = next(x for x in r.data["rows"] if x["day"] == today.day)
-        self.assertEqual(Decimal(str(row["variable"])), Decimal("400"))
+        self.assertEqual(Decimal(str(row["variable"])), Decimal("0"))
+
+        # Итог графика сходится с отчётом: расходов нет — прибыль равна выручке.
+        totals = r.data["totals"]
+        self.assertEqual(Decimal(str(totals["variable"])), Decimal("0"))
+        self.assertEqual(
+            Decimal(str(totals["profit"])), Decimal(str(totals["revenue"]))
+        )
+
+    def test_dated_expense_still_lands_on_its_day(self):
+        """Убрав себестоимость, нельзя было потерять сами траты: запись с датой
+        обязана попасть в свой день."""
+        from finance.models import ExpenseEntry, ExpenseKind
+
+        kind = ExpenseKind.objects.filter(block=ExpenseKind.Block.VARIABLE).first()
+        today = timezone.localdate()
+        ExpenseEntry.objects.create(kind=kind, amount=Decimal("700"), spent_at=today)
+        r = self.client.get("/api/finance/daily/", {"year": today.year, "month": today.month})
+        row = next(x for x in r.data["rows"] if x["day"] == today.day)
+        self.assertEqual(Decimal(str(row["variable"])), Decimal("700"))
 
 
 class MaterialsBlockTests(APITestCase):

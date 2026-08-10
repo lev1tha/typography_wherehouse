@@ -8,7 +8,6 @@ import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 
 const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
-const today = () => new Date().toISOString().slice(0, 10);
 
 function Stat({ label, value }) {
   return (
@@ -19,16 +18,23 @@ function Stat({ label, value }) {
   );
 }
 
-// Список трат по группе видов расхода — то, что раньше было отдельными
-// страницами «Постоянные расходы», «Зарплаты» и «Покупки». Диалог по клику на
-// строку отчёта удобен для одного вида, но всю историю за месяц одним списком
-// он не показывает, поэтому списки остались.
+// Все траты за период ОДНОЙ таблицей: когда, на что, сколько и в какую строку
+// отчёта попало.
+//
+// Раньше здесь было три отдельные секции — «Постоянные расходы», «Зарплаты»,
+// «Покупки», — и у каждой свой ряд плиток с суммами по видам. Те же виды с теми
+// же суммами уже стоят в блоках отчёта выше, поэтому экран заканчивался тремя
+// экранами нулей подряд: «Аренда 0 · Коммуналка 0 · Интернет 0 · Нет данных»,
+// и так трижды. Плитки убраны как дубль, таблицы слиты в одну.
+//
+// ДОБАВЛЕНИЯ здесь тоже нет: форма «вид расхода · за что · дата · сумма»
+// повторяла диалог строки отчёта, только хуже — вид приходилось выбирать
+// руками, и не было видно, куда трата попадёт. Правка и удаление остались.
 export default function ExpenseListSection({ title, subtitle, kinds, period, onChanged }) {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
   const [rows, setRows] = useState([]);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ kind: "", name: "", amount: "", spent_at: today(), note: "" });
 
   const kindIds = kinds.map((k) => k.id);
   const kindById = Object.fromEntries(kinds.map((k) => [k.id, k]));
@@ -46,25 +52,6 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, onC
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(load, [period?.date_from, period?.date_to, kindIds.join(",")]);
-
-  // Вид по умолчанию — первый в группе, чтобы форма была готова к вводу.
-  useEffect(() => {
-    if (!form.kind && kinds.length) setForm((f) => ({ ...f, kind: kinds[0].id }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kinds.length]);
-
-  function add() {
-    if (!form.amount) return toast(t("expenses.needAmount"), "error");
-    api
-      .post("/finance/expense-entries/", { ...form, amount: Number(form.amount) })
-      .then(() => {
-        setForm({ ...form, name: "", amount: "", note: "" });
-        load();
-        onChanged?.();
-        toast(t("expenses.added"));
-      })
-      .catch(() => toast(t("common.error"), "error"));
-  }
 
   function saveEdit() {
     if (!editing.amount) return toast(t("expenses.needAmount"), "error");
@@ -94,7 +81,6 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, onC
   }
 
   const total = rows.reduce((s, r) => s + Number(r.amount || 0), 0);
-  const sumBy = (id) => rows.filter((r) => r.kind === id).reduce((s, r) => s + Number(r.amount), 0);
 
   const columns = [
     { key: "spent_at", label: t("expenses.date") },
@@ -134,52 +120,17 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, onC
 
   return (
     <>
-      <h2 style={{ marginTop: 28 }}>{title}</h2>
-      {subtitle && <p className="muted">{subtitle}</p>}
+      {title && <h3 style={{ marginTop: 22 }}>{title}</h3>}
+      {subtitle && <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{subtitle}</p>}
 
-      <div className="card" style={{ margin: "12px 0 16px" }}>
-        <div className="row">
-          <div className="field" style={{ minWidth: 190 }}>
-            <label>{t("expenses.category")}</label>
-            {kindSelect(form.kind, (v) => setForm({ ...form, kind: v }))}
-          </div>
-          <div className="field grow">
-            <label>{isSalary(form.kind) ? t("salary.employee") : t("fixed.forWhat")}</label>
-            <input
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder={isSalary(form.kind) ? t("salary.employeePh") : t("fixed.forWhatPh")}
-            />
-          </div>
-          <div className="field" style={{ width: 160 }}>
-            <label>{t("expenses.date")}</label>
-            <input type="date" value={form.spent_at} onChange={(e) => setForm({ ...form, spent_at: e.target.value })} />
-          </div>
-          <div className="field" style={{ width: 150 }}>
-            <label>{t("expenses.amount")}</label>
-            <input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
-          </div>
-          <div className="field" style={{ display: "flex", alignItems: "flex-end" }}>
-            <button onClick={add}>{t("common.add")}</button>
-          </div>
+      {/* Итог одной строкой, а не рядом плиток по видам: суммы по видам стоят
+          в блоках отчёта выше, и повторять их здесь незачем. */}
+      {rows.length > 0 && (
+        <div className="crow" style={{ marginBottom: 6 }}>
+          <span className="k">{t("fixed.totalForPeriod")}</span>
+          <strong>{som(total)}</strong>
         </div>
-        <div className="field" style={{ marginTop: 4, marginBottom: 0 }}>
-          <label>{t("expenses.note")}</label>
-          <input
-            value={form.note}
-            onChange={(e) => setForm({ ...form, note: e.target.value })}
-            placeholder={t("expenses.notePh")}
-          />
-        </div>
-      </div>
-
-      <div className="stat-grid" style={{ marginBottom: 16 }}>
-        <Stat label={t("fixed.totalForPeriod")} value={som(total)} />
-        {kinds.map((k) => (
-          <Stat key={k.id} label={k.name} value={som(sumBy(k.id))} />
-        ))}
-      </div>
-
+      )}
       <DataTable columns={columns} rows={rows} />
 
       {editing && (

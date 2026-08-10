@@ -13,9 +13,11 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.permissions import IsAdmin
+from accounts.models import User
+from accounts.permissions import IsAdminOrAccountantRead, SeesMoney
 from sales.models import Receipt, TransactionItem
-from warehouse.models import InventoryLog, Material, MaterialType
+from services.models import PrintingService
+from warehouse.models import InventoryLog, Material
 
 from .material_sheet import (
     collect_flows,
@@ -37,11 +39,11 @@ _SUM = lambda field: Coalesce(Sum(field), Decimal("0"), output_field=DecimalFiel
 
 class FinanceUnlockView(APIView):
     """POST /api/finance/unlock/ — verify the separate password that gates the
-    Finance & detailed-analytics screens (on top of the admin login). Admin-only;
+    Finance & detailed-analytics screens (on top of the login). Админ и бухгалтер;
     the password itself lives in settings (FINANCE_PASSWORD, configured via .env),
     so it never ships in the frontend bundle."""
 
-    permission_classes = [IsAdmin]
+    permission_classes = [SeesMoney]
 
     def post(self, request):
         supplied = str(request.data.get("password") or "")
@@ -129,7 +131,7 @@ class ExpenseKindViewSet(viewsets.ModelViewSet):
     показывает (та же логика, что у материалов на складе)."""
 
     serializer_class = ExpenseKindSerializer
-    permission_classes = [IsAdmin]
+    permission_classes = [IsAdminOrAccountantRead]
     filterset_fields = ["block", "in_profit"]
     pagination_class = None
 
@@ -173,7 +175,7 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
     ?spent_at=<дата> (день)."""
 
     serializer_class = ExpenseEntrySerializer
-    permission_classes = [IsAdmin]
+    permission_classes = [IsAdminOrAccountantRead]
     filterset_fields = ["kind", "spent_at"]
     ordering = ["-spent_at", "-created_at"]
     # Диалог вида расхода показывает все траты за период целиком — страница на
@@ -198,7 +200,7 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
 class FinanceSettingsView(APIView):
     """GET/PATCH the singleton manual P&L inputs."""
 
-    permission_classes = [IsAdmin]
+    permission_classes = [IsAdminOrAccountantRead]
 
     def get(self, request):
         return Response(FinanceSettingsSerializer(FinanceSettings.load()).data)
@@ -219,7 +221,7 @@ class FinanceReportView(APIView):
     Manual inputs come from FinanceSettings; «остаток на конец» = live stock value;
     variable costs = sum of Expense rows by category."""
 
-    permission_classes = [IsAdmin]
+    permission_classes = [IsAdminOrAccountantRead]
 
     def get(self, request):
         s = FinanceSettings.load()
@@ -379,13 +381,27 @@ class FinanceReportView(APIView):
             if owed > 0:
                 client_debt += owed
 
-        # Сумма резки по материалам: выручку услуги «Резка» каждого чека относим
-        # к категории материала этого чека (Форекс / Алюкобонд / Акрил / Прочее).
-        # Разбивка идёт по ТИПУ материала из справочника. Раньше тип угадывался
-        # подстрокой в названии и на реальной номенклатуре ошибался: «синий
-        # бишкек», «день ночь» и «салатовый» — акрил, а падали в «Прочее».
-        cut_by_type = defaultdict(lambda: Decimal("0"))
+        # Резка — по СТАНКАМ: ЧПУ и лазер. Раньше строки были по типу материала
+        # (Акрил / Форекс / Оргстекло), но заказчик считает работу цеха станками:
+        # «сколько наработал ЧПУ, сколько лазер» — это его вопрос, а материал в
+        # нём вторичен. Материал никуда не делся: он остался в складском листе,
+        # где у каждого материала стоит своя выручка с резки.
+        cut_by_machine = defaultdict(lambda: Decimal("0"))
+        # Объём работы двумя величинами — одной суммы мало: 12 000 сом это много
+        # мелких резов или один большой лист?
+        #   ПОГОННЫЕ метры — длина реза, по ней и считается сумма (пог.м × ставка);
+        #   КВАДРАТНЫЕ — площадь резаного куска, берётся у материала того же чека.
+        # Это РАЗНЫЕ величины, складывать их между собой нельзя.
+        area_by_machine = defaultdict(lambda: Decimal("0"))
+        pm_by_machine = defaultdict(lambda: Decimal("0"))
+        # Сколько квадратных метров прошло через руки каждого сотрудника. Это
+        # ответ на «кто сколько отрезал» — вопрос про ЛЮДЕЙ, а не про деньги,
+        # поэтому и считается в метрах.
+        area_by_user = defaultdict(lambda: Decimal("0"))
+        pm_by_user = defaultdict(lambda: Decimal("0"))
         cutting_total = Decimal("0")
+        cutting_area = Decimal("0")
+        cutting_pm = Decimal("0")
         cut_receipts = (
             by_created(
                 Receipt.objects.filter(
@@ -395,42 +411,106 @@ class FinanceReportView(APIView):
                 ).exclude(status=Receipt.Status.CANCELLED)
             )
             .distinct()
+            .select_related("cashier")
             .prefetch_related("items__material__type", "items__service")
         )
         for r in cut_receipts:
             items = list(r.items.all())
-            cut_rev = sum(
-                (
-                    i.quantity * i.price_per_item
-                    for i in items
-                    if i.type == TransactionItem.Type.SERVICE
-                    and not i.is_returned
-                    and i.service_id
-                    and i.service.kind == "CUTTING"
-                ),
-                Decimal("0"),
-            )
-            mat = next(
-                (
-                    i.material
-                    for i in items
-                    if i.type == TransactionItem.Type.MATERIAL and not i.is_returned and i.material_id
-                ),
-                None,
-            )
-            cutting_total += cut_rev
-            cut_by_type[mat.type_id if mat and mat.type_id else None] += cut_rev
+            # Строки работы мастера. Их количество — это и есть длина реза в
+            # погонных метрах, из неё же складывается сумма.
+            cut_lines = [
+                i
+                for i in items
+                if i.type == TransactionItem.Type.SERVICE
+                and not i.is_returned
+                and i.service_id
+                and i.service.kind == "CUTTING"
+            ]
+            # Площадь резаного материала этого чека. Продажа по кв.м даёт её
+            # прямо в количестве; продажа листами — через площадь листа. Штучный
+            # материал (крепёж) площади не имеет и в кв.м не попадает.
+            area = Decimal("0")
+            for i in items:
+                if i.type != TransactionItem.Type.MATERIAL or i.is_returned or not i.material_id:
+                    continue
+                if i.sale_mode == TransactionItem.SaleMode.PIECE:
+                    if i.material.piece_area:
+                        area += i.quantity * i.material.piece_area
+                else:
+                    area += i.quantity
 
-        # Строки — только типы, по которым в периоде что-то резали, плюс
-        # «Без типа», если такой материал попался.
-        type_names = dict(MaterialType.objects.values_list("id", "name"))
+            receipt_pm = sum((i.quantity for i in cut_lines), Decimal("0"))
+            for idx, line in enumerate(cut_lines):
+                machine = line.service.machine or ""
+                rev = line.quantity * line.price_per_item
+                cut_by_machine[machine] += rev
+                pm_by_machine[machine] += line.quantity
+                cutting_total += rev
+                cutting_pm += line.quantity
+                # Площадь у чека одна на всех, а станков в нём может быть два.
+                # Делим её пропорционально длине реза: у чека с одним станком
+                # (обычный случай) он получает всю площадь целиком.
+                #
+                # Погонные метры вводятся ВРУЧНУЮ и могут быть не введены — тогда
+                # делить не по чему. Раньше в этом случае доля выходила нулевой,
+                # и площадь попадала в «Резка, всего», но ни в одну строку
+                # станка: в итоге «всего 1,56 кв.м», а под ним «ЧПУ 0 кв.м».
+                # Делим поровну — резали же на этих станках, сколько бы метров
+                # ни забыли вписать.
+                if receipt_pm:
+                    share = line.quantity / receipt_pm
+                else:
+                    share = Decimal("1") / Decimal(len(cut_lines))
+                area_by_machine[machine] += area * share
+                # Сотруднику площадь отдаём целиком и один раз: чек оформил один
+                # человек, и дробить её между строками того же чека незачем.
+                if idx == 0:
+                    area_by_user[r.cashier_id] += area
+                pm_by_user[r.cashier_id] += line.quantity
+            cutting_area += area
+
+        # Строки — станки, по которым в периоде что-то резали. «Без станка» —
+        # старые чеки, оформленные до разделения, если у их услуги станок не
+        # проставлен: молча прятать их сумму нельзя, иначе строки не сойдутся
+        # с «Резка, всего».
+        machine_names = dict(PrintingService.Machine.choices)
+        # Сортируем строки по ПЛОЩАДИ, а не по сумме: главная величина блока —
+        # квадратные метры, и порядок строк должен объяснять именно её.
+        machines = set(cut_by_machine) | set(area_by_machine)
+        user_names = dict(
+            User.objects.filter(id__in=[u for u in area_by_user if u]).values_list(
+                "id", "username"
+            )
+        )
         cutting = {
             "total": cutting_total,
+            "area": q2(cutting_area),
+            "running_meters": q2(cutting_pm),
             "rows": [
-                {"id": type_id, "name": type_names.get(type_id) or "Без типа", "amount": amount}
-                for type_id, amount in sorted(
-                    cut_by_type.items(), key=lambda kv: -kv[1]
+                {
+                    "id": machine or None,
+                    "name": machine_names.get(machine) or "Без станка",
+                    "amount": cut_by_machine.get(machine, Decimal("0")),
+                    "area": q2(area_by_machine.get(machine, Decimal("0"))),
+                    "running_meters": q2(pm_by_machine.get(machine, Decimal("0"))),
+                }
+                for machine in sorted(
+                    machines, key=lambda m: -area_by_machine.get(m, Decimal("0"))
                 )
+            ],
+            # Кто сколько отрезал. Считается по тому, КТО ОФОРМИЛ ЗАКАЗ —
+            # отдельного поля «мастер за станком» в системе нет, и выдавать
+            # одно за другое нельзя. В цехе на двух человек это обычно один и
+            # тот же человек; если понадобится именно резчик — это отдельное
+            # поле в кассе, и вводить его придётся на каждый рез.
+            "by_user": [
+                {
+                    "id": uid,
+                    "name": user_names.get(uid) or "Без сотрудника",
+                    "area": q2(area),
+                    "running_meters": q2(pm_by_user.get(uid, Decimal("0"))),
+                }
+                for uid, area in sorted(area_by_user.items(), key=lambda kv: -kv[1])
             ],
         }
 
@@ -475,7 +555,7 @@ class DailyReportView(APIView):
     own, so they are split evenly across the days of the shown month — a day
     only counts as profitable once its share of rent is covered too."""
 
-    permission_classes = [IsAdmin]
+    permission_classes = [IsAdminOrAccountantRead]
 
     def get(self, request):
         today = timezone.localdate()
@@ -538,21 +618,19 @@ class DailyReportView(APIView):
         for row in expense_rows:
             variable_by_day[row["spent_at"]] += row["v"]
 
-        # Себестоимость проданного падает на день заказа — иначе день с крупной
-        # продажей выглядел бы сверхприбыльным, а материал под неё «бесплатным».
-        cogs_rows = (
-            TransactionItem.objects.filter(
-                is_returned=False,
-                receipt__created_at__date__gte=first_day,
-                receipt__created_at__date__lt=next_month_first,
-            )
-            .exclude(receipt__status=Receipt.Status.CANCELLED)
-            .annotate(day=TruncDate("receipt__created_at"))
-            .values("day")
-            .annotate(v=_SUM("cost_total"))
-        )
-        for row in cogs_rows:
-            variable_by_day[row["day"]] += row["v"]
+        # СЕБЕСТОИМОСТЬ ПРОДАННОГО в дневные расходы НЕ входит.
+        #
+        # Раньше входила — и на одном экране получались две «Прибыли», которые
+        # спорили друг с другом: сверху 6 924, в графике 939. Причина в том, что
+        # это были две РАЗНЫЕ формулы под одним словом: плитки считают
+        # «выручка − (Материалы + Постоянные + Переменные)», а график добавлял
+        # сюда ещё и себестоимость.
+        #
+        # Правило заказчика: прибыль = выручка − (Материалы + Постоянные +
+        # Переменные); себестоимость проданного считается точно (FIFO), но она
+        # СПРАВОЧНАЯ и в прибыль не идёт — материал уже посчитан закупом. График
+        # обязан жить по тому же правилу, иначе он не «второй взгляд», а второй
+        # ответ на тот же вопрос.
 
         rows = []
         for day_num in range(1, days_in_month + 1):
@@ -602,7 +680,7 @@ class MaterialReportView(APIView):
     Период: ?date_from=&date_to= или ?year=&month=. Колонка `stock` — живой
     остаток системы «на сейчас», он к формуле не относится."""
 
-    permission_classes = [IsAdmin]
+    permission_classes = [IsAdminOrAccountantRead]
 
     def get(self, request):
         d_from = _parse_date(request.query_params.get("date_from"))

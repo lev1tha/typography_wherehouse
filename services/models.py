@@ -23,14 +23,42 @@ class PrintingService(models.Model):
         INSTALLATION = "INSTALLATION", _("Установка (фикс)")  # legacy
         OTHER = "OTHER", _("Прочее (фикс)")
 
+    class Machine(models.TextChoices):
+        """Станок, на котором режут. Заказчик считает резку двумя категориями —
+        ЧПУ и лазер, — а не по материалам: «сколько наработал каждый станок» это
+        и есть его вопрос, материал в нём вторичен."""
+
+        CNC = "CNC", _("ЧПУ")
+        LASER = "LASER", _("Лазер")
+
     name = models.CharField(_("название"), max_length=255, default="Резка букв")
     kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.CUTTING)
+    # Заполняется только у резки. У установки и прочего станка нет.
+    machine = models.CharField(
+        _("станок"),
+        max_length=10,
+        choices=Machine.choices,
+        blank=True,
+        default="",
+        help_text=_("Для резки: на каком станке. По нему группируется отчёт"),
+    )
     base_price = models.DecimalField(
         _("фиксированная стоимость"), max_digits=12, decimal_places=2, default=Decimal("0"),
         help_text=_("Для установки/прочего — фикс. цена за заказ"),
     )
     rate_flat = models.DecimalField(
         _("ставка работы за кв.м"), max_digits=12, decimal_places=2, default=Decimal("0")
+    )
+    # Ставка резки самого станка. 0 — станок своей ставки не имеет, тогда берётся
+    # ставка МАТЕРИАЛА (`Material.cut_rate_per_pm`), как было до разделения на
+    # ЧПУ и лазер. Ставка станка выигрывает, потому что иначе выбор станка не
+    # менял бы цену — «выбрал лазер, а сумма та же» выглядит поломкой.
+    rate_per_pm = models.DecimalField(
+        _("ставка резки, сом/пог.м"),
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0"),
+        help_text=_("Ставка станка. 0 — берётся ставка материала"),
     )
     rate_per_piece = models.DecimalField(
         _("ставка за букву"), max_digits=12, decimal_places=2, default=Decimal("0")

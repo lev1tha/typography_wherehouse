@@ -52,6 +52,7 @@ class EdgeFinanceTests(APITestCase):
 
         self.cutting = PrintingService.objects.create(
             name="Резка", kind=PrintingService.Kind.CUTTING, rate_flat=Decimal("20"),
+            machine=PrintingService.Machine.CNC,
         )
 
     # ---- helpers -----------------------------------------------------------
@@ -78,11 +79,11 @@ class EdgeFinanceTests(APITestCase):
             is_returned=is_returned,
         )
 
-    def _cutting_item(self, receipt, *, qty="1", price="200", is_returned=False):
+    def _cutting_item(self, receipt, *, qty="1", price="200", is_returned=False, service=None):
         return TransactionItem.objects.create(
             receipt=receipt,
             type=TransactionItem.Type.SERVICE,
-            service=self.cutting,
+            service=service or self.cutting,
             quantity=Decimal(qty),
             price_per_item=Decimal(price),
             is_returned=is_returned,
@@ -152,33 +153,61 @@ class EdgeFinanceTests(APITestCase):
         data = self._report()
         self.assertEqual(Decimal(str(data["client_debt"])), Decimal("500"))
 
-    # ---- cutting split by material type ------------------------------------
-    def test_cutting_split_by_material_type(self):
-        # Чек с резкой + материал Форекс → резка идёт в forex.
+    # ---- cutting split by machine ------------------------------------------
+    def test_cutting_split_by_machine(self):
+        """Строки резки — по СТАНКАМ (ЧПУ / лазер), а не по типу материала.
+
+        Заказчик считает работу цеха станками: «сколько наработал ЧПУ, сколько
+        лазер». Материал при этом никуда не делся — он остался в складском
+        листе, где у каждого материала своя выручка с резки.
+        """
+        laser = PrintingService.objects.create(
+            name="Резка лазером",
+            kind=PrintingService.Kind.CUTTING,
+            machine=PrintingService.Machine.LASER,
+        )
+        # Два чека на ЧПУ (у self.cutting станок проставлен в setUp).
         r1 = self._receipt(payment_status=Receipt.PaymentStatus.PAID, total="555",
                            amount_paid="555")
         self._cutting_item(r1, qty="1", price="200")
         self._material_item(r1, self.forex, qty="1", price="355")
-        # Чек с резкой + материал Акрил → резка в acryl.
         r2 = self._receipt(payment_status=Receipt.PaymentStatus.PAID, total="150",
                            amount_paid="150")
         self._cutting_item(r2, qty="1", price="150")
         self._material_item(r2, self.acryl, qty="1", price="0")
-        # Чек с резкой БЕЗ материала → other.
+        # Один — на лазере.
         r3 = self._receipt(payment_status=Receipt.PaymentStatus.PAID, total="90",
                            amount_paid="90")
-        self._cutting_item(r3, qty="1", price="90")
+        self._cutting_item(r3, qty="1", price="90", service=laser)
 
         data = self._report()
         cutting = data["cutting"]
         by_name = {row["name"]: Decimal(str(row["amount"])) for row in cutting["rows"]}
-        self.assertEqual(by_name["Форекс"], Decimal("200"))
-        self.assertEqual(by_name["Акрил"], Decimal("150"))
-        # Резка без материала — типа нет, отдельной строкой.
-        self.assertEqual(by_name["Без типа"], Decimal("90"))
+        self.assertEqual(by_name["ЧПУ"], Decimal("350"))
+        self.assertEqual(by_name["Лазер"], Decimal("90"))
+        # «Резка, всего» осталась и сходится с суммой строк.
         self.assertEqual(Decimal(str(cutting["total"])), Decimal("440"))
-        # Типы, по которым в периоде не резали, строкой не появляются.
-        self.assertNotIn("Алюкобонд", by_name)
+        self.assertEqual(sum(by_name.values()), Decimal(str(cutting["total"])))
+        # Тип материала строкой больше не появляется — он не про станок.
+        self.assertNotIn("Форекс", by_name)
+
+    def test_cutting_without_machine_is_shown_not_hidden(self):
+        """Услуга резки без станка (осталась от старых чеков) не пропадает.
+
+        Спрятать её значило бы, что строки не сходятся с «Резка, всего», и
+        расхождение искали бы в расчёте, а не в незаполненном поле.
+        """
+        old = PrintingService.objects.create(
+            name="Резка (старая)", kind=PrintingService.Kind.CUTTING, machine=""
+        )
+        r = self._receipt(payment_status=Receipt.PaymentStatus.PAID, total="70",
+                          amount_paid="70")
+        self._cutting_item(r, qty="1", price="70", service=old)
+
+        cutting = self._report()["cutting"]
+        by_name = {row["name"]: Decimal(str(row["amount"])) for row in cutting["rows"]}
+        self.assertEqual(by_name["Без станка"], Decimal("70"))
+        self.assertEqual(Decimal(str(cutting["total"])), Decimal("70"))
 
     def test_cutting_excludes_cancelled_receipt(self):
         r = self._receipt(payment_status=Receipt.PaymentStatus.PAID,

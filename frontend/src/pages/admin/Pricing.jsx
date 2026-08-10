@@ -7,6 +7,9 @@ import api from "../../api/api.js";
 // area services (cutting / interior install) → master work rate per кв.м;
 // exterior install → per piece; everything else → fixed base price.
 function rateFields(service, t) {
+  // Резка считается по погонному метру — у неё своё поле ставки, а не «за кв.м».
+  // Ноль означает «своей ставки у станка нет», тогда берётся ставка материала.
+  if (service.uses_running_meter) return [["rate_per_pm", t("pricing.ratePerPm")]];
   if (service.uses_area) return [["rate_flat", t("pricing.masterWork")]];
   if (service.uses_pieces) return [["rate_per_piece", t("pricing.ratePerPiece")]];
   return [["base_price", t("pricing.basePrice")]];
@@ -32,7 +35,11 @@ function ServiceCard({ service, onSaved }) {
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <h3 style={{ margin: 0 }}>{service.name}</h3>
-        <span className="badge">{t(`serviceKind.${service.kind}`)}</span>
+        <div className="row" style={{ gap: 6, margin: 0 }}>
+          {/* Станок — рядом с видом услуги: по нему группируется отчёт резки. */}
+          {service.machine_display && <span className="badge">{service.machine_display}</span>}
+          <span className="badge">{t(`serviceKind.${service.kind}`)}</span>
+        </div>
       </div>
       <div className="row" style={{ marginTop: 10 }}>
         {fields.map(([key, label]) => (
@@ -43,6 +50,9 @@ function ServiceCard({ service, onSaved }) {
               value={form[key]}
               onChange={(e) => setForm({ ...form, [key]: e.target.value })}
             />
+            {key === "rate_per_pm" && (
+              <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("pricing.ratePerPmHint")}</p>
+            )}
           </div>
         ))}
       </div>
