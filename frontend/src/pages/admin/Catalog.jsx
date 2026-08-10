@@ -44,6 +44,31 @@ function suggestedName(m, types) {
   return parts.filter(Boolean).join(" ").trim();
 }
 
+// Пустое числовое поле уходит из инпута строкой "" — сервер на неё отвечает
+// «Требуется численное значение» и заворачивает ВЕСЬ материал. Ловится это
+// легко: открыть материал, стереть цену, чтобы вписать заново, и сохранить.
+//
+// Толщина и размеры листа МОГУТ быть не заданы (у крепежа нет ни того, ни
+// другого) — там пустое значение осмысленно и уходит как null.
+const NULLABLE_NUMS = ["thickness_mm", "sheet_width", "sheet_height"];
+// Цены и остатки null не принимают. Стёртая цена означает ноль — так её и
+// отправляем, вместо того чтобы молча оставить прежнюю.
+const ZERO_NUMS = [
+  "critical_balance", "purchase_price", "price_per_unit", "price_per_sqm",
+  "piece_price", "cut_rate_per_pm", "wholesale_price", "wholesale_min_qty",
+];
+
+function withNumbersFixed(material) {
+  const out = { ...material };
+  for (const key of NULLABLE_NUMS) {
+    if (out[key] === "" || out[key] === undefined) out[key] = null;
+  }
+  for (const key of ZERO_NUMS) {
+    if (out[key] === "") out[key] = 0;
+  }
+  return out;
+}
+
 // Module-level so inputs keep a stable identity (no focus loss on keystroke).
 const NumField = ({ label, value, onChange, grow }) => (
   <div className={grow ? "field grow" : "field"} style={grow ? { margin: 0 } : undefined}>
@@ -51,6 +76,24 @@ const NumField = ({ label, value, onChange, grow }) => (
     <input type="number" step="any" value={value ?? ""} onChange={(e) => onChange(e.target.value)} />
   </div>
 );
+// Цена в таблице всегда с единицей. У материала с известной площадью листа под
+// ценой за кв.м стоит цена листа — заказчик мыслит листами, и делить в уме,
+// чтобы понять «а лист-то почём», он не должен.
+const PriceCell = ({ m, value, t }) => {
+  const per = m.is_roll_material || m.unit === "SQM" ? "кв.м" : t(`unit.${m.unit}`);
+  const area = Number(m.piece_area) || 0;
+  const num = Number(value) || 0;
+  return (
+    <>
+      {num} <span className="muted">сом/{per}</span>
+      {area > 0 && per === "кв.м" && num > 0 && (
+        <div className="muted" style={{ fontSize: 12 }}>
+          {Math.round(num * area)} {t("warehouse.perSheetShort")}
+        </div>
+      )}
+    </>
+  );
+};
 const SectionLabel = ({ children }) => (
   <div
     style={{
@@ -127,17 +170,53 @@ export default function Catalog({ embedded = false }) {
   }
 
   async function save() {
-    const payload = { ...editing };
-    if (editing.id) {
-      await api.put(`/warehouse/materials/${editing.id}/`, payload);
-    } else {
-      await api.post("/warehouse/materials/", payload);
+    try {
+      const payload = withNumbersFixed(editing);
+      if (editing.id) {
+        await api.put(`/warehouse/materials/${editing.id}/`, payload);
+      } else {
+        await api.post("/warehouse/materials/", payload);
+      }
+      setEditing(null);
+      toast(t("common.saved"));
+      load();
+    } catch (e) {
+      // Без этого catch любая ошибка сервера пропадала молча: промис падал,
+      // модалка оставалась открытой, сообщения не было — со стороны выглядело,
+      // будто кнопка «Сохранить» просто не работает.
+      toast(apiError(e, t("common.error")), "error");
     }
-    setEditing(null);
-    load();
   }
 
   const setF = (k) => (v) => setEditing({ ...editing, [k]: v });
+
+  // --- Цена за лист и за кв.м -------------------------------------------
+  //
+  // Заказчик ПОКУПАЕТ листами и знает цену листа, а система считает в кв.м —
+  // отсюда и вопрос «эта цифра за лист или за квадрат?». Теперь стоят оба поля:
+  // заполняешь любое, второе считается по площади листа.
+  const round2 = (n) => (Number.isFinite(n) ? String(Math.round(n * 100) / 100) : "");
+  const sheetArea =
+    Number(editing?.piece_area) ||
+    Number(editing?.sheet_width) * Number(editing?.sheet_height) ||
+    0;
+  const toSheet = (perSqm) => (sheetArea ? round2(Number(perSqm || 0) * sheetArea) : "");
+  const toSqm = (perSheet) => (sheetArea ? round2(Number(perSheet || 0) / sheetArea) : "");
+
+  // Розничная цена — ДВА разных поля в базе (за кв.м и за лист), и цена листа
+  // может быть назначена отдельно (скидка за целый лист). Поэтому пересчитываем
+  // её только пока она «в паре» с ценой за кв.м: стоит вписать своё число — и
+  // связь рвётся, ручное значение больше не затирается.
+  function setSqmPrice(v) {
+    const wasDerived =
+      !Number(editing.piece_price) ||
+      String(editing.piece_price) === String(toSheet(editing.price_per_sqm));
+    setEditing({
+      ...editing,
+      price_per_sqm: v,
+      ...(wasDerived && sheetArea ? { piece_price: toSheet(v) } : {}),
+    });
+  }
 
   const columns = [
     {
@@ -200,34 +279,46 @@ export default function Catalog({ embedded = false }) {
       ),
     },
     { key: "critical_balance", label: t("warehouse.critical") },
-    { key: "purchase_price", label: t("warehouse.purchasePrice"), render: (m) => `${m.purchase_price} сом` },
+    // У закупочной цены единицы не было ВООБЩЕ: «980.00 сом» — за лист или за
+    // квадрат? Рядом стояла розничная «1470 сом/кв.м», и две цифры выглядели
+    // сравнимыми, хотя без единицы сравнивать их нельзя. Теперь единица есть у
+    // обеих, а для листового материала под ценой за кв.м стоит цена листа.
+    {
+      key: "purchase_price",
+      label: t("warehouse.purchasePrice"),
+      render: (m) => <PriceCell m={m} value={m.purchase_price} t={t} />,
+    },
     {
       key: "price_per_unit",
       label: t("warehouse.retailPrice"),
-      render: (m) =>
-        m.is_roll_material ? `${m.sqm_price} сом/кв.м` : `${m.price_per_unit} сом`,
+      render: (m) => (
+        <PriceCell m={m} value={m.is_roll_material ? m.sqm_price : m.price_per_unit} t={t} />
+      ),
     },
     {
       key: "actions",
       label: t("common.actions"),
+      // «Изменить» и «Удалить» ПОДПИСАНЫ, а не спрятаны в серые иконки. Раньше
+      // они стояли безымянными значками 17px под большой кнопкой «Поступление»
+      // — заказчик их не нашёл и сообщил, что материал вообще нельзя ни
+      // поправить, ни удалить. Функция была; не было видно, что она есть.
       render: (m) => (
-        <div className="row" style={{ gap: 6 }}>
+        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
           <button
-            className="secondary"
-            style={{ padding: "5px 10px", height: "auto", display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}
+            className="secondary row-btn"
             onClick={() => setReceiving(m)}
             title={t("supply.intake")}
           >
-            <Icon name="inbox" size={16} /> {t("supply.intake")}
+            <Icon name="inbox" size={14} /> {t("supply.intake")}
           </button>
-          <button className="ghost" onClick={() => setGallery(m)} aria-label={t("warehouse.gallery")}>
-            <Icon name="image" size={18} />
+          <button className="secondary row-btn" onClick={() => setEditing(m)}>
+            <Icon name="pencil" size={14} /> {t("common.edit")}
           </button>
-          <button className="ghost" onClick={() => setEditing(m)} aria-label={t("common.edit")}>
-            <Icon name="pencil" size={17} />
+          <button className="ghost row-btn row-danger" onClick={() => removeMaterial(m)}>
+            <Icon name="trash" size={14} /> {t("common.delete")}
           </button>
-          <button className="ghost" onClick={() => removeMaterial(m)} aria-label={t("common.delete")}>
-            <Icon name="trash" size={17} />
+          <button className="ghost row-btn" onClick={() => setGallery(m)} title={t("warehouse.gallery")}>
+            <Icon name="image" size={14} />
           </button>
         </div>
       ),
@@ -431,9 +522,22 @@ export default function Catalog({ embedded = false }) {
           {!editing.is_roll_material ? (
             <>
               <SectionLabel>{t("warehouse.priceStockSection")}</SectionLabel>
+              {/* Штучный материал: единица — штука, и это написано прямо в
+                  подписи. Без неё «закупочная цена 30 сом» не отвечает на
+                  вопрос «за что 30». */}
               <div className="row">
-                <NumField grow label={t("warehouse.purchasePrice")} value={editing.purchase_price} onChange={setF("purchase_price")} />
-                <NumField grow label={t("warehouse.retailPrice")} value={editing.price_per_unit} onChange={setF("price_per_unit")} />
+                <NumField
+                  grow
+                  label={`${t("warehouse.purchasePrice")}, ${t("warehouse.perUnitShort", { unit: t(`unit.${editing.unit || "PIECE"}`) })}`}
+                  value={editing.purchase_price}
+                  onChange={setF("purchase_price")}
+                />
+                <NumField
+                  grow
+                  label={`${t("warehouse.retailPrice")}, ${t("warehouse.perUnitShort", { unit: t(`unit.${editing.unit || "PIECE"}`) })}`}
+                  value={editing.price_per_unit}
+                  onChange={setF("price_per_unit")}
+                />
               </div>
               <NumField label={t("warehouse.critical")} value={editing.critical_balance} onChange={setF("critical_balance")} />
             </>
@@ -442,16 +546,42 @@ export default function Catalog({ embedded = false }) {
               <p className="muted" style={{ fontSize: 12 }}>{t("warehouse.rollHint")}</p>
 
               <SectionLabel>{t("warehouse.priceStockSection")}</SectionLabel>
+              {/* Закупка — одно значение в базе (за кв.м), но вводится любым из
+                  двух полей: он покупает листами, а считается всё в квадратах. */}
               <div className="row">
-                <NumField grow label={t("pricing.pricePerSqm")} value={editing.price_per_sqm} onChange={setF("price_per_sqm")} />
+                <NumField
+                  grow
+                  label={t("warehouse.purchasePerSqm")}
+                  value={editing.purchase_price}
+                  onChange={setF("purchase_price")}
+                />
+                {sheetArea > 0 && (
+                  <NumField
+                    grow
+                    label={t("warehouse.purchasePerSheet")}
+                    value={toSheet(editing.purchase_price)}
+                    onChange={(v) => setF("purchase_price")(toSqm(v))}
+                  />
+                )}
+              </div>
+              <div className="row">
+                <NumField grow label={t("warehouse.retailPerSqm")} value={editing.price_per_sqm} onChange={setSqmPrice} />
                 <NumField grow label={t("pricing.cutRatePm")} value={editing.cut_rate_per_pm} onChange={setF("cut_rate_per_pm")} />
               </div>
+              {sheetArea > 0 && (
+                <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
+                  {t("warehouse.sheetAreaHint", { area: round2(sheetArea) })}
+                </p>
+              )}
               <NumField label={`${t("warehouse.critical")} (кв.м)`} value={editing.critical_balance} onChange={setF("critical_balance")} />
 
               <SectionLabel>{t("warehouse.sheetSale")}</SectionLabel>
               <div className="row">
-                <NumField grow label={t("warehouse.piecePrice")} value={editing.piece_price} onChange={setF("piece_price")} />
+                <NumField grow label={t("warehouse.retailPerSheet")} value={editing.piece_price} onChange={setF("piece_price")} />
               </div>
+              <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
+                {t("warehouse.piecePriceHint")}
+              </p>
               <div className="row">
                 <NumField grow label={t("warehouse.wholesalePrice")} value={editing.wholesale_price} onChange={setF("wholesale_price")} />
                 <NumField grow label={t("warehouse.wholesaleMin")} value={editing.wholesale_min_qty} onChange={setF("wholesale_min_qty")} />

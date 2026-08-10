@@ -20,7 +20,7 @@ const expenseRows = (fin, materialsLabel) => [
   ...[...(fin.fixed?.rows || []), ...(fin.variable?.rows || [])].filter((r) => r.in_profit),
 ];
 
-function Stat({ label, value, suffix, color }) {
+function Stat({ label, value, suffix, color, sub }) {
   return (
     <div className="stat">
       <div className="label">{label}</div>
@@ -28,6 +28,10 @@ function Stat({ label, value, suffix, color }) {
         {value}
         {suffix ? <span className="muted" style={{ fontSize: "1rem" }}> {suffix}</span> : null}
       </div>
+      {/* Формула прямо под цифрой. Она есть и отдельным блоком ниже, но плитка
+          стоит на первом экране, а блок уходит под сгиб — и цифра читается как
+          «просто сумма продажи», непонятно откуда взявшаяся. */}
+      {sub ? <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{sub}</div> : null}
     </div>
   );
 }
@@ -140,6 +144,8 @@ export default function Dashboard() {
     if (data.breakdown) {
       push(t("dashboard.workRevenue"), Math.round(Number(data.breakdown.work_revenue)));
       push(t("dashboard.materialRevenue"), Math.round(Number(data.breakdown.material_revenue)));
+      push(t("dashboard.materialCost"), Math.round(Number(data.breakdown.material_cost)));
+      push(t("dashboard.materialProfit"), Math.round(Number(data.breakdown.material_profit)));
     }
     push(t("dashboard.services"), data.services_performed);
     push(t("dashboard.refunded"), Math.round(Number(data.refunds.total_refunded)));
@@ -195,12 +201,43 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* Work vs material revenue (admin-only page) */}
+      {/* Работа и материал. У материала одной цифры мало: «продали на 149 232»
+          не отвечает, сколько на нём заработали, пока рядом не стоит, почём он
+          нам достался. Поэтому материал показан формулой, а не плиткой. */}
       {data.breakdown && (
-        <div className="stat-grid">
-          <Stat label={t("dashboard.workRevenue")} value={som(data.breakdown.work_revenue)} />
-          <Stat label={t("dashboard.materialRevenue")} value={som(data.breakdown.material_revenue)} />
-        </div>
+        <>
+          <div className="stat-grid">
+            <Stat label={t("dashboard.workRevenue")} value={som(data.breakdown.work_revenue)} />
+            <Stat
+              label={t("dashboard.materialProfit")}
+              value={som(data.breakdown.material_profit)}
+              color={Number(data.breakdown.material_profit) >= 0 ? "ok" : "danger"}
+              sub={t("dashboard.materialProfitFormula", {
+                revenue: som(data.breakdown.material_revenue),
+                cost: som(data.breakdown.material_cost),
+              })}
+            />
+          </div>
+
+          <div className="card" style={{ marginTop: 12 }}>
+            <h3>{t("dashboard.materialProfitTitle")}</h3>
+            <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>
+              {t("dashboard.materialProfitHint")}
+            </p>
+            <div className="crow">
+              <span className="k">{t("dashboard.materialRevenue")}</span>
+              <span>{som(data.breakdown.material_revenue)}</span>
+            </div>
+            <div className="crow">
+              <span className="k">{t("dashboard.materialCost")}</span>
+              <span style={{ color: "var(--danger)" }}>− {som(data.breakdown.material_cost)}</span>
+            </div>
+            <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6, paddingTop: 8 }}>
+              <strong style={{ color: "var(--accent-strong)" }}>{t("dashboard.materialProfit")}</strong>
+              <strong style={{ color: "var(--accent-strong)" }}>{som(data.breakdown.material_profit)}</strong>
+            </div>
+          </div>
+        </>
       )}
 
       {fin && (

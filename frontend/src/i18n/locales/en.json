@@ -57,7 +57,8 @@
   "roles": {
     "admin": "Administrator",
     "storekeeper": "Storekeeper",
-    "customer": "Customer"
+    "customer": "Customer",
+    "accountant": "Accountant"
   },
   "login": {
     "title": "Sign in",
@@ -88,7 +89,7 @@
     "revenueSplit": "Revenue: cash / online",
     "stockByCategory": "Stock value by category",
     "workRevenue": "Revenue: work",
-    "materialRevenue": "Revenue: material",
+    "materialRevenue": "Material sold for",
     "masterWage": "Master wage",
     "clientMaterials": "Material purchases by client",
     "materialSpend": "Material spend",
@@ -101,7 +102,12 @@
     "lowStockTitle": "Low-stock materials",
     "remaining": "Remaining",
     "critical": "Critical",
-    "noType": "No type"
+    "noType": "No type",
+    "materialCost": "Cost of goods sold",
+    "materialProfit": "Profit on material",
+    "materialProfitTitle": "What the material earned",
+    "materialProfitHint": "Sales minus what the material cost us (the purchase price of the lot it came from, as of the sale). Profit here is before rent, wages and other costs.",
+    "materialProfitFormula": "sold {{revenue}} − cost {{cost}}"
   },
   "warehouse": {
     "title": "Warehouse",
@@ -146,7 +152,15 @@
     "allTypes": "All types",
     "allColors": "All colours",
     "addRef": "+ add…",
-    "newRefPh": "Name, then Enter"
+    "newRefPh": "Name, then Enter",
+    "purchasePerSqm": "Purchase, som per sq.m",
+    "purchasePerSheet": "Purchase, som per sheet",
+    "retailPerSqm": "Sale price, som per sq.m",
+    "retailPerSheet": "Sale price, som per sheet",
+    "perUnitShort": "som/{{unit}}",
+    "perSheetShort": "som/sheet",
+    "sheetAreaHint": "Fill in either field — the other is computed from the sheet area ({{area}} sq.m).",
+    "piecePriceHint": "Computed from the per-sq.m price. Type your own number if a whole sheet sells cheaper — recalculation will leave it alone from then on. Zero means whole-sheet sale is unavailable."
   },
   "unit": {
     "SQM": "sqm",
@@ -176,7 +190,9 @@
     "masterCommission": "Master wage, % of work",
     "masterCommissionHint": "Master's share of the cutting work cost. Admin-only.",
     "cutRatePm": "Cut rate, som/running m",
-    "servicesOnlyHint": "Work rates and master %. Material prices live in the “Склад” (Warehouse) section."
+    "servicesOnlyHint": "Work rates and master %. Material prices live in the “Склад” (Warehouse) section.",
+    "ratePerPm": "Cutting rate, som per running m",
+    "ratePerPmHint": "This machine's rate. 0 — the material's rate is used, as before the CNC/laser split."
   },
   "serviceKind": {
     "CUTTING": "Cutting",
@@ -249,7 +265,28 @@
     "needPhone": "Enter a phone number",
     "created": "Client added",
     "contactPh": "contact person",
-    "companyPh": "e.g. Ak Zhol LLC"
+    "companyPh": "e.g. Ak Zhol LLC",
+    "bulkPay": "Settle debt",
+    "bulkPayTitle": "Bulk payment",
+    "bulkPayHint": "One sum settles the selected orders, oldest first.",
+    "bulkPayOrders": "Orders with debt",
+    "bulkPaySelectedDebt": "Debt on selected",
+    "bulkPayAmountHint": "Leave empty to settle the selected orders in full",
+    "bulkPayDone": "Payment of {{amount}} som accepted",
+    "noDebtOrders": "This client has no orders with debt",
+    "payDate": "Payment date",
+    "backdatedHint": "The payment will be recorded with a past date",
+    "paymentsList": "Payments",
+    "paymentsShowAll": "Show all payments ({{count}})",
+    "mergeTitle": "Merge with another card",
+    "mergeHint": "If one person was entered twice (the phone was typed in a different format), merge the cards: orders, debt, payments and referrals move here and the other card is deleted.",
+    "mergePick": "pick the other card",
+    "mergeOrders": "Orders moving",
+    "mergeAction": "Merge and delete “{{name}}”",
+    "mergeConfirm": "The card “{{drop}}” will be deleted and its orders ({{orders}}) will move to “{{keep}}”. This cannot be undone. Continue?",
+    "mergeDone": "Card “{{name}}” merged",
+    "onlyChange": "With change only",
+    "changeDue": "Change owed"
   },
   "checkout": {
     "outOfStock": "Out of stock",
@@ -293,7 +330,7 @@
     "prepayHint": "How much you took now. Empty — the whole order becomes debt.",
     "cutHint": "Turn on if the sheet needs cutting to size",
     "sizeHint": "In metres, e.g. 0.5 × 1.2",
-    "runMetersHint": "Leave empty — we'll use the area (W×L)",
+    "runMetersHint": "Leave empty and no cutting work is charged",
     "cutInfo": "A piece is cut on the machine: price = material (area) + cutting work (running metre).",
     "wholesale": "Wholesale",
     "wholesaleFrom": "Wholesale from {{n}} pcs — {{price}} som/sheet",
@@ -307,7 +344,12 @@
     "orderTitle": "Order name",
     "orderTitlePh": "e.g. Sign for a cafe (optional)",
     "payFull": "Full amount",
-    "change": "Change"
+    "change": "Change",
+    "orderDate": "Order date",
+    "orderDateHint": "Today. Set a past date if the order is being entered later.",
+    "orderDateBack": "The order will be backdated — reports and stock will use this date.",
+    "cutMachine": "Machine",
+    "changeHint": "Stays owed to the client until handed over — visible in Receipts and on the client card."
   },
   "receipts": {
     "title": "Receipts",
@@ -346,7 +388,33 @@
     "unpay": "Undo payment",
     "unpayShort": "Undo",
     "unpayDone": "Payment reverted",
-    "confirmUnpay": "Undo the payment on this receipt? It becomes «Unpaid» and the amount returns as debt."
+    "confirmUnpay": "Undo the payment on this receipt? It becomes «Unpaid» and the amount returns as debt.",
+    "cost": "Cost",
+    "margin": "Margin",
+    "edit": "Edit",
+    "editTitle": "Edit receipt #{{number}}",
+    "editSaved": "Receipt updated",
+    "editDateHint": "Order date — revenue, profit and the stock sheet are all counted by it.",
+    "editItemsHint": "Everything is editable: quantity, price, an extra line. Stock, cost and total recalculate themselves. If the whole order is wrong, deleting and re-entering it is simpler.",
+    "noClient": "No client",
+    "delete": "Delete",
+    "deleteConfirm": "Delete receipt #{{number}} for {{total}}? Material returns to stock, payments are removed. This cannot be undone.",
+    "deleted": "Receipt deleted, material returned to stock",
+    "actions": "Actions",
+    "change": "Change",
+    "changeGive": "Hand over",
+    "changeTitle": "Hand over change for receipt #{{number}}",
+    "changeAmount": "How much to hand over",
+    "changeAll": "All of it",
+    "changeHint": "Empty — hand over all of it. Partial is fine: the till may be short of small notes again.",
+    "changeDone": "Change handed over: {{amount}}",
+    "changeLeft": "Still owed",
+    "onlyChange": "With change only",
+    "statChange": "Change owed",
+    "editItems": "Order contents",
+    "editItemPrice": "Price",
+    "editItemRestore": "Restore",
+    "editItemsChangeHint": "The total dropped below the money already taken — {{amount}} som becomes change owed to the client."
   },
   "fulfillment": {
     "PROCESSING": "Processing",
@@ -471,7 +539,7 @@
     "totalVariable": "Total variable costs",
     "variableHint": "Filled on the «Expenses / Investments» page",
     "stockEndHint": "End balance is computed automatically from stock value",
-    "cuttingTitle": "Cutting by material",
+    "cuttingTitle": "Cutting by machine",
     "cuttingTotal": "Cutting, total",
     "materialReportTitle": "Cutting & sales by material",
     "downloadCsv": "Download CSV",
@@ -540,7 +608,16 @@
     "autoPlaceholderHint": "Empty means the system's figure is used. Type your own to override.",
     "autoFromStock": "from stock intakes: {{value}}",
     "autoManualPart": "by hand {{value}}",
-    "materialsBlock": "Materials (block total)"
+    "materialsBlock": "Materials (block total)",
+    "cuttingVolume": "{{pm}} running m cut · {{area}} sq.m of material",
+    "cuttingHint": "How much material went through each machine. Sq.m — the area of the cut piece, and this is the headline figure: it is about the volume of work. Running metres — the cut length, the sum is built from it (m × rate). These are different quantities and must not be added together. Cutting per material lives in the stock sheet.",
+    "sqmShort": "sq.m",
+    "cuttingVolumeArea": "{{pm}} running m of cut · {{sum}}",
+    "cuttingByUser": "Who cut how much",
+    "cuttingByUserHint": "By whoever entered the order. There is no separate 'operator at the machine' field — if you need the actual cutter, it has to be picked at the till on every cut.",
+    "cuttingUserPm": "{{pm}} running m of cut",
+    "allExpensesTitle": "All spending for the period",
+    "allExpensesHint": "The whole history in one list: when, on what, and which report line it landed in. Entries are added in the blocks above, by clicking a line."
   },
   "expenses": {
     "amount": "Amount",
@@ -653,6 +730,10 @@
     "needMonth": "Pick a specific month to enter opening stock.",
     "linkFromFinance": "Open the stock sheet by material",
     "manualCell": "Entered by hand — overrides the computed value",
-    "carriedCell": "Carried over from last month's closing"
+    "carriedCell": "Carried over from last month's closing",
+    "groupMoney": "Money",
+    "colMatRevenue": "Material revenue",
+    "colCutRevenue": "Cutting revenue",
+    "colRevenue": "Total"
   }
 }
