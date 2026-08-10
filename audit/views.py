@@ -6,7 +6,7 @@ from rest_framework import viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.permissions import IsAdmin
+from accounts.permissions import IsAdminOrAccountantRead
 from sales.models import Receipt, TransactionItem
 from warehouse.models import InventoryLog, Material
 
@@ -18,6 +18,8 @@ _ZERO = Coalesce(Sum("total_price"), Decimal("0"), output_field=DecimalField())
 _LINE_SUM = Coalesce(
     Sum(F("price_per_item") * F("quantity")), Decimal("0"), output_field=DecimalField()
 )
+# Себестоимость строк — снимок закупки на момент списания со склада.
+_COST_SUM = Coalesce(Sum("cost_total"), Decimal("0"), output_field=DecimalField())
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
@@ -25,7 +27,7 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 
     queryset = AuditLog.objects.select_related("user").all()
     serializer_class = AuditLogSerializer
-    permission_classes = [IsAdmin]
+    permission_classes = [IsAdminOrAccountantRead]
     filterset_fields = ["user"]
     search_fields = ["action"]
     ordering = ["-created_at"]
@@ -34,7 +36,7 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
 class DashboardView(APIView):
     """GET /api/audit/dashboard/ — admin financial summary & analytics."""
 
-    permission_classes = [IsAdmin]
+    permission_classes = [IsAdminOrAccountantRead]
 
     def get(self, request):
         # Опциональный период фильтрует денежные показатели по дате чека;
@@ -77,9 +79,15 @@ class DashboardView(APIView):
         work_revenue = paid_lines.filter(type=TransactionItem.Type.SERVICE).aggregate(
             v=_LINE_SUM
         )["v"]
-        material_revenue = paid_lines.filter(
-            type=TransactionItem.Type.MATERIAL
-        ).aggregate(v=_LINE_SUM)["v"]
+        material_lines = paid_lines.filter(type=TransactionItem.Type.MATERIAL)
+        material_revenue = material_lines.aggregate(v=_LINE_SUM)["v"]
+        # Себестоимость проданного материала — по ТЕМ ЖЕ строкам, что и выручка
+        # (тот же период, только оплаченные и невозвращённые). Цифра снята в
+        # момент списания со склада: для рулонных — по FIFO-партиям, откуда
+        # материал реально ушёл. Одна выручка без неё не отвечала на вопрос
+        # «сколько на материале заработали»: 149 232 сом продали — а купили их
+        # почём?
+        material_cost = material_lines.aggregate(v=_COST_SUM)["v"]
 
         service_items = by_period(
             TransactionItem.objects.filter(
@@ -139,7 +147,13 @@ class DashboardView(APIView):
                 },
                 "breakdown": {
                     "work_revenue": work_revenue,
+                    # Материал: за сколько продали, почём он нам достался и что
+                    # осталось. Прибыль тут ВАЛОВАЯ — до аренды, зарплат и
+                    # прочих расходов; итоговую прибыль по-прежнему считают
+                    # Финансы блоком «Материалы» (решение заказчика).
                     "material_revenue": material_revenue,
+                    "material_cost": material_cost,
+                    "material_profit": material_revenue - material_cost,
                 },
                 "services_performed": services_count,
                 "materials_consumed_by_services": materials_consumed,
@@ -160,7 +174,7 @@ class ClientPurchasesView(APIView):
     total material spend, total area/qty, order count. Sortable via ?ordering=.
     """
 
-    permission_classes = [IsAdmin]
+    permission_classes = [IsAdminOrAccountantRead]
 
     def get(self, request):
         ordering = request.query_params.get("ordering", "-material_spend")

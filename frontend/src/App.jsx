@@ -50,6 +50,20 @@ const STORE_NAV = [
   },
 ];
 
+// Бухгалтер: проверяет, а не участвует. Чеки с себестоимостью и маржой, журнал
+// действий (он же вкладка на экране чеков), финансовый отчёт и обзор — всё
+// только на просмотр. Кассы, склада и клиентов у него нет ни в меню, ни на
+// сервере.
+const ACCOUNTANT_NAV = [
+  {
+    items: [
+      { to: "/acc", label: "nav.receipts", end: true, icon: "receipt" },
+      { to: "/acc/finance", label: "nav.finance", icon: "clipboard" },
+      { to: "/acc/dashboard", label: "nav.dashboard", icon: "dashboard" },
+    ],
+  },
+];
+
 const CUSTOMER_NAV = [
   {
     items: [{ to: "/me", label: "nav.myOrders", end: true, icon: "receipt" }],
@@ -57,9 +71,17 @@ const CUSTOMER_NAV = [
 ];
 
 export default function App() {
-  const { isAuthenticated, isAdmin, isCustomer } = useAuth();
+  const { isAuthenticated, isAdmin, isAccountant, isCustomer } = useAuth();
 
-  const home = !isAuthenticated ? "/login" : isCustomer ? "/me" : isAdmin ? "/admin" : "/app/checkout";
+  const home = !isAuthenticated
+    ? "/login"
+    : isCustomer
+    ? "/me"
+    : isAccountant
+    ? "/acc"
+    : isAdmin
+    ? "/admin"
+    : "/app/checkout";
 
   return (
     <Routes>
@@ -111,6 +133,33 @@ export default function App() {
         <Route path="/app/checkout" element={<Checkout />} />
         <Route path="/app/clients" element={<Clients />} />
         <Route path="/app/receipts" element={<StoreReceipts />} />
+      </Route>
+
+      {/* Бухгалтер — отдельный раздел, всё только на просмотр */}
+      <Route
+        element={
+          <ProtectedRoute requireAccountant>
+            <Layout nav={ACCOUNTANT_NAV} />
+          </ProtectedRoute>
+        }
+      >
+        <Route path="/acc" element={<Receipts />} />
+        <Route
+          path="/acc/finance"
+          element={
+            <FinanceGate>
+              <Finance />
+            </FinanceGate>
+          }
+        />
+        <Route
+          path="/acc/dashboard"
+          element={
+            <FinanceGate>
+              <Dashboard />
+            </FinanceGate>
+          }
+        />
       </Route>
 
       {/* Customer self-service portal */}

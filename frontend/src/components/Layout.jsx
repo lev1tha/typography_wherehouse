@@ -8,7 +8,7 @@ import LanguageSwitcher from "./LanguageSwitcher.jsx";
 
 export default function Layout({ nav }) {
   const { t } = useTranslation();
-  const { user, logout, isAdmin, isCustomer } = useAuth();
+  const { user, logout, isAdmin, isAccountant, isCustomer } = useAuth();
   const [open, setOpen] = useState(false);
 
   return (
@@ -40,7 +40,15 @@ export default function Layout({ nav }) {
           <button className="burger" onClick={() => setOpen((v) => !v)} aria-label="menu">
             <Icon name="menu" size={22} />
           </button>
-          <strong>{isCustomer ? t("roles.customer") : isAdmin ? t("roles.admin") : t("roles.storekeeper")}</strong>
+          <strong>
+            {isCustomer
+              ? t("roles.customer")
+              : isAdmin
+              ? t("roles.admin")
+              : isAccountant
+              ? t("roles.accountant")
+              : t("roles.storekeeper")}
+          </strong>
           <div className="spacer" />
           <LanguageSwitcher />
           <span className="muted" style={{ marginLeft: 4 }}>

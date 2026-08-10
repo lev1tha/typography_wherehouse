@@ -70,7 +70,12 @@ export function AuthProvider({ children }) {
     logout,
     isAuthenticated: !!user,
     isAdmin: user?.role === "ADMIN",
+    isAccountant: user?.role === "ACCOUNTANT",
     isCustomer: user?.role === "CUSTOMER",
+    // Кому показывать закупочные цифры — себестоимость и маржу. У складовщика
+    // их нет, у бухгалтера они и есть работа. Отдельно от `isAdmin`, потому что
+    // «видит деньги» и «может править» — разные вопросы.
+    seesMoney: user?.role === "ADMIN" || user?.role === "ACCOUNTANT",
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
