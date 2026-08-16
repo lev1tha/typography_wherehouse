@@ -426,13 +426,16 @@ class SupplyLineSerializer(serializers.ModelSerializer):
     unit_cost = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     # Единица, в которой лежит `quantity`: у площадных — кв.м, у штучных — своя.
     unit = serializers.SerializerMethodField()
+    # Код единицы для перевода на фронте (`unit.*`): русская подпись `unit` в
+    # кыргызской или английской накладной торчала чужим словом.
+    unit_code = serializers.SerializerMethodField()
 
     class Meta:
         model = SupplyLine
         fields = [
             "id", "material", "material_name", "form",
             "width", "height", "length", "sheet_count",
-            "quantity", "unit", "cost", "unit_cost", "code",
+            "quantity", "unit", "unit_code", "cost", "unit_cost", "code",
         ]
         extra_kwargs = {
             # У штучного материала количество ВВОДЯТ, у площадного оно считается
@@ -443,6 +446,10 @@ class SupplyLineSerializer(serializers.ModelSerializer):
     def get_unit(self, obj):
         return "кв.м" if obj.material.is_roll_material and obj.form != SupplyLine.Form.QTY \
             else obj.material.get_unit_display()
+
+    def get_unit_code(self, obj):
+        return "SQM" if obj.material.is_roll_material and obj.form != SupplyLine.Form.QTY \
+            else obj.material.unit
 
 
 class SupplySerializer(serializers.ModelSerializer):

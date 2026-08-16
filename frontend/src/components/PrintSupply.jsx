@@ -19,7 +19,8 @@ const qty = (n) => Number(n || 0).toLocaleString("ru-RU", { maximumFractionDigit
 const day = (iso) => (iso ? new Date(iso).toLocaleDateString("ru-RU") : "");
 
 export default function PrintSupply({ supply, onClose }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const lang = i18n.resolvedLanguage;
   const [company, setCompany] = useState(null);
 
   useEffect(() => {
@@ -38,8 +39,8 @@ export default function PrintSupply({ supply, onClose }) {
 
   const supplierLine = [
     supply.supplier_name,
-    supply.supplier_inn && `ИНН ${supply.supplier_inn}`,
-    supply.supplier_phone && `тел. ${supply.supplier_phone}`,
+    supply.supplier_inn && `${t("print.inn")} ${supply.supplier_inn}`,
+    supply.supplier_phone && `${t("print.tel")} ${supply.supplier_phone}`,
   ]
     .filter(Boolean)
     .join(", ");
@@ -57,10 +58,10 @@ export default function PrintSupply({ supply, onClose }) {
         <div className="print-sheet">
           <div className="doc-org">
             <strong>{company.name || t("print.noName")}</strong>
-            {[company.inn && `ИНН ${company.inn}`, company.address, company.phone && `тел. ${company.phone}`]
+            {[company.inn && `${t("print.inn")} ${company.inn}`, company.address, company.phone && `${t("print.tel")} ${company.phone}`]
               .filter(Boolean).length > 0 && (
               <div>
-                {[company.inn && `ИНН ${company.inn}`, company.address, company.phone && `тел. ${company.phone}`]
+                {[company.inn && `${t("print.inn")} ${company.inn}`, company.address, company.phone && `${t("print.tel")} ${company.phone}`]
                   .filter(Boolean)
                   .join(" · ")}
               </div>
@@ -68,8 +69,11 @@ export default function PrintSupply({ supply, onClose }) {
           </div>
 
           <h2 className="doc-title">
-            {t("print.docSupply")} № {supply.number || `#${supply.id}`} {t("print.dated")}{" "}
-            {day(supply.received_on)}
+            {t("print.docHead", {
+              title: t("print.docSupply"),
+              number: supply.number || `#${supply.id}`,
+              date: day(supply.received_on),
+            })}
           </h2>
 
           <p className="doc-line">
@@ -100,7 +104,7 @@ export default function PrintSupply({ supply, onClose }) {
                   <td className="c">{i + 1}</td>
                   <td>{l.material_name}</td>
                   <td className="r">{qty(l.quantity)}</td>
-                  <td className="c">{l.unit}</td>
+                  <td className="c">{l.unit_code ? t(`unit.${l.unit_code}`) : l.unit}</td>
                   <td className="r">{money(l.unit_cost)}</td>
                   <td className="r">{money(l.cost)}</td>
                   <td className="c">{l.code || "—"}</td>
@@ -111,13 +115,13 @@ export default function PrintSupply({ supply, onClose }) {
 
           <div className="doc-total">
             <span>{t("print.total")}</span>
-            <strong>{money(total)} сом</strong>
+            <strong>{money(total)} {t("print.currency")}</strong>
           </div>
           <p className="doc-line">
-            {t("print.accepted")} {lines.length} {nameWord} {t("print.forSum")} {money(total)} сом
+            {t("print.accepted")} {lines.length} {nameWord} {t("print.forSum")} {money(total)} {t("print.currency")}
           </p>
           <p className="doc-line">
-            <b>{t("print.inWords")}:</b> {amountInWords(total)}
+            <b>{t("print.inWords")}:</b> {amountInWords(total, lang)}
           </p>
 
           {/* Сверка с бумагой поставщика — ради неё лист и печатают. */}
@@ -126,14 +130,14 @@ export default function PrintSupply({ supply, onClose }) {
               <tbody>
                 <tr>
                   <td>{t("supplies.statedTotal")}</td>
-                  <td>{money(stated)} сом</td>
+                  <td>{money(stated)} {t("print.currency")}</td>
                 </tr>
                 <tr>
                   <td>{t("supplies.diff")}</td>
                   <td>
                     {diff === 0
                       ? t("supplies.matches")
-                      : `${diff > 0 ? "+" : ""}${money(diff)} сом`}
+                      : `${diff > 0 ? "+" : ""}${money(diff)} ${t("print.currency")}`}
                   </td>
                 </tr>
               </tbody>
@@ -142,8 +146,8 @@ export default function PrintSupply({ supply, onClose }) {
 
           {Number(supply.paid_amount) > 0 || Number(supply.debt) > 0 ? (
             <p className="doc-line" style={{ marginTop: 10 }}>
-              {t("supplies.paidTo")}: {money(supply.paid_amount)} сом
-              {Number(supply.debt) > 0 && ` · ${t("supplies.debt")}: ${money(supply.debt)} сом`}
+              {t("supplies.paidTo")}: {money(supply.paid_amount)} {t("print.currency")}
+              {Number(supply.debt) > 0 && ` · ${t("supplies.debt")}: ${money(supply.debt)} ${t("print.currency")}`}
             </p>
           ) : null}
 

@@ -40,6 +40,10 @@ class TransactionItemSerializer(serializers.ModelSerializer):
     # «Ед.» обязательна, а вывести её на фронте не из чего: у резки количество
     # в погонных метрах, у листа — в штуках, у куска — в квадратных.
     unit_label = serializers.SerializerMethodField()
+    # Код единицы — для перевода на фронте (`unit.*` в словарях): русская
+    # подпись `unit_label` в кыргызском или английском документе торчала
+    # чужим словом посреди переведённой таблицы.
+    unit_code = serializers.SerializerMethodField()
 
     class Meta:
         model = TransactionItem
@@ -55,6 +59,7 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             "line_total",
             "cost_total",
             "unit_label",
+            "unit_code",
             "sale_mode",
             "width",
             "length",
@@ -63,6 +68,17 @@ class TransactionItemSerializer(serializers.ModelSerializer):
 
     def get_cost_total(self, obj):
         return obj.cost_total if _is_admin(self.context) else None
+
+    def get_unit_code(self, obj):
+        if obj.type == TransactionItem.Type.MATERIAL:
+            if obj.sale_mode == TransactionItem.SaleMode.PIECE:
+                return "PIECE"
+            if obj.material_id and obj.material.is_roll_material:
+                return "SQM"
+            return obj.material.unit if obj.material_id else "PIECE"
+        if obj.service_id and obj.service.uses_running_meter:
+            return "METER"
+        return "PIECE"
 
     def get_unit_label(self, obj):
         if obj.type == TransactionItem.Type.MATERIAL:

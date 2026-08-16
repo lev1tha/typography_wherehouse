@@ -84,7 +84,9 @@ export default function Dashboard() {
     if (from) params.date_from = from;
     if (to) params.date_to = to;
     api.get("/audit/dashboard/", { params }).then((r) => setData(r.data)).catch(() => setError(t("common.error")));
-    api.get("/audit/client-purchases/", { params: { ordering: "-material_spend" } })
+    // Покупки по клиентам — за тот же период и на той же базе, что «Продали
+    // материала на …» выше: иначе сумма таблицы не сходилась с плиткой.
+    api.get("/audit/client-purchases/", { params: { ordering: "-material_spend", ...params } })
       .then((r) => setClientBuys(r.data)).catch(() => {});
     // Финотчёт (расходы/вложения/прибыль) тоже слушает период — те же даты.
     api.get("/finance/report/", { params }).then((r) => setFin(r.data)).catch(() => {});
@@ -194,10 +196,13 @@ export default function Dashboard() {
         <Stat label={t("dashboard.revenueTotal")} value={som(revTotal)} />
         <Stat label={t("dashboard.services")} value={data.services_performed} />
         <Stat label={t("dashboard.refunded")} value={som(data.refunds.total_refunded)} />
+        {/* Как в каталоге: красное — остаток есть, но упал до порога; ноль —
+            отдельной строкой, спокойно (свежий каталог весь на нуле). */}
         <Stat
           label={t("dashboard.lowStock")}
           value={data.low_stock_count}
           color={data.low_stock_count > 0 ? "danger" : undefined}
+          sub={data.out_of_stock_count > 0 ? t("dashboard.outOfStockSub", { n: data.out_of_stock_count }) : undefined}
         />
       </div>
 
@@ -265,10 +270,16 @@ export default function Dashboard() {
                   <span className="k">{row.name}</span><span>{som(row.amount)}</span>
                 </div>
               ))}
-              <div className="crow"><span className="k">{t("finance.cogs")}</span><span>{som(fin.cogs)}</span></div>
               <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6, paddingTop: 8 }}>
                 <strong style={{ color: "var(--accent-strong)" }}>{t("finance.expenses")}</strong>
                 <strong style={{ color: "var(--accent-strong)" }}>{som(fin.total_expenses)}</strong>
+              </div>
+              {/* Себестоимость проданного — справочная, в итог не входит (материал
+                  уже посчитан закупом). Раньше стояла строкой ВНУТРИ списка, и
+                  список читался как сумма, которой не был. */}
+              <div className="crow" style={{ paddingTop: 8 }}>
+                <span className="muted" style={{ fontSize: 13 }}>{t("dashboard.cogsAside")}</span>
+                <span className="muted" style={{ fontSize: 13 }}>{som(fin.cogs)}</span>
               </div>
             </div>
 
@@ -375,6 +386,7 @@ export default function Dashboard() {
       {/* Who buys how much material */}
       <div className="card" style={{ marginTop: 16 }}>
         <h3>{t("dashboard.clientMaterials")}</h3>
+        <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("dashboard.clientMaterialsHint")}</p>
         {clientBuys.length ? (
           <table className="table plain-table">
             <thead>

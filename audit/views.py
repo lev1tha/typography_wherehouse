@@ -14,10 +14,18 @@ from .models import AuditLog
 from .serializers import AuditLogSerializer
 
 _ZERO = Coalesce(Sum("total_price"), Decimal("0"), output_field=DecimalField())
-# Line revenue = price_per_item × quantity (used for work/material splits).
-_LINE_SUM = Coalesce(
-    Sum(F("price_per_item") * F("quantity")), Decimal("0"), output_field=DecimalField()
-)
+_REFUNDED = Coalesce(Sum("refunded_amount"), Decimal("0"), output_field=DecimalField())
+
+
+def _line_sum(items) -> Decimal:
+    """Выручка строк — вверх до целого сома, как `TransactionItem.line_total`
+    и итог чека. Раньше складывались сырые qty × price (147.6 вместо 148), и
+    на одном экране «материал 3 142 + работа 592» не давали «выручку 3 735».
+    Считаем в Python по Decimal, а не CEIL в базе: SQLite умножает в double и
+    0.554 × 1500 даёт 831.0000000000001 → 832 — тот же шум, от которого ушли
+    в кассе."""
+    return sum((it.line_total for it in items.only("quantity", "price_per_item", "is_returned")), Decimal("0"))
+
 # Себестоимость строк — снимок закупки на момент списания со склада.
 _COST_SUM = Coalesce(Sum("cost_total"), Decimal("0"), output_field=DecimalField())
 
@@ -71,9 +79,12 @@ class DashboardView(APIView):
             Decimal("0"),
         )
 
-        # Выручка по способам оплаты (нал / MBank / DemirBank / онлайн).
+        # Выручка по способам оплаты (нал / MBank / DemirBank / онлайн) — за
+        # вычетом возвращённых строк, как «Выручка» в Финансах: до этого Обзор
+        # показывал 6 231 там, где Финансы — 5 331 (частичный возврат на 900).
         def rev(method):
-            return paid.filter(payment_method=method).aggregate(v=_ZERO)["v"]
+            qs = paid.filter(payment_method=method)
+            return qs.aggregate(v=_ZERO)["v"] - qs.aggregate(v=_REFUNDED)["v"]
 
         revenue_cash = rev(Receipt.PaymentMethod.CASH)
         revenue_mbank = rev(Receipt.PaymentMethod.MBANK)
@@ -89,11 +100,9 @@ class DashboardView(APIView):
             ),
             field="receipt__created_at",
         )
-        work_revenue = paid_lines.filter(type=TransactionItem.Type.SERVICE).aggregate(
-            v=_LINE_SUM
-        )["v"]
+        work_revenue = _line_sum(paid_lines.filter(type=TransactionItem.Type.SERVICE))
         material_lines = paid_lines.filter(type=TransactionItem.Type.MATERIAL)
-        material_revenue = material_lines.aggregate(v=_LINE_SUM)["v"]
+        material_revenue = _line_sum(material_lines)
         # Себестоимость проданного материала — по ТЕМ ЖЕ строкам, что и выручка
         # (тот же период, только оплаченные и невозвращённые). Цифра снята в
         # момент списания со склада: для рулонных — по FIFO-партиям, откуда
@@ -149,6 +158,13 @@ class DashboardView(APIView):
             for m in live_materials
             if m.is_below_critical
         ]
+        # «На исходе» и «нет в наличии» считаем врозь — как каталог: ноль там
+        # спокойный факт (только что заведённый каталог весь на нуле), красное
+        # — когда остаток есть, но упал до порога. Плитка «Материалов на
+        # исходе: 16» на свежей базе с одним материалом на исходе выглядела
+        # аварией и спорила со складом, где на исходе был один.
+        out_of_stock_count = sum(1 for m in low_stock_items if m["quantity"] <= 0)
+        low_stock_count = len(low_stock_items) - out_of_stock_count
 
         return Response(
             {
@@ -176,7 +192,8 @@ class DashboardView(APIView):
                     "total_refunded": refunded_total,
                     "material_lost_quantity": abs(lost_qty),
                 },
-                "low_stock_count": len(low_stock_items),
+                "low_stock_count": low_stock_count,
+                "out_of_stock_count": out_of_stock_count,
                 "low_stock_items": low_stock_items,
             }
         )
@@ -202,43 +219,49 @@ class ClientPurchasesView(APIView):
         if ordering not in allowed:
             ordering = "-material_spend"
 
-        rows = (
-            TransactionItem.objects.filter(
-                type=TransactionItem.Type.MATERIAL,
-                is_returned=False,
-                receipt__payment_status=Receipt.PaymentStatus.PAID,
-                receipt__client__isnull=False,
-            )
-            .values("receipt__client")
-            .annotate(
-                material_spend=_LINE_SUM,
-                material_qty=Coalesce(
-                    Sum("quantity"), Decimal("0"), output_field=DecimalField()
-                ),
-            )
-        )
+        # Та же база, что у «Продали материала на …» в шапке Обзора: все
+        # заказы периода, кроме отменённых, без возвращённых строк. Раньше сюда
+        # шли только ОПЛАЧЕННЫЕ чеки, и сумма таблицы (2 312) не сходилась с
+        # цифрой выше (3 142) — заказ в долг материал уже забрал, а в «покупках»
+        # его не было. Период — тот же, что у остальных денежных плиток.
+        date_from = request.query_params.get("date_from") or None
+        date_to = request.query_params.get("date_to") or None
+        live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED)
+        if date_from:
+            live = live.filter(created_at__date__gte=date_from)
+        if date_to:
+            live = live.filter(created_at__date__lte=date_to)
+
+        # Суммы строк — вверх до сома по Decimal, как в шапке Обзора (см.
+        # `_line_sum`); собираем по клиентам в Python — набор небольшой.
+        by_client = {}
+        lines = TransactionItem.objects.filter(
+            type=TransactionItem.Type.MATERIAL,
+            is_returned=False,
+            receipt__in=live,
+            receipt__client__isnull=False,
+        ).values_list("receipt__client", "quantity", "price_per_item")
+        for client_id, qty, price in lines:
+            acc = by_client.setdefault(client_id, {"spend": Decimal("0"), "qty": Decimal("0")})
+            acc["spend"] += TransactionItem(quantity=qty, price_per_item=price).line_total
+            acc["qty"] += qty
 
         # Attach client display data + order count, then sort in Python (small set).
         from clients.models import Client
 
-        client_ids = [r["receipt__client"] for r in rows]
-        clients = {c.id: c for c in Client.objects.filter(id__in=client_ids)}
+        clients = {c.id: c for c in Client.objects.filter(id__in=by_client.keys())}
         result = []
-        for r in rows:
-            client = clients.get(r["receipt__client"])
+        for client_id, acc in by_client.items():
+            client = clients.get(client_id)
             if not client:
                 continue
-            orders = (
-                Receipt.objects.filter(
-                    client=client, payment_status=Receipt.PaymentStatus.PAID
-                ).count()
-            )
+            orders = live.filter(client=client).count()
             result.append({
                 "client_id": client.id,
                 "client_name": client.display_name,
                 "phone": client.phone,
-                "material_spend": r["material_spend"],
-                "material_qty": r["material_qty"],
+                "material_spend": acc["spend"],
+                "material_qty": acc["qty"],
                 "orders": orders,
             })
 

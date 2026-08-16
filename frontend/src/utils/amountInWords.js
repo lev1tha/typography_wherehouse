@@ -78,24 +78,96 @@ export function numberInWords(value) {
   return parts.join(" ");
 }
 
+// --- Английский -------------------------------------------------------------
+const EN_ONES = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+const EN_TEENS = [
+  "ten", "eleven", "twelve", "thirteen", "fourteen",
+  "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+];
+const EN_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+
+function enTriplet(n) {
+  const words = [];
+  const hundreds = Math.floor(n / 100);
+  const rest = n % 100;
+  if (hundreds) words.push(`${EN_ONES[hundreds]} hundred`);
+  if (rest >= 10 && rest <= 19) words.push(EN_TEENS[rest - 10]);
+  else {
+    const tens = Math.floor(rest / 10);
+    const ones = rest % 10;
+    if (tens && ones) words.push(`${EN_TENS[tens]}-${EN_ONES[ones]}`);
+    else if (tens) words.push(EN_TENS[tens]);
+    else if (ones) words.push(EN_ONES[ones]);
+  }
+  return words;
+}
+
+function enNumber(value) {
+  let n = Math.abs(Math.trunc(Number(value) || 0));
+  if (n === 0) return "zero";
+  const parts = [];
+  const scales = [[1e9, "billion"], [1e6, "million"], [1e3, "thousand"], [1, ""]];
+  for (const [div, word] of scales) {
+    const chunk = Math.floor(n / div);
+    n -= chunk * div;
+    if (!chunk) continue;
+    parts.push(...enTriplet(chunk));
+    if (word) parts.push(word);
+  }
+  return parts.join(" ");
+}
+
+// --- Кыргызский -------------------------------------------------------------
+// Числительные складываются регулярно: «бир миң беш жүз жетимиш сегиз».
+const KY_ONES = ["", "бир", "эки", "үч", "төрт", "беш", "алты", "жети", "сегиз", "тогуз"];
+const KY_TENS = ["", "он", "жыйырма", "отуз", "кырк", "элүү", "алтымыш", "жетимиш", "сексен", "токсон"];
+
+function kyTriplet(n) {
+  const words = [];
+  const hundreds = Math.floor(n / 100);
+  const rest = n % 100;
+  if (hundreds) words.push(hundreds === 1 ? "жүз" : `${KY_ONES[hundreds]} жүз`);
+  const tens = Math.floor(rest / 10);
+  const ones = rest % 10;
+  if (tens) words.push(KY_TENS[tens]);
+  if (ones) words.push(KY_ONES[ones]);
+  return words;
+}
+
+function kyNumber(value) {
+  let n = Math.abs(Math.trunc(Number(value) || 0));
+  if (n === 0) return "нөл";
+  const parts = [];
+  const scales = [[1e9, "миллиард"], [1e6, "миллион"], [1e3, "миң"], [1, ""]];
+  for (const [div, word] of scales) {
+    const chunk = Math.floor(n / div);
+    n -= chunk * div;
+    if (!chunk) continue;
+    parts.push(...kyTriplet(chunk));
+    if (word) parts.push(word);
+  }
+  return parts.join(" ");
+}
+
 /**
  * Сумма прописью для документа: «Четыре тысячи девятьсот пятьдесят четыре сома
  * 00 тыйын». Тыйын оставляем цифрами — так их пишут и в 1С, и в банке.
+ *
+ * `lang` — язык документа (ru / ky / en): документ на кыргызском или английском
+ * с русской строкой прописью выглядел бы полупереведённым.
  */
-export function amountInWords(value) {
+export function amountInWords(value, lang = "ru") {
   const amount = Math.abs(Number(value) || 0);
   const soms = Math.floor(amount + 1e-9);
   // Копейки округляем, а не отбрасываем: 0.999 в документе — это 1 тыйын, а не 0.
   const tyiyn = Math.round((amount - soms) * 100);
   // Округление вверх могло дать «100 тыйын» — переносим в сомы.
   const carried = tyiyn === 100 ? soms + 1 : soms;
-  const cents = tyiyn === 100 ? 0 : tyiyn;
-  const words = numberInWords(carried);
-  return (
-    words.charAt(0).toUpperCase() +
-    words.slice(1) +
-    ` ${plural(carried, SOM)} ${String(cents).padStart(2, "0")} тыйын`
-  );
+  const cents = String(tyiyn === 100 ? 0 : tyiyn).padStart(2, "0");
+  const cap = (w) => w.charAt(0).toUpperCase() + w.slice(1);
+  if (lang === "en") return `${cap(enNumber(carried))} som ${cents} tyiyn`;
+  if (lang === "ky") return `${cap(kyNumber(carried))} сом ${cents} тыйын`;
+  return `${cap(numberInWords(carried))} ${plural(carried, SOM)} ${cents} тыйын`;
 }
 
 export default amountInWords;

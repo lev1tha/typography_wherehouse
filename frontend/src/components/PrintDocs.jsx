@@ -27,17 +27,17 @@ const DOCS = ["CHECK", "WAYBILL", "INVOICE"];
 function buyerLine(client, t) {
   if (!client) return t("print.buyerWalkIn");
   const parts = [client.display_name || client.full_name || client.company_name];
-  if (client.inn) parts.push(`ИНН ${client.inn}`);
-  if (client.phone) parts.push(`тел. ${client.phone}`);
+  if (client.inn) parts.push(`${t("print.inn")} ${client.inn}`);
+  if (client.phone) parts.push(`${t("print.tel")} ${client.phone}`);
   return parts.filter(Boolean).join(", ");
 }
 
 /** Реквизиты цеха одной строкой под названием. */
-function companyLine(company) {
+function companyLine(company, t) {
   return [
-    company.inn && `ИНН ${company.inn}`,
+    company.inn && `${t("print.inn")} ${company.inn}`,
     company.address,
-    company.phone && `тел. ${company.phone}`,
+    company.phone && `${t("print.tel")} ${company.phone}`,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -62,7 +62,7 @@ function ItemsTable({ items, t }) {
             <td className="c">{i + 1}</td>
             <td>{it.type === "SERVICE" ? it.service_name : it.material_name}</td>
             <td className="r">{qty(it.quantity)}</td>
-            <td className="c">{it.unit_label}</td>
+            <td className="c">{it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label}</td>
             <td className="r">{money(it.price_per_item)}</td>
             <td className="r">{money(it.line_total)}</td>
           </tr>
@@ -73,16 +73,16 @@ function ItemsTable({ items, t }) {
 }
 
 /** Итог + сумма прописью — общий подвал таблицы у счёта и накладной. */
-function TotalBlock({ total, t, summary }) {
+function TotalBlock({ total, t, lang, summary }) {
   return (
     <>
       <div className="doc-total">
         <span>{t("print.total")}</span>
-        <strong>{money(total)} сом</strong>
+        <strong>{money(total)} {t("print.currency")}</strong>
       </div>
       <p className="doc-line">{summary}</p>
       <p className="doc-line">
-        <b>{t("print.inWords")}:</b> {amountInWords(total)}
+        <b>{t("print.inWords")}:</b> {amountInWords(total, lang)}
       </p>
     </>
   );
@@ -106,7 +106,10 @@ function SignRow({ left, right, leftName, rightName }) {
 }
 
 export default function PrintDocs({ receipt, onClose }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  // Язык документа = язык интерфейса: заголовок, шапка таблицы и сумма
+  // прописью на одном языке, а не «SALES RECEIPT № 2 ОТ 16.08.2026».
+  const lang = i18n.resolvedLanguage;
   const [kind, setKind] = useState("CHECK");
   const [company, setCompany] = useState(null);
   const [client, setClient] = useState(null);
@@ -144,10 +147,10 @@ export default function PrintDocs({ receipt, onClose }) {
     <>
       <div className="doc-org">
         <strong>{company.name || t("print.noName")}</strong>
-        {companyLine(company) && <div>{companyLine(company)}</div>}
+        {companyLine(company, t) && <div>{companyLine(company, t)}</div>}
       </div>
       <h2 className="doc-title">
-        {title} № {number} {t("print.dated")} {date}
+        {t("print.docHead", { title, number, date })}
       </h2>
     </>
   );
@@ -191,16 +194,16 @@ export default function PrintDocs({ receipt, onClose }) {
               <ItemsTable items={items} t={t} />
               <div className="doc-total">
                 <span>{t("print.total")}</span>
-                <strong>{money(total)} сом</strong>
+                <strong>{money(total)} {t("print.currency")}</strong>
               </div>
               {paid > 0 && (
                 <p className="doc-line">
-                  {t("print.paid")}: {money(paid)} сом
-                  {debt > 0 && ` · ${t("print.debt")}: ${money(debt)} сом`}
+                  {t("print.paid")}: {money(paid)} {t("print.currency")}
+                  {debt > 0 && ` · ${t("print.debt")}: ${money(debt)} ${t("print.currency")}`}
                 </p>
               )}
               <p className="doc-line">
-                <b>{t("print.inWords")}:</b> {amountInWords(total)}
+                <b>{t("print.inWords")}:</b> {amountInWords(total, lang)}
               </p>
               <SignRow
                 left={t("print.seller")}
@@ -213,14 +216,15 @@ export default function PrintDocs({ receipt, onClose }) {
           {kind === "WAYBILL" && (
             <>
               {head(t("print.docWaybill"))}
-              <p className="doc-line"><b>{t("print.supplier")}:</b> {company.name || "—"}{companyLine(company) ? `, ${companyLine(company)}` : ""}</p>
+              <p className="doc-line"><b>{t("print.supplier")}:</b> {company.name || "—"}{companyLine(company, t) ? `, ${companyLine(company, t)}` : ""}</p>
               <p className="doc-line"><b>{t("print.receiver")}:</b> {buyerLine(client, t)}</p>
               {receipt.title && <p className="doc-line"><b>{t("print.basis")}:</b> {receipt.title}</p>}
               <ItemsTable items={items} t={t} />
               <TotalBlock
                 total={total}
                 t={t}
-                summary={`${t("print.released")} ${items.length} ${nameWord} ${t("print.forSum")} ${money(total)} сом`}
+                lang={lang}
+                summary={`${t("print.released")} ${items.length} ${nameWord} ${t("print.forSum")} ${money(total)} ${t("print.currency")}`}
               />
               <SignRow
                 left={t("print.handedOver")}
@@ -251,7 +255,7 @@ export default function PrintDocs({ receipt, onClose }) {
                   )}
                   <tr>
                     <td>{t("print.receiverShort")}</td>
-                    <td>{company.name}{company.inn ? `, ИНН ${company.inn}` : ""}</td>
+                    <td>{company.name}{company.inn ? `, ${t("print.inn")} ${company.inn}` : ""}</td>
                   </tr>
                 </tbody>
               </table>
@@ -261,7 +265,8 @@ export default function PrintDocs({ receipt, onClose }) {
               <TotalBlock
                 total={total}
                 t={t}
-                summary={`${t("print.totalNames")}: ${items.length}, ${t("print.forSum")} ${money(total)} сом`}
+                lang={lang}
+                summary={`${t("print.totalNames")}: ${items.length}, ${t("print.forSum")} ${money(total)} ${t("print.currency")}`}
               />
               {company.note && <p className="doc-note">{company.note}</p>}
               <SignRow

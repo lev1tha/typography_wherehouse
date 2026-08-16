@@ -15,6 +15,10 @@ const today = () => new Date().toLocaleDateString("sv-SE");
 // вводом. Это же и написано в подсказке внизу, чтобы не искать в документации.
 const num = (v) => Number(v) || 0;
 const trim = (v) => String(+Number(v).toFixed(4));
+// Строка — вверх до сома, как на сервере (line_total). Эпсилон гасит шум
+// double: 0.554 × 1500 в JS = 831.0000000000001, и без него окно показывало
+// «979 → 980» ещё до того, как что-то поправили.
+const ceilSom = (v) => Math.max(0, Math.ceil((Number(v) || 0) - 1e-6));
 
 export default function EditReceiptModal({ receipt, onClose, onSaved }) {
   const { t } = useTranslation();
@@ -49,7 +53,7 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
     setLines((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
 
   const newTotal = lines.reduce(
-    (s, l) => (l.remove ? s : s + Math.ceil(num(l.quantity) * num(l.price))),
+    (s, l) => (l.remove ? s : s + ceilSom(num(l.quantity) * num(l.price))),
     0,
   );
   const oldTotal = Math.round(Number(receipt.total_price) || 0);

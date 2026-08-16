@@ -541,7 +541,7 @@ export default function Checkout() {
                             стояла одна, и у материала без цены за лист касса
                             показывала «0 сом» (price_per_unit у листового
                             материала не заполняется). */}
-                        {ceilSom(p.sqm_price)} сом/кв.м
+                        {ceilSom(p.sqm_price)} {t("checkout.perPieceShort", { unit: t("unit.SQM") })}
                         {p.piece_price > 0 && (
                           <div className="muted" style={{ fontSize: 12 }}>
                             {ceilSom(p.piece_price)}{" "}
@@ -553,7 +553,7 @@ export default function Checkout() {
                       `${ceilSom(p.price)} сом`
                     )
                   ) : p.uses_area ? (
-                    `${ceilSom(p.rate_flat)} сом/кв.м`
+                    `${ceilSom(p.rate_flat)} ${t("checkout.perPieceShort", { unit: t("unit.SQM") })}`
                   ) : p.uses_pieces ? (
                     `${ceilSom(p.rate_per_piece)} сом/букву`
                   ) : (
@@ -576,7 +576,7 @@ export default function Checkout() {
                   <div className="cl-name">{l.name}</div>
                   {l.kind === "cutting" ? (
                     <div className="cl-sub">
-                      {l.width}×{l.length} = {l.area} кв.м · {l.materialName} ·{" "}
+                      {l.width}×{l.length} = {l.area} {t("unit.SQM")} · {l.materialName} ·{" "}
                       {t("checkout.rateWork")} {l.rate} × {l.runM} {t("checkout.pmShort")}
                     </div>
                   ) : l.kind === "cut-work" ? (
@@ -584,7 +584,7 @@ export default function Checkout() {
                       {t("checkout.rateWork")} {l.rate} × {l.runM} {t("checkout.pmShort")} · {l.materialName}
                     </div>
                   ) : l.kind === "material-area" ? (
-                    <div className="cl-sub">{l.width}×{l.length} = {l.area} кв.м · {l.price} сом/кв.м</div>
+                    <div className="cl-sub">{l.width}×{l.length} = {l.area} {t("unit.SQM")} · {l.price} {t("checkout.perPieceShort", { unit: t("unit.SQM") })}</div>
                   ) : l.mode === "PIECE" ? (
                     <div className="cl-sub">
                       {unitPrice(l)} {t("checkout.perPieceShort", { unit: l.unitWord || t("warehouse.unitSheet") })}
@@ -870,7 +870,7 @@ export default function Checkout() {
                 <option value="">—</option>
                 {areaMaterials.map((m) => (
                   <option key={m.id} value={m.id} disabled={Number(m.quantity) <= 0}>
-                    {m.name} ({matSqm(m)} сом/кв.м, ост. {m.quantity} кв.м
+                    {m.name} ({matSqm(m)} {t("checkout.perPieceShort", { unit: t("unit.SQM") })}, {t("checkout.stockLeft")} {m.quantity} {t("unit.SQM")}
                     {m.sheets_remaining != null ? ` ≈${Math.round(Number(m.sheets_remaining))} ${t("warehouse.sheetsShort")}` : ""})
                     {Number(m.quantity) <= 0 ? ` — ${t("checkout.outOfStock")}` : ""}
                   </option>
@@ -1014,7 +1014,7 @@ export default function Checkout() {
                 </>
               ) : (
                 <>
-                  <div className="crow"><span className="k">{t("supply.area")}</span><strong>{cutArea} кв.м</strong></div>
+                  <div className="crow"><span className="k">{t("supply.area")}</span><strong>{cutArea} {t("unit.SQM")}</strong></div>
                   {cutWorkOn && cutWorkRate > 0 && (
                     <div className="crow"><span className="k">{t("checkout.rateWork")}</span><span>{cutWorkRate} × {cutRunM} = {ceilSom(cutWork)}</span></div>
                   )}

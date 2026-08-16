@@ -89,8 +89,8 @@ export default function RefundModal({ receipt, onClose, onDone }) {
         </div>
         {items.map((it) => {
           const name = it.type === "SERVICE" ? it.service_name : it.material_name;
-          // Единица приходит с сервера той же, что печатается в накладной.
-          const unit = it.unit_label || "";
+          // Единица — кодом с сервера, подпись из словаря (та же, что в накладной).
+          const unit = it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "";
           return (
             <label
               key={it.id}

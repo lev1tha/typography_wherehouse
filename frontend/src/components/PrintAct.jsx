@@ -21,7 +21,8 @@ const money = (n) => Number(n || 0).toLocaleString("ru-RU", { minimumFractionDig
 const day = (iso) => (iso ? new Date(iso).toLocaleDateString("ru-RU") : "");
 
 export default function PrintAct({ client, onClose }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const lang = i18n.resolvedLanguage;
   const [company, setCompany] = useState(null);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -148,12 +149,12 @@ export default function PrintAct({ client, onClose }) {
           <p className="doc-line">{t("print.actIntro")}</p>
           <p className="doc-line">
             <b>{t("print.supplier")}:</b> {company.name || "—"}
-            {company.inn ? `, ИНН ${company.inn}` : ""}
+            {company.inn ? `, ${t("print.inn")} ${company.inn}` : ""}
           </p>
           <p className="doc-line">
             <b>{t("print.buyer")}:</b> {client.display_name}
-            {client.inn ? `, ИНН ${client.inn}` : ""}
-            {client.phone ? `, тел. ${client.phone}` : ""}
+            {client.inn ? `, ${t("print.inn")} ${client.inn}` : ""}
+            {client.phone ? `, ${t("print.tel")} ${client.phone}` : ""}
           </p>
 
           <table className="doc-table">
@@ -194,14 +195,14 @@ export default function PrintAct({ client, onClose }) {
 
           <div className="doc-total">
             <span>{t("print.actClosing")}</span>
-            <strong>{money(Math.abs(closing))} сом</strong>
+            <strong>{money(Math.abs(closing))} {t("print.currency")}</strong>
           </div>
           <p className="doc-line">
             {closing > 0 ? (
               <>
                 {t("print.actOwes", { sum: money(closing) })}
                 <br />
-                <b>{t("print.inWords")}:</b> {amountInWords(closing)}
+                <b>{t("print.inWords")}:</b> {amountInWords(closing, lang)}
               </>
             ) : (
               t("print.actClear")
