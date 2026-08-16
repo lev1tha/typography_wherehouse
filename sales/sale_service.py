@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import date, datetime, time
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from django.db import transaction
 from django.utils import timezone
@@ -23,6 +23,24 @@ def _money(value: Decimal) -> Decimal:
     """До копеек. Без этого SQLite сохранил бы «сырой» результат умножения, а
     PostgreSQL округлил бы его сам — и цифры на dev и на проде разошлись бы."""
     return Decimal(value).quantize(Decimal("0.01"))
+
+
+# Площадь куска — до трёх знаков, «половина вверх». Столько хранит колонка
+# `TransactionItem.quantity`, и по ней считается цена строки и списание.
+# Раньше площадь шла в базу сырой (0.45 × 1.23 = 0.5535): SQLite так и хранил,
+# PostgreSQL округлял сам до 0.554 — а касса на экране резала до 0.553. Три
+# разных числа для одного куска давали три разных итога; теперь правило одно,
+# и касса (`utils/area.js`) считает по нему же.
+QTY_STEP = Decimal("0.001")
+
+
+def _qty(value) -> Decimal:
+    """Количество строки чека — до трёх знаков, «половина вверх» (как колонка)."""
+    return Decimal(str(value)).quantize(QTY_STEP, rounding=ROUND_HALF_UP)
+
+
+def _area(width, length) -> Decimal:
+    return _qty(Decimal(str(width)) * Decimal(str(length)))
 
 
 def _deduct(material, qty, user, reason="", receipt=None, happened_at=None) -> Decimal:
@@ -165,7 +183,7 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
     if item_type == TransactionItem.Type.MATERIAL:
         material = entry["material"]
         mode = entry.get("mode") or TransactionItem.SaleMode.SQM
-        qty = Decimal(entry.get("quantity") or 0)
+        qty = _qty(entry.get("quantity") or 0)
         if mode == TransactionItem.SaleMode.PIECE:
             # Опт: при заказе от wholesale_min_qty листов цена за лист сама
             # переключается на оптовую (если её задал админ). Ручной override
@@ -197,7 +215,7 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
     if service.uses_area:
         width = entry.get("width")
         length = entry.get("length")
-        area = Decimal(str(width)) * Decimal(str(length)) if width and length else Decimal(entry.get("quantity") or 0)
+        area = _area(width, length) if width and length else _qty(entry.get("quantity") or 0)
         material = entry.get("material")
 
         # Резка → ставка СТАНКА, если она задана, иначе ставка материала.
@@ -219,7 +237,7 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         work_qty = area
         if service.uses_running_meter:
             rm = entry.get("running_meters")
-            work_qty = Decimal(str(rm)) if rm not in (None, "") else Decimal("0")
+            work_qty = _qty(rm) if rm not in (None, "") else Decimal("0")
         work = TransactionItem.objects.create(
             receipt=receipt, type=TransactionItem.Type.SERVICE, service=service,
             quantity=work_qty, price_per_item=rate,
@@ -809,7 +827,10 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None) -> Receipt:
         # (total_price − refunded_amount) stays equal to the value of kept lines.
         if stock_was_deducted:
             _deduct_stock_for_item(item, user, restore=True)
-            refunded_total += item.quantity * item.price_per_item
+            # Ровно то, что стояло в чеке за эту строку — вверх до сома, как
+            # `line_total`. Сырое qty × price давало 147.60 против 148 в чеке, и
+            # полностью возвращённый заказ оставлял «долг» в копейки.
+            refunded_total += item.line_total
         item.is_returned = True
         item.save(update_fields=["is_returned"])
 

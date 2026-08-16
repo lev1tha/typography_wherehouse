@@ -500,14 +500,19 @@ class CogsTests(APITestCase):
         r = self.client.get("/api/finance/daily/", {"year": today.year, "month": today.month})
         self.assertEqual(r.status_code, 200, r.data)
         row = next(x for x in r.data["rows"] if x["day"] == today.day)
-        self.assertEqual(Decimal(str(row["variable"])), Decimal("0"))
+        # Себестоимость (400) в расходы дня НЕ попадает. А вот ЗАКУП по приходу
+        # партии (2000, сегодня) — попадает: плитки считают его сами по приходам
+        # на склад, и график обязан видеть ту же цифру, иначе на одном экране
+        # снова две «Прибыли» (−14 265 сверху и +3 735 в графике).
+        self.assertEqual(Decimal(str(row["variable"])), Decimal("2000"))
 
-        # Итог графика сходится с отчётом: расходов нет — прибыль равна выручке.
+        # Итог графика сходится с плитками месяца: те же расходы, та же прибыль.
+        report = self._report()
         totals = r.data["totals"]
-        self.assertEqual(Decimal(str(totals["variable"])), Decimal("0"))
-        self.assertEqual(
-            Decimal(str(totals["profit"])), Decimal(str(totals["revenue"]))
-        )
+        self.assertEqual(Decimal(str(totals["variable"])), Decimal(str(report["total_expenses"])))
+        self.assertEqual(Decimal(str(totals["variable"])), Decimal("2000"))
+        self.assertEqual(Decimal(str(totals["profit"])), Decimal(str(report["profit"])))
+        self.assertEqual(Decimal(str(totals["revenue"])), Decimal(str(report["revenue"])))
 
     def test_dated_expense_still_lands_on_its_day(self):
         """Убрав себестоимость, нельзя было потерять сами траты: запись с датой
@@ -519,7 +524,12 @@ class CogsTests(APITestCase):
         ExpenseEntry.objects.create(kind=kind, amount=Decimal("700"), spent_at=today)
         r = self.client.get("/api/finance/daily/", {"year": today.year, "month": today.month})
         row = next(x for x in r.data["rows"] if x["day"] == today.day)
-        self.assertEqual(Decimal(str(row["variable"])), Decimal("700"))
+        # 700 трата + 2000 закуп партии из setUp — как в плитках.
+        self.assertEqual(Decimal(str(row["variable"])), Decimal("2700"))
+        self.assertEqual(
+            Decimal(str(r.data["totals"]["variable"])),
+            Decimal(str(self._report()["total_expenses"])),
+        )
 
 
 class MaterialsBlockTests(APITestCase):

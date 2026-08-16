@@ -1,7 +1,7 @@
 import calendar
 import secrets
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -27,6 +27,7 @@ from .material_sheet import (
     counting_unit,
     opening_for,
     purchases_from_stock,
+    purchases_from_stock_by_day,
     q2,
 )
 from .models import (
@@ -626,6 +627,20 @@ class DailyReportView(APIView):
         )
         for row in expense_rows:
             variable_by_day[row["spent_at"]] += row["v"]
+
+        # ЗАКУП ПО ПРИХОДАМ НА СКЛАД — тот же авторасчёт, что стоит в строке
+        # «Закуп материала» месячного отчёта (`purchases_from_stock`), только по
+        # дням. Без него график видел лишь записи трат, и пока закуп не вписан
+        # руками, на одном экране спорили две «Прибыли»: плитки −14 265,
+        # график +3 735. Условия те же, что у плиток: вид расхода есть, не в
+        # архиве и с флагом «уменьшает прибыль».
+        purchase_kind = ExpenseKind.objects.filter(
+            code=ExpenseKind.MATERIAL_PURCHASE, is_archived=False
+        ).first()
+        if purchase_kind is not None and purchase_kind.in_profit:
+            last_day = next_month_first - timedelta(days=1)
+            for day, amount in purchases_from_stock_by_day(first_day, last_day).items():
+                variable_by_day[day] += amount
 
         # СЕБЕСТОИМОСТЬ ПРОДАННОГО в дневные расходы НЕ входит.
         #

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
 import Icon from "./Icon.jsx";
+import PrintHost from "./PrintHost.jsx";
 import amountInWords, { plural } from "../utils/amountInWords.js";
 
 // Печатные формы заказа: товарный чек, накладная, счёт на оплату.
@@ -152,7 +153,7 @@ export default function PrintDocs({ receipt, onClose }) {
   );
 
   return (
-    <div className="modal-backdrop print-host">
+    <PrintHost>
       <div className="modal wide print-modal">
         <div className="modal-head no-print">
           <h2>{t("print.title")} № {number}</h2>
@@ -280,6 +281,6 @@ export default function PrintDocs({ receipt, onClose }) {
           </button>
         </div>
       </div>
-    </div>
+    </PrintHost>
   );
 }

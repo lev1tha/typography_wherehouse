@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
 import Icon from "./Icon.jsx";
+import PrintHost from "./PrintHost.jsx";
 import amountInWords, { plural } from "../utils/amountInWords.js";
 
 // Печатная форма приходной накладной.
@@ -44,7 +45,7 @@ export default function PrintSupply({ supply, onClose }) {
     .join(", ");
 
   return (
-    <div className="modal-backdrop print-host">
+    <PrintHost>
       <div className="modal wide print-modal">
         <div className="modal-head no-print">
           <h2>{t("print.docSupply")}</h2>
@@ -167,6 +168,6 @@ export default function PrintSupply({ supply, onClose }) {
           </button>
         </div>
       </div>
-    </div>
+    </PrintHost>
   );
 }

@@ -7,6 +7,7 @@ import { useAuth } from "../../auth/AuthContext.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
 import { PaymentBadge } from "../../components/StatusBadge.jsx";
+import { areaOf } from "../../utils/area.js";
 
 // Цену округляем ВВЕРХ до целого сома (решение заказчика), как на бэкенде
 // (TransactionItem.line_total). Эпсилон гасит float-шум, чтобы целое не «прыгало».
@@ -84,6 +85,10 @@ export default function Checkout() {
   const [category, setCategory] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("CASH");
   const [prepay, setPrepay] = useState("");
+  // «Вся сумма» — не число, а намерение: сервер сам зачтёт ровно итог чека
+  // (`pay_full`). Касса не должна угадывать сумму, которую посчитает сервер:
+  // расхождение округлений в сом превращалось в фантомный долг.
+  const [payFull, setPayFull] = useState(false);
   const [orderTitle, setOrderTitle] = useState(""); // наименование заказа
   const [titleHints, setTitleHints] = useState([]); // ранее использованные
   // Дата заказа: по умолчанию сегодня, админ может поставить прошедшую.
@@ -320,7 +325,9 @@ export default function Checkout() {
       const w = Number(cut.width);
       const l = Number(cut.length);
       if (!w || !l) return;
-      const area = +(w * l).toFixed(3);
+      // Площадь — как её посчитает и сохранит сервер (до 0.001, половина
+      // вверх): иначе касса и чек расходились на сом.
+      const area = areaOf(cut.width, cut.length);
       const runM = runMetersFor(cut);
       // «Квадратный метр» — материал по площади и всё: работы реза в этом
       // режиме нет. Так же ведём себя, если услуги резки нет в каталоге.
@@ -349,7 +356,7 @@ export default function Checkout() {
     const w = Number(cut.width);
     const l = Number(cut.length);
     if (!w || !l) return;
-    const area = +(w * l).toFixed(3);
+    const area = areaOf(cut.width, cut.length);
     const s = cut.service;
     const mat = materials.find((m) => m.id === Number(cut.materialId));
     if (!mat) return;
@@ -420,7 +427,10 @@ export default function Checkout() {
     if (isAdmin && orderDate && orderDate !== todayStr()) payload.order_date = orderDate;
     // Пустое поле = ничего не приняли, весь заказ уходит в долг. Раньше пустое
     // молча означало «оплачено полностью», и долг терялся.
-    if (paymentMethod !== "ONLINE") payload.amount_paid = Math.max(0, Number(prepay) || 0);
+    if (paymentMethod !== "ONLINE") {
+      if (payFull) payload.pay_full = true;
+      else payload.amount_paid = Math.max(0, Number(prepay) || 0);
+    }
     if (clientId) payload.client_id = clientId;
     else if (client.phone)
       payload.client = { ...client, ...(referredBy ? { referred_by: Number(referredBy) } : {}) };
@@ -432,6 +442,7 @@ export default function Checkout() {
       setClientId(null);
       setReferredBy("");
       setPrepay("");
+      setPayFull(false);
       setOrderTitle("");
       // Дату НЕ сбрасываем: заказы задним числом заносят пачкой за один день,
       // и возврат на сегодня после каждой продажи заставлял бы вводить её снова.
@@ -445,7 +456,7 @@ export default function Checkout() {
 
   const isMatModal = !!(cut && cut.material && !cut.service); // окно материала
   const cutPiece = isMatModal && cut.mode === "PIECE";
-  const cutArea = cut && Number(cut.width) && Number(cut.length) ? +(Number(cut.width) * Number(cut.length)).toFixed(3) : 0;
+  const cutArea = cut && Number(cut.width) && Number(cut.length) ? areaOf(cut.width, cut.length) : 0;
   const cutMat = cut ? (cut.material || materials.find((m) => m.id === Number(cut.materialId))) : null;
   // Editable (overridable) prices — default to the material's catalogue values.
   const cutMatSqm = cut ? Number(cut.matPrice || 0) : 0;
@@ -712,17 +723,23 @@ export default function Checkout() {
                 <input
                   type="number"
                   min="0"
-                  value={prepay}
-                  onChange={(e) => setPrepay(e.target.value)}
+                  value={payFull ? String(total.toFixed(0)) : prepay}
+                  onChange={(e) => {
+                    setPayFull(false);
+                    setPrepay(e.target.value);
+                  }}
                   placeholder="0"
                   style={{ flex: 1 }}
                 />
                 {/* Обычный случай — заплатили всю сумму: одна кнопка вместо
-                    набора цифр, чтобы касса не тормозила на каждой продаже. */}
+                    набора цифр, чтобы касса не тормозила на каждой продаже.
+                    Пока кнопка нажата, поле показывает живой итог, а серверу
+                    уходит флаг «вся сумма», а не число. Вписал своё — флаг снят. */}
                 <button
                   type="button"
-                  className="secondary"
-                  onClick={() => setPrepay(String(total.toFixed(0)))}
+                  className={payFull ? "" : "secondary"}
+                  aria-pressed={payFull}
+                  onClick={() => setPayFull(true)}
                   disabled={!total}
                 >
                   {t("checkout.payFull")}
@@ -731,7 +748,7 @@ export default function Checkout() {
               <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
                 {t("checkout.prepayHint")}
               </p>
-              {Number(prepay || 0) < total && (
+              {!payFull && Number(prepay || 0) < total && (
                 <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
                   {t("receipts.debt")}:{" "}
                   <strong style={{ color: "var(--danger)" }}>
@@ -743,7 +760,7 @@ export default function Checkout() {
                   клиентом. Отдали на месте — нажать «Выдать» в Чеках, и она
                   спишется; не отдали (в кассе не было мелочи) — останется
                   видна, пока не отдадут. */}
-              {Number(prepay || 0) > total && total > 0 && (
+              {!payFull && Number(prepay || 0) > total && total > 0 && (
                 <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
                   {t("checkout.change")}:{" "}
                   <strong style={{ color: "var(--accent-strong)" }}>

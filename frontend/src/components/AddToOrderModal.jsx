@@ -5,6 +5,10 @@ import api from "../api/api.js";
 import { useAuth } from "../auth/AuthContext.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { areaOf } from "../utils/area.js";
+
+// Как на сервере (TransactionItem.line_total): каждая строка — вверх до сома.
+const ceilSom = (v) => Math.max(0, Math.ceil((Number(v) || 0) - 1e-6));
 
 const EMPTY_CFG = {
   qty: "1",
@@ -68,18 +72,19 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
   const runM =
     cfg.cutMode === "SIDE" ? Number(cfg.length) || 0 : Number(cfg.running_meters) || 0;
 
-  // Live price preview — по той же формуле, что считает бэкенд.
+  // Live price preview — по той же формуле, что считает бэкенд: площадь до
+  // 0.001 «половиной вверх», каждая строка — вверх до целого сома.
   let preview = 0;
-  if (sel?.type === "material") preview = Number(sel.obj.price_per_unit) * Number(cfg.qty || 0);
+  if (sel?.type === "material") preview = ceilSom(Number(sel.obj.price_per_unit) * Number(cfg.qty || 0));
   else if (svc?.uses_area) {
-    const area = Number(cfg.width) * Number(cfg.length) || 0;
+    const area = areaOf(cfg.width, cfg.length) || 0;
     // Резка: работа = пог.м × ставка, материал = площадь × цена за кв.м. Пока
     // погонные метры не введены, работа = 0 — площадь вместо длины реза давала
     // цену втрое ниже реальной.
     const work = usesRunM ? runM * rate : area * rate;
-    preview = work + area * matSqmPrice;
-  } else if (svc?.uses_pieces) preview = Number(svc.rate_per_piece) * Number(cfg.qty || 0);
-  else if (svc) preview = Number(svc.base_price) * Number(cfg.qty || 0);
+    preview = ceilSom(work) + ceilSom(area * matSqmPrice);
+  } else if (svc?.uses_pieces) preview = ceilSom(Number(svc.rate_per_piece) * Number(cfg.qty || 0));
+  else if (svc) preview = ceilSom(Number(svc.base_price) * Number(cfg.qty || 0));
 
   function buildItem() {
     if (sel.type === "material") return { type: "MATERIAL", material: sel.obj.id, quantity: Number(cfg.qty) };

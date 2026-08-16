@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
 import Icon from "./Icon.jsx";
+import PrintHost from "./PrintHost.jsx";
 import amountInWords from "../utils/amountInWords.js";
 
 // Акт сверки взаиморасчётов с клиентом.
@@ -104,7 +105,7 @@ export default function PrintAct({ client, onClose }) {
   if (!company) return null;
 
   return (
-    <div className="modal-backdrop print-host">
+    <PrintHost>
       <div className="modal wide print-modal">
         <div className="modal-head no-print">
           <h2>{t("print.actTitle")}</h2>
@@ -227,6 +228,6 @@ export default function PrintAct({ client, onClose }) {
           </button>
         </div>
       </div>
-    </div>
+    </PrintHost>
   );
 }

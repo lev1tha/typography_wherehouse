@@ -23,6 +23,7 @@ from decimal import Decimal
 
 from django.db.models import Sum
 from django.db.models.functions import TruncMonth
+from django.utils import timezone
 
 from sales.models import Receipt, TransactionItem
 from warehouse.models import InventoryLog, MaterialMonthOpening, SupplyLine
@@ -116,12 +117,25 @@ def purchases_from_stock(d_from=None, d_to=None):
     # единицу та же поставка давала копеечный «хвост»: 48000 / 29.768 кв.м
     # округляется до 1612.47, обратно даёт 48000.01, и закуп переставал сходиться
     # с накладной поставщика ровно там, где заказчик их и сверяет.
+    return sum(purchases_from_stock_by_day(d_from, d_to).values(), ZERO)
+
+
+def purchases_from_stock_by_day(d_from=None, d_to=None) -> dict:
+    """То же, что `purchases_from_stock`, но по дням: {дата: сумма}.
+
+    Нужно графику «По дням»: он считает прибыль дня по ТОМУ ЖЕ правилу, что и
+    плитки месяца, а закуп у плиток складывается из приходов на склад. Пока
+    график брал только записи трат, на одном экране стояли две «Прибыли»:
+    −14 265 сверху и +3 735 в графике. Один источник — одна цифра.
+    """
+    out = defaultdict(lambda: ZERO)
     lines = SupplyLine.objects.all()
     if d_from:
         lines = lines.filter(supply__received_on__gte=d_from)
     if d_to:
         lines = lines.filter(supply__received_on__lte=d_to)
-    from_documents = lines.aggregate(v=Sum("cost"))["v"] or ZERO
+    for row in lines.values("supply__received_on").annotate(v=Sum("cost")):
+        out[row["supply__received_on"]] += row["v"] or ZERO
 
     # Всё остальное — одиночные приходы: там суммы нет, есть цена за единицу.
     qs = InventoryLog.objects.filter(
@@ -132,11 +146,10 @@ def purchases_from_stock(d_from=None, d_to=None):
         qs = qs.filter(happened_at__date__gte=d_from)
     if d_to:
         qs = qs.filter(happened_at__date__lte=d_to)
-    return from_documents + sum(
-        (row["quantity_changed"] * row["actual_price"]
-         for row in qs.values("quantity_changed", "actual_price")),
-        ZERO,
-    )
+    for row in qs.values("happened_at", "quantity_changed", "actual_price"):
+        day = timezone.localtime(row["happened_at"]).date()
+        out[day] += row["quantity_changed"] * row["actual_price"]
+    return dict(out)
 
 
 def collect_manual(materials):

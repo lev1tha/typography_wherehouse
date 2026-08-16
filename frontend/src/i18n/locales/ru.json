@@ -847,6 +847,8 @@
     "actDebit": "Начислено",
     "actCredit": "Оплачено",
     "actOrder": "Заказ №{{n}}",
+    "actRefund": "Возврат по заказу №{{n}}",
+    "actRefundPaid": "Выдано деньгами по возврату №{{n}}",
     "actPayment": "Оплата",
     "actOpening": "Сальдо на начало периода",
     "actTurnover": "Обороты за период",

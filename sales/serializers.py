@@ -161,8 +161,11 @@ class SaleItemInputSerializer(serializers.Serializer):
     service = serializers.PrimaryKeyRelatedField(
         queryset=PrintingService.objects.all(), required=False, allow_null=True
     )
+    # Три знака, как у колонки `TransactionItem.quantity`: продажа по площади
+    # шлёт сюда площадь куска (0.554 кв.м), и с двумя знаками такой заказ
+    # отклонялся «не более 2 цифры после запятой».
     quantity = serializers.DecimalField(
-        max_digits=12, decimal_places=2, min_value=0, required=False, default=0
+        max_digits=12, decimal_places=3, min_value=0, required=False, default=0
     )
     # Material sale mode: PIECE = whole sheet/roll at piece_price; SQM = by area.
     mode = serializers.ChoiceField(
@@ -210,6 +213,11 @@ class SaleCreateSerializer(serializers.Serializer):
     amount_paid = serializers.DecimalField(
         max_digits=14, decimal_places=2, min_value=0, required=False, allow_null=True
     )
+    # «Вся сумма»: клиент платит ровно столько, сколько выйдет. Сумму чека знает
+    # только сервер после сборки строк, кассе её угадывать нельзя — она считала
+    # 978 там, где сервер насчитал 979, и полностью оплаченный заказ повисал с
+    # долгом в сом. Флаг важнее `amount_paid`.
+    pay_full = serializers.BooleanField(required=False, default=False)
     # Дата заказа задним числом. Не указана — «сейчас». Право проверяет вьюха:
     # по этой дате считается вся отчётность, ставить её в прошлое может админ.
     order_date = serializers.DateField(required=False, allow_null=True)
