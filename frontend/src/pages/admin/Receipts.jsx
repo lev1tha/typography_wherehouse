@@ -139,6 +139,12 @@ function ReceiptsTab() {
     api.get("/clients/clients/").then((r) => setClientsList(r.data.results)).catch(() => {});
   }, []);
 
+  // Таблица уложена в десять колонок, чтобы влезать в обычный монитор:
+  // раньше их было четырнадцать (1650px при 1440 у заказчика), и действия по
+  // чеку — печать, правка, возврат — жили за правым краем, куда никто не
+  // крутил. Что переехало: «кто оформил» — под клиента, способ оплаты — под
+  // статус, себестоимость — под маржу, сдача — в колонку долга (они не бывают
+  // одновременно), печать — к остальным действиям.
   const columns = [
     {
       key: "order_number",
@@ -150,29 +156,31 @@ function ReceiptsTab() {
         </>
       ),
     },
-    { key: "client_name", label: t("checkout.client"), render: (r) => r.client_name || "—" },
     {
-      key: "cashier_name",
-      label: t("receipts.cashier"),
-      render: (r) =>
-        r.cashier_name ? (
-          <span>
-            {r.cashier_name}
-            {r.cashier_role && <span className="muted"> · {r.cashier_role}</span>}
-          </span>
-        ) : (
-          "—"
-        ),
-    },
-    {
-      key: "payment_method",
-      label: t("receipts.method"),
-      render: (r) => t(`checkout.${r.payment_method.toLowerCase()}`),
+      key: "client_name",
+      label: t("checkout.client"),
+      render: (r) => (
+        <>
+          {r.client_name || "—"}
+          {r.cashier_name && (
+            <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+              {t("receipts.cashierShort")}: {r.cashier_name}
+            </div>
+          )}
+        </>
+      ),
     },
     {
       key: "payment_status",
       label: t("receipts.status"),
-      render: (r) => <PaymentBadge status={r.payment_status} />,
+      render: (r) => (
+        <>
+          <PaymentBadge status={r.payment_status} />
+          <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+            {t(`checkout.${r.payment_method.toLowerCase()}`)}
+          </div>
+        </>
+      ),
     },
     {
       key: "fulfillment",
@@ -197,67 +205,79 @@ function ReceiptsTab() {
           <span className="muted">—</span>
         ),
     },
-    { key: "total_price", label: t("common.total"), sortKey: "total_price", render: (r) => `${r.total_price} сом` },
-    // Себестоимость проданного по заказу и что от него осталось. Снимок закупки
-    // на момент продажи — переоценка склада прошлые заказы не двигает. Видят
-    // владелец и бухгалтер: складовщик оформляет и выдаёт, но закупочных цен не
-    // знает.
+    // Итог — тем же форматом, что остальные суммы («1 879 сом», не «1879.00»).
+    { key: "total_price", label: t("common.total"), sortKey: "total_price", render: (r) => <strong>{som(r.total_price)}</strong> },
+    // Маржа и под ней себестоимость проданного по заказу. Снимок закупки на
+    // момент продажи — переоценка склада прошлые заказы не двигает. Видят
+    // владелец и бухгалтер: складовщик оформляет и выдаёт, но закупочных цен
+    // не знает.
     ...(seesMoney
       ? [
           {
-            key: "cost_total",
-            label: t("receipts.cost"),
-            render: (r) =>
-              Number(r.cost_total) > 0 ? (
-                <span className="muted">{som(r.cost_total)}</span>
-              ) : (
-                // Ноль здесь значит «материала в заказе не было» (чистая услуга)
-                // либо старый заказ, оформленный до учёта себестоимости.
-                <span className="muted">—</span>
-              ),
-          },
-          {
             key: "margin",
             label: t("receipts.margin"),
-            render: (r) =>
-              r.margin == null ? (
-                <span className="muted">—</span>
-              ) : (
-                <strong style={{ color: Number(r.margin) < 0 ? "var(--danger)" : undefined }}>
-                  {som(r.margin)}
-                </strong>
-              ),
+            render: (r) => (
+              <>
+                {r.margin == null ? (
+                  <span className="muted">—</span>
+                ) : (
+                  <strong style={{ color: Number(r.margin) < 0 ? "var(--danger)" : undefined }}>
+                    {som(r.margin)}
+                  </strong>
+                )}
+                {/* Ноль себестоимости значит «материала в заказе не было»
+                    (чистая услуга) либо старый заказ до учёта себестоимости. */}
+                <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                  {t("receipts.costShort")}: {Number(r.cost_total) > 0 ? som(r.cost_total) : "—"}
+                </div>
+              </>
+            ),
           },
         ]
       : []),
+    // Долг клиента и сдача цеха перед ним — две стороны одного вопроса «кто
+    // кому остался должен», одновременно не бывают, поэтому делят колонку.
     {
       key: "debt",
-      label: t("receipts.debt"),
+      label: `${t("receipts.debt")} / ${t("receipts.change")}`,
       sortKey: "_debt",
       render: (r) => {
         const hasDebt = Number(r.debt) > 0;
+        const due = Math.round(Number(r.change_due) || 0);
         const canUndo =
           !readOnly &&
           (r.payment_status === "PAID" || Number(r.amount_paid) > 0) &&
           !["REFUNDED", "PARTIALLY_REFUNDED"].includes(r.payment_status) &&
           r.status !== "CANCELLED";
-        if (!hasDebt && !canUndo) return <span className="muted">0</span>;
+        if (!hasDebt && due <= 0 && !canUndo) return <span className="muted">0</span>;
         return (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
-            {hasDebt && <span style={{ color: "var(--danger)", fontWeight: 600 }}>{r.debt} сом</span>}
+            {hasDebt && <span style={{ color: "var(--danger)", fontWeight: 600, whiteSpace: "nowrap" }}>{som(r.debt)}</span>}
             {hasDebt && !readOnly && (
               <button
-                className="secondary"
-                style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
+                className="secondary row-btn"
                 onClick={(e) => { e.stopPropagation(); setPaying(r); }}
               >
                 {t("receipts.pay")}
               </button>
             )}
+            {due > 0 && (
+              <span style={{ color: "var(--accent-strong)", fontWeight: 600, whiteSpace: "nowrap" }}>
+                {t("receipts.change")}: {som(due)}
+              </span>
+            )}
+            {due > 0 && !readOnly && isAdmin && (
+              <button
+                className="secondary row-btn"
+                onClick={(e) => { e.stopPropagation(); setGivingChange(r); }}
+              >
+                {t("receipts.changeGive")}
+              </button>
+            )}
             {canUndo && (
               <button
-                className="ghost"
-                style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap", color: "var(--ink-muted)" }}
+                className="ghost row-btn"
+                style={{ color: "var(--ink-muted)" }}
                 onClick={(e) => undoPay(r, e)}
                 title={t("receipts.unpay")}
               >
@@ -268,89 +288,68 @@ function ReceiptsTab() {
         );
       },
     },
-    // Сдача — долг цеха ПЕРЕД клиентом, зеркальный обычному долгу, поэтому
-    // стоит соседней колонкой и тем же способом: сумма плюс кнопка действия.
-    {
-      key: "change_due",
-      label: t("receipts.change"),
-      sortKey: "change_due",
-      render: (r) => {
-        const due = Math.round(Number(r.change_due) || 0);
-        if (due <= 0) return <span className="muted">0</span>;
-        return (
-          <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
-            <span style={{ color: "var(--accent-strong)", fontWeight: 600 }}>{som(due)}</span>
-            {!readOnly && isAdmin && (
-              <button
-                className="secondary row-btn"
-                onClick={(e) => { e.stopPropagation(); setGivingChange(r); }}
-              >
-                {t("receipts.changeGive")}
-              </button>
-            )}
-          </div>
-        );
-      },
-    },
     {
       key: "created_at",
       label: t("receipts.date"),
       sortKey: "created_at",
-      render: (r) => new Date(r.created_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }),
+      render: (r) => {
+        const d = new Date(r.created_at);
+        return (
+          <span style={{ whiteSpace: "nowrap" }}>
+            {d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" })}
+            <div className="muted" style={{ fontSize: 12 }}>
+              {d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
+            </div>
+          </span>
+        );
+      },
     },
-    // Печать — отдельной колонкой и ВСЕМ ролям: накладную выдаёт складовщик,
-    // счёт спрашивает бухгалтерия клиента. Это чтение, ничего не меняет.
+    // Действия одной ячейкой, кнопки ПОДПИСАНЫ, а не одни иконки: на складе те
+    // же иконки без подписей заказчик просто не нашёл и решил, что функции нет.
+    // Печать — всем ролям (накладную выдаёт складовщик, счёт спрашивает
+    // бухгалтерия клиента), правка, возврат и удаление — админу.
     {
-      key: "print",
-      label: "",
+      key: "actions",
+      label: isAdmin ? t("receipts.actions") : "",
       render: (r) => (
-        <button
-          className="secondary row-btn"
-          onClick={(e) => { e.stopPropagation(); setPrinting(r); }}
-          title={t("print.title")}
-        >
-          <Icon name="printer" size={14} /> {t("print.print")}
-        </button>
-      ),
-    },
-    // Правка и удаление — только админу. Кнопки ПОДПИСАНЫ, а не одни иконки:
-    // на складе те же две иконки без подписей заказчик просто не нашёл и решил,
-    // что функции нет вовсе.
-    ...(isAdmin
-      ? [
-          {
-            key: "actions",
-            label: t("receipts.actions"),
-            render: (r) => (
-              <div className="row" style={{ gap: 6, alignItems: "center", margin: 0, flexWrap: "nowrap" }}>
+        <div className="row-actions">
+          <button
+            className="secondary row-btn"
+            onClick={(e) => { e.stopPropagation(); setPrinting(r); }}
+            title={t("print.title")}
+          >
+            <Icon name="printer" size={14} /> {t("print.print")}
+          </button>
+          {isAdmin && (
+            <>
+              <button
+                className="secondary row-btn"
+                onClick={(e) => { e.stopPropagation(); setEditing(r); }}
+              >
+                <Icon name="pencil" size={14} /> {t("receipts.edit")}
+              </button>
+              {/* Возврат — целиком или отдельными позициями. Раньше у админа
+                  этой кнопки не было вовсе: возврат жил только в складском
+                  разделе, и только целым чеком. */}
+              {canRefund(r) && (
                 <button
                   className="secondary row-btn"
-                  onClick={(e) => { e.stopPropagation(); setEditing(r); }}
+                  onClick={(e) => { e.stopPropagation(); setRefunding(r); }}
                 >
-                  <Icon name="pencil" size={14} /> {t("receipts.edit")}
+                  <Icon name="undo" size={14} /> {t("receipts.refundBtn")}
                 </button>
-                {/* Возврат — целиком или отдельными позициями. Раньше у админа
-                    этой кнопки не было вовсе: возврат жил только в складском
-                    разделе, и только целым чеком. */}
-                {canRefund(r) && (
-                  <button
-                    className="secondary row-btn"
-                    onClick={(e) => { e.stopPropagation(); setRefunding(r); }}
-                  >
-                    <Icon name="undo" size={14} /> {t("receipts.refundBtn")}
-                  </button>
-                )}
-                <button
-                  className="ghost row-btn row-danger"
-                  onClick={(e) => removeReceipt(r, e)}
-                >
-                  <Icon name="trash" size={14} /> {t("receipts.delete")}
-                </button>
-              </div>
-            ),
-          },
-        ]
-      : []),
+              )}
+              <button
+                className="ghost row-btn row-danger"
+                onClick={(e) => removeReceipt(r, e)}
+              >
+                <Icon name="trash" size={14} /> {t("receipts.delete")}
+              </button>
+            </>
+          )}
+        </div>
+      ),
+    },
   ];
 
   return (
@@ -433,7 +432,7 @@ function ReceiptsTab() {
       </div>
       {/* С себестоимостью и маржой колонок стало одиннадцать — таблица
           прокручивается вбок сама, а не тянет за собой всю страницу. */}
-      <div className="table-wrap">
+      <div className="table-wrap dense">
         <DataTable columns={columns} rows={rows} sort={sort} onSort={onSort} />
       </div>
 

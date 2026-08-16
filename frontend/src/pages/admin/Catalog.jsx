@@ -80,16 +80,29 @@ const NumField = ({ label, value, onChange, grow }) => (
 // Цена в таблице всегда с единицей. У материала с известной площадью листа под
 // ценой за кв.м стоит цена листа — заказчик мыслит листами, и делить в уме,
 // чтобы понять «а лист-то почём», он не должен.
-const PriceCell = ({ m, value, t }) => {
+//
+// У РОЗНИЧНОЙ цены строка листа — это `piece_price`, по которой лист и продают
+// в кассе, с тем же округлением вверх до сома, что и в кассе. Раньше здесь
+// стояло `цена за кв.м × площадь`, и склад показывал 3725 сом/лист там, где
+// касса продавала за 3700 (или 4465 против 4466 из-за разного округления) —
+// две цифры одной цены на соседних экранах. Нет цены за лист — нет и строки:
+// продажа целиком в кассе тогда недоступна, показывать выдуманную цифру нечего.
+// У ЗАКУПОЧНОЙ цены своей «за лист» в базе нет — она по-прежнему считается из
+// цены за кв.м.
+const ceilSom = (v) => Math.max(0, Math.ceil((Number(v) || 0) - 1e-6));
+const PriceCell = ({ m, value, t, pieceValue }) => {
   const per = m.is_roll_material || m.unit === "SQM" ? "кв.м" : t(`unit.${m.unit}`);
   const area = Number(m.piece_area) || 0;
   const num = Number(value) || 0;
+  const explicitPiece = pieceValue !== undefined;
+  const sheet = explicitPiece ? ceilSom(pieceValue) : Math.round(num * area);
+  const showSheet = per === "кв.м" && (explicitPiece ? sheet > 0 : area > 0 && num > 0);
   return (
     <>
-      {num} <span className="muted">сом/{per}</span>
-      {area > 0 && per === "кв.м" && num > 0 && (
+      {explicitPiece ? ceilSom(num) : num} <span className="muted">сом/{per}</span>
+      {showSheet && (
         <div className="muted" style={{ fontSize: 12 }}>
-          {Math.round(num * area)} {t("warehouse.perSheetShort")}
+          {sheet} {t("warehouse.perSheetShort")}
         </div>
       )}
     </>
@@ -318,7 +331,12 @@ export default function Catalog({ embedded = false }) {
       key: "price_per_unit",
       label: t("warehouse.retailPrice"),
       render: (m) => (
-        <PriceCell m={m} value={m.is_roll_material ? m.sqm_price : m.price_per_unit} t={t} />
+        <PriceCell
+          m={m}
+          value={m.is_roll_material ? m.sqm_price : m.price_per_unit}
+          pieceValue={m.is_roll_material ? m.piece_price : 0}
+          t={t}
+        />
       ),
     },
     {

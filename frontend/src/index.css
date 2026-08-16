@@ -630,9 +630,47 @@ label {
 }
 
 /* Обёртка для таблиц, которым стало тесно: прокручивается вбок сама, вместо
-   того чтобы растягивать страницу (тогда вбок уезжает и меню, и шапка). */
+   того чтобы растягивать страницу (тогда вбок уезжает и меню, и шапка).
+   Полоса прокрутки нарисована явно: на macOS системная появляется только во
+   время самой прокрутки, и колонки за правым краем никто не находил. */
 .table-wrap {
   overflow-x: auto;
+}
+
+.table-wrap::-webkit-scrollbar {
+  height: 10px;
+}
+
+.table-wrap::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 5px;
+  border: 2px solid var(--canvas);
+}
+
+.table-wrap::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Плотная таблица — для чеков, где колонок много и каждая на счету:
+   меньше воздуха в ячейках, чтобы всё влезало в обычный монитор. */
+.table-wrap.dense .table th,
+.table-wrap.dense .table td {
+  padding: 9px 10px;
+  font-size: 14px;
+}
+
+.table-wrap.dense .table th {
+  font-size: 11px;
+}
+
+/* Кнопки действий в ячейке: в ряд, при нехватке места — в два. */
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+  min-width: 196px;
+  max-width: 220px;
 }
 
 /* --- Table → cards under 600px --- */
@@ -802,7 +840,11 @@ label {
 .modal {
   background: var(--surface);
   border-radius: var(--r-xl);
-  padding: 24px;
+  /* Сверху отступа нет: он у липкой шапки (.modal-head). Sticky-элемент не
+     может подняться выше content-box своего контейнера, поэтому при
+     padding-top: 24px шапка стояла на 24px ниже верха окна: под ней просвечивал
+     прокрученный контент, а первую строку формы она накрывала на 8px. */
+  padding: 0 24px 24px;
   width: 100%;
   max-width: 520px;
   max-height: 90vh;
@@ -1048,7 +1090,9 @@ label {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: -24px -24px 16px;
+  /* По горизонтали — во всю ширину окна (линия под шапкой от края до края),
+     по вертикали отрицательного margin нет — см. .modal. */
+  margin: 0 -24px 16px;
   padding: 20px 24px 12px;
   background: var(--surface);
   border-bottom: 1px solid var(--hairline);

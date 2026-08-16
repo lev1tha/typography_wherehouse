@@ -443,7 +443,9 @@
     "refundDebtHint": "Part of the refund simply clears the order's debt — only the overpayment is paid back in cash.",
     "refundNothing": "Tick at least one line",
     "refundEmpty": "Nothing to refund — every line was already returned",
-    "refundBtn": "Refund"
+    "refundBtn": "Refund",
+    "cashierShort": "by",
+    "costShort": "cost"
   },
   "fulfillment": {
     "PROCESSING": "Processing",
