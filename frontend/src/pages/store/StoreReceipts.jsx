@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import api from "../../api/api.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import AddToOrderModal from "../../components/AddToOrderModal.jsx";
+import RefundModal from "../../components/RefundModal.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
@@ -77,20 +78,9 @@ export default function StoreReceipts() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, sort]);
 
-  async function refund() {
-    if (!(await confirm(t("receipts.confirmRefund")))) return;
-    setBusy(true);
-    try {
-      const { data } = await api.post(`/sales/receipts/${open.id}/refund/`, {});
-      setOpen(data);
-      load();
-      toast(t("receipts.refundDone"));
-    } catch {
-      toast(t("common.error"), "error");
-    } finally {
-      setBusy(false);
-    }
-  }
+  // Возврат — в отдельном окне с выбором позиций (целиком по умолчанию);
+  // раньше здесь был только возврат всего чека одним подтверждением.
+  const [refunding, setRefunding] = useState(false);
 
   async function setFulfillment(action) {
     setBusy(true);
@@ -219,7 +209,11 @@ export default function StoreReceipts() {
     },
   ];
 
-  const canRefund = open && !["REFUNDED", "CANCELLED"].includes(open.payment_status) && open.status !== "CANCELLED";
+  const canRefund =
+    open &&
+    !["REFUNDED", "CANCELLED"].includes(open.payment_status) &&
+    open.status !== "CANCELLED" &&
+    (open.items || []).some((i) => !i.is_returned);
   const canEdit = open && open.payment_status !== "REFUNDED" && open.status !== "CANCELLED";
 
   return (
@@ -283,7 +277,7 @@ export default function StoreReceipts() {
                 </button>
               )}
               {canRefund && (
-                <button className="danger" onClick={refund} disabled={busy}>
+                <button className="danger" onClick={() => setRefunding(true)} disabled={busy}>
                   {t("receipts.refund")}
                 </button>
               )}
@@ -352,6 +346,18 @@ export default function StoreReceipts() {
           onAdded={(data) => {
             setOpen(data);
             setAdding(false);
+            load();
+          }}
+        />
+      )}
+
+      {refunding && open && (
+        <RefundModal
+          receipt={open}
+          onClose={() => setRefunding(false)}
+          onDone={(data) => {
+            setOpen(data);
+            setRefunding(false);
             load();
           }}
         />

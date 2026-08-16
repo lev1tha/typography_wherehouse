@@ -21,6 +21,9 @@ class Receipt(models.Model):
         REFUNDED = "REFUNDED", _("Возвращено")
         PARTIALLY_REFUNDED = "PARTIALLY_REFUNDED", _("Частичный возврат")
 
+    # Статусы, при которых по чеку ещё может быть долг клиента.
+    OWING_STATUSES = (PaymentStatus.PENDING, PaymentStatus.PARTIALLY_REFUNDED)
+
     class Status(models.TextChoices):
         COMPLETED = "COMPLETED", _("Совершён")
         CANCELLED = "CANCELLED", _("Отменён/Возвращён")
@@ -144,10 +147,19 @@ class Receipt(models.Model):
 
     @property
     def debt(self) -> Decimal:
-        """Остаток к оплате: total − предоплата − возвраты. 0, если оплачен/отменён."""
+        """Остаток к оплате: total − предоплата − возвраты. 0, если оплачен/отменён.
+
+        Частично возвращённый чек тоже может быть должен: заказ на 979 в долг,
+        клиент вернул работу на 148 — за материал на 831 он по-прежнему должен.
+        Раньше долг считался только у PENDING, и после возврата одной строки
+        остаток пропадал из карточки, плиток и списка (оплату при этом принять
+        было можно — `apply_payment` долг видел). Статусы, при которых чек
+        может быть должен, — `OWING_STATUSES`, ими же пользуются аннотации
+        списков и отчёты.
+        """
         if self.status == self.Status.CANCELLED:
             return Decimal("0")
-        if self.payment_status != self.PaymentStatus.PENDING:
+        if self.payment_status not in self.OWING_STATUSES:
             return Decimal("0")
         owed = self.total_price - self.amount_paid - self.refunded_amount
         return owed if owed > Decimal("0") else Decimal("0")

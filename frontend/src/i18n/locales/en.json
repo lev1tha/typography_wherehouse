@@ -432,7 +432,18 @@
     "editItems": "Order contents",
     "editItemPrice": "Price",
     "editItemRestore": "Restore",
-    "editItemsChangeHint": "The total dropped below the money already taken — {{amount}} som becomes change owed to the client."
+    "editItemsChangeHint": "The total dropped below the money already taken — {{amount}} som becomes change owed to the client.",
+    "refundTitle": "Refund for receipt №{{number}}",
+    "refundHint": "Tick what the client returned. Material of these lines goes back to stock, money — as a cash outflow, no more than was paid on the receipt. Other lines stay as they are.",
+    "refundPick": "What was returned",
+    "refundAll": "Select all",
+    "refundNone": "Clear all",
+    "refundSum": "To refund",
+    "refundMoney": "Paid back in cash",
+    "refundDebtHint": "Part of the refund simply clears the order's debt — only the overpayment is paid back in cash.",
+    "refundNothing": "Tick at least one line",
+    "refundEmpty": "Nothing to refund — every line was already returned",
+    "refundBtn": "Refund"
   },
   "fulfillment": {
     "PROCESSING": "Processing",

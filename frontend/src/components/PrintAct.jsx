@@ -70,9 +70,10 @@ export default function PrintAct({ client, onClose }) {
       });
       if (refunded > 0) {
         orders.push({ date, seq: [n, 1], doc: t("print.actRefund", { n }), debit: 0, credit: refunded });
-        // Из кассы отдают не больше, чем по заказу приняли (так пишет и
-        // кассовая книга: `min(возврат, оплачено)`).
-        const paidBack = Math.min(refunded, paid);
+        // Деньгами вернулось ровно то, что клиент переплатил относительно
+        // оставшихся у него позиций — так пишет кассовая книга
+        // (`refund_receipt`): оплачено − (сумма − возвращено), не меньше нуля.
+        const paidBack = Math.max(0, paid - (Number(o.total_price || 0) - refunded));
         if (paidBack > 0) {
           orders.push({ date, seq: [n, 2], doc: t("print.actRefundPaid", { n }), debit: paidBack, credit: 0 });
         }

@@ -210,6 +210,10 @@ export default function Supplies({ embedded = false }) {
 
   return (
     <>
+      {/* В складском разделе страница стоит сама по себе (не вкладкой «Склада»)
+          и получает свой заголовок. Приход вводит тот, кто принимает товар, —
+          складовщик; раньше у него этого экрана не было вовсе. */}
+      {!embedded && <h1>{t("nav.supply")}</h1>}
       <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
         <p className="muted" style={{ fontSize: 13, margin: 0, maxWidth: "60ch" }}>
           {t("supplies.hint")}

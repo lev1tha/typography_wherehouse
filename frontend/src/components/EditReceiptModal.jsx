@@ -79,14 +79,21 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
     setBusy(true);
     try {
       const items = changedLines();
+      let data = receipt;
       if (items.length) {
-        await api.post(`/sales/receipts/${receipt.id}/edit-items/`, { items });
+        ({ data } = await api.post(`/sales/receipts/${receipt.id}/edit-items/`, { items }));
       }
-      const { data } = await api.patch(`/sales/receipts/${receipt.id}/`, {
-        title: title.trim(),
-        client: clientId || null,
-        order_date: orderDate,
-      });
+      // Шлём только то, что поменяли. Раньше уходили все три поля разом, и
+      // правка одного количества переставляла время заказа на полдень (дата
+      // «изменилась» на ту же самую) — чек уезжал в хронологии, а журнал
+      // действий писал «client, order_date, title» на пустом месте.
+      const meta = {};
+      if (title.trim() !== (receipt.title || "")) meta.title = title.trim();
+      if (String(clientId || "") !== String(receipt.client || "")) meta.client = clientId || null;
+      if (orderDate && orderDate !== dayOf(receipt.created_at)) meta.order_date = orderDate;
+      if (Object.keys(meta).length) {
+        ({ data } = await api.patch(`/sales/receipts/${receipt.id}/`, meta));
+      }
       toast(t("receipts.editSaved"));
       onSaved?.(data);
     } catch (e) {

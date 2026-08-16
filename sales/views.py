@@ -116,7 +116,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         return qs.annotate(
             _debt=Case(
                 When(
-                    Q(payment_status=Receipt.PaymentStatus.PENDING)
+                    Q(payment_status__in=Receipt.OWING_STATUSES)
                     & ~Q(status=Receipt.Status.CANCELLED)
                     & Q(total_price__gt=F("amount_paid") + F("refunded_amount")),
                     then=F("total_price") - F("amount_paid") - F("refunded_amount"),
@@ -149,7 +149,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             .count()
         )
         debt = Decimal("0")
-        pending = active.filter(payment_status=Receipt.PaymentStatus.PENDING).values_list(
+        pending = active.filter(payment_status__in=Receipt.OWING_STATUSES).values_list(
             "total_price", "amount_paid", "refunded_amount"
         )
         for total, paid, refunded in pending:
@@ -249,18 +249,30 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             )
 
         receipt = self.get_object()
+        # Меняем и пишем в журнал только то, что РЕАЛЬНО изменилось. Форма
+        # правки шлёт все три поля разом, и раньше любое сохранение (даже
+        # правка одного количества в составе) переставляло время заказа на
+        # полдень — чек и его списание уезжали в хронологии, а журнал действий
+        # уверял «client, order_date, title», хотя ничего из этого не трогали.
+        changed = []
         if "title" in request.data:
-            receipt.title = (request.data.get("title") or "").strip()[:255]
+            title = (request.data.get("title") or "").strip()[:255]
+            if title != receipt.title:
+                receipt.title = title
+                changed.append("title")
         if "client" in request.data:
             raw = request.data.get("client")
             if raw in (None, "", 0):
-                receipt.client = None
+                new_client_id = None
             elif Client.objects.filter(pk=raw).exists():
-                receipt.client_id = raw
+                new_client_id = int(raw)
             else:
                 return Response(
                     {"detail": "Клиент не найден."}, status=status.HTTP_400_BAD_REQUEST
                 )
+            if new_client_id != receipt.client_id:
+                receipt.client_id = new_client_id
+                changed.append("client")
         moment = None
         if "order_date" in request.data:
             day = _parse_date(request.data.get("order_date"))
@@ -274,8 +286,14 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                     {"detail": "Дата заказа не может быть в будущем."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            moment = day_to_moment(day)
-            receipt.created_at = moment
+            # Тот же день — время заказа не трогаем: полдень ставим только
+            # когда заказ действительно переносят на другую дату.
+            if day != timezone.localtime(receipt.created_at).date():
+                moment = day_to_moment(day)
+                receipt.created_at = moment
+                changed.append("order_date")
+        if not changed:
+            return self._fresh_response(receipt)
         receipt.save(update_fields=["title", "client", "created_at", "updated_at"])
         if moment is not None:
             # Списание материала передвигаем следом: дата заказа опорная для
@@ -285,7 +303,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 happened_at=moment
             )
 
-        AuditLog.record(request.user, f"Правка чека {receipt.order_number}: {', '.join(sorted(request.data))}")
+        AuditLog.record(request.user, f"Правка чека {receipt.order_number}: {', '.join(sorted(changed))}")
         return self._fresh_response(receipt)
 
     def destroy(self, request, *args, **kwargs):

@@ -383,7 +383,7 @@ class FinanceReportView(APIView):
         )["v"]
         # Сколько денег по этим заказам реально приняли — включая предоплаты.
         revenue_paid = live.aggregate(v=_SUM("amount_paid"))["v"]
-        pending = live.filter(payment_status=Receipt.PaymentStatus.PENDING)
+        pending = live.filter(payment_status__in=Receipt.OWING_STATUSES)
 
         # Долг клиентов = Σ (сумма − предоплата − возвраты) по открытым чекам.
         client_debt = Decimal("0")

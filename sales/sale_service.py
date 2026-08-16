@@ -817,6 +817,15 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None) -> Receipt:
         Receipt.PaymentStatus.PARTIALLY_REFUNDED,
     )
 
+    # Сколько клиент переплатил относительно того, что у него ОСТАЁТСЯ на руках.
+    # До возврата и после: разница — это и есть деньги, которые ему отдают.
+    # Прежнее `min(возврат, оплачено)` при частичной оплате и двух возвратах
+    # подряд отдавало больше, чем принимали (оплачено 300 из 452, вернули 200 и
+    # ещё 200 → выдало бы 400).
+    def _excess():
+        return max(receipt.amount_paid - (receipt.total_price - receipt.refunded_amount), Decimal("0"))
+
+    excess_before = _excess()
     refunded_total = Decimal("0")
     for item in items:
         # Restore stock AND book the refund only for a settled sale. An unpaid
@@ -842,8 +851,9 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None) -> Receipt:
         receipt.payment_status = Receipt.PaymentStatus.REFUNDED
         receipt.status = Receipt.Status.CANCELLED
     receipt.save(update_fields=["refunded_amount", "payment_status", "status", "updated_at"])
-    # Из кассы ушло не больше, чем в неё по этому заказу приходило: вернуть
-    # можно только полученные деньги, а неоплаченный заказ возврата денег не
-    # порождает вовсе.
-    cash.refund_paid(receipt, min(refunded_total, receipt.amount_paid), user=user)
+    # Из кассы уходит ровно переплата, возникшая этим возвратом: неоплаченный
+    # заказ возврата денег не порождает вовсе, оплаченный целиком — вернёт
+    # стоимость возвращённых строк, оплаченный частично — только то, что
+    # выходит за стоимость оставшихся.
+    cash.refund_paid(receipt, _excess() - excess_before, user=user)
     return receipt

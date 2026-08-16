@@ -81,6 +81,45 @@ class ReceiptEditDeleteTests(APITestCase):
         self.assertEqual(r.client_id, self.other.id)
         self.assertEqual(timezone.localtime(r.created_at).date().isoformat(), "2026-07-15")
 
+    def test_same_day_keeps_the_time_of_day_and_is_not_logged(self):
+        """Форма правки шлёт дату всегда. Тот же день — время заказа на месте
+        (раньше любое сохранение ставило полдень: чек и его списание уезжали в
+        хронологии), а в журнал действий уходят только реально изменённые поля."""
+        r = self._sale()
+        before = r.created_at
+        same_day = timezone.localtime(before).date().isoformat()
+        self.client.force_authenticate(self.admin)
+        resp = self.client.patch(
+            self._url(r),
+            {"title": "Новое имя", "client": r.client_id, "order_date": same_day},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        r.refresh_from_db()
+        self.assertEqual(r.created_at, before)
+        self.assertEqual(r.title, "Новое имя")
+        log = AuditLog.objects.filter(action__startswith=f"Правка чека {r.order_number}").latest("id")
+        self.assertEqual(log.action, f"Правка чека {r.order_number}: title")
+        # Списание материала тоже осталось на своём времени.
+        inv = r.inventory_logs.filter(type=InventoryLog.Type.SALE).first()
+        self.assertEqual(inv.happened_at, before)
+
+    def test_nothing_changed_writes_nothing(self):
+        r = self._sale()
+        before = (r.created_at, r.updated_at)
+        self.client.force_authenticate(self.admin)
+        n = AuditLog.objects.count()
+        resp = self.client.patch(
+            self._url(r),
+            {"title": r.title, "client": r.client_id,
+             "order_date": timezone.localtime(r.created_at).date().isoformat()},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        r.refresh_from_db()
+        self.assertEqual((r.created_at, r.updated_at), before)
+        self.assertEqual(AuditLog.objects.count(), n)
+
     def test_order_date_moves_stock_write_off_with_it(self):
         """Дата заказа опорная для ВСЕЙ отчётности. Расход, оставшийся в прежнем
         месяце, увёл бы складской лист от выручки."""

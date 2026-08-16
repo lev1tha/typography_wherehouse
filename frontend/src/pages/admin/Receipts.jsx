@@ -5,6 +5,7 @@ import api from "../../api/api.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import EditReceiptModal from "../../components/EditReceiptModal.jsx";
+import RefundModal from "../../components/RefundModal.jsx";
 import GiveChangeModal from "../../components/GiveChangeModal.jsx";
 import Icon from "../../components/Icon.jsx";
 import PayDebtModal from "../../components/PayDebtModal.jsx";
@@ -38,6 +39,7 @@ function ReceiptsTab() {
   const [paying, setPaying] = useState(null);
   const [givingChange, setGivingChange] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [refunding, setRefunding] = useState(null);
   // Заказ, по которому открыты печатные формы (чек / накладная / счёт).
   const [printing, setPrinting] = useState(null);
   const [sort, setSort] = useState({ key: "_debt", dir: "desc" });
@@ -94,6 +96,12 @@ function ReceiptsTab() {
   // Удаление — не возврат: возврат клиент принёс обратно, и в отчётах он обязан
   // остаться; удаление — это «такого заказа не было». Поэтому и текст
   // подтверждения перечисляет последствия, а не спрашивает «уверены?».
+  // Возвращать есть что, пока чек не отменён и не возвращён целиком.
+  const canRefund = (r) =>
+    !["REFUNDED", "CANCELLED"].includes(r.payment_status) &&
+    r.status !== "CANCELLED" &&
+    (r.items || []).some((i) => !i.is_returned);
+
   async function removeReceipt(r, e) {
     e?.stopPropagation();
     const ok = await confirm(
@@ -321,6 +329,17 @@ function ReceiptsTab() {
                 >
                   <Icon name="pencil" size={14} /> {t("receipts.edit")}
                 </button>
+                {/* Возврат — целиком или отдельными позициями. Раньше у админа
+                    этой кнопки не было вовсе: возврат жил только в складском
+                    разделе, и только целым чеком. */}
+                {canRefund(r) && (
+                  <button
+                    className="secondary row-btn"
+                    onClick={(e) => { e.stopPropagation(); setRefunding(r); }}
+                  >
+                    <Icon name="undo" size={14} /> {t("receipts.refundBtn")}
+                  </button>
+                )}
                 <button
                   className="ghost row-btn row-danger"
                   onClick={(e) => removeReceipt(r, e)}
@@ -441,6 +460,14 @@ function ReceiptsTab() {
           receipt={editing}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); load(); }}
+        />
+      )}
+
+      {refunding && (
+        <RefundModal
+          receipt={refunding}
+          onClose={() => setRefunding(null)}
+          onDone={() => { setRefunding(null); load(); }}
         />
       )}
     </>

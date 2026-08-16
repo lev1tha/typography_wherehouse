@@ -13,6 +13,7 @@ import Cash from "./pages/admin/Cash.jsx";
 import Clients from "./pages/admin/Clients.jsx";
 import ReferralRequests from "./pages/admin/ReferralRequests.jsx";
 import Receipts from "./pages/admin/Receipts.jsx";
+import Supplies from "./pages/admin/Supplies.jsx";
 import Finance from "./pages/admin/Finance.jsx";
 import CustomerOrders from "./pages/customer/CustomerOrders.jsx";
 import Warehouse from "./pages/store/Warehouse.jsx";
@@ -48,6 +49,9 @@ const STORE_NAV = [
       { to: "/app/receipts", label: "nav.receipts", icon: "receipt" },
       { to: "/app/clients", label: "nav.clients", icon: "users" },
       { to: "/app", label: "nav.warehouse", end: true, icon: "package" },
+      // Приход накладной — работа складовщика: он принимает товар и выдаёт
+      // приходную накладную. Тот же экран, что у админа во вкладке «Приходы».
+      { to: "/app/supplies", label: "nav.supply", icon: "inbox" },
     ],
   },
 ];
@@ -144,6 +148,7 @@ export default function App() {
         <Route path="/app/checkout" element={<Checkout />} />
         <Route path="/app/clients" element={<Clients />} />
         <Route path="/app/receipts" element={<StoreReceipts />} />
+        <Route path="/app/supplies" element={<Supplies />} />
       </Route>
 
       {/* Бухгалтер — отдельный раздел, всё только на просмотр */}

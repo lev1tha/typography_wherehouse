@@ -101,7 +101,7 @@ class ClientViewSet(viewsets.ModelViewSet):
         # Receipt.debt и в сортировке чеков.
         debt_case = Case(
             When(
-                Q(receipts__payment_status=Receipt.PaymentStatus.PENDING)
+                Q(receipts__payment_status__in=Receipt.OWING_STATUSES)
                 & ~Q(receipts__status=Receipt.Status.CANCELLED)
                 & Q(
                     receipts__total_price__gt=F("receipts__amount_paid")
