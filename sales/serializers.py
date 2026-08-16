@@ -36,6 +36,10 @@ class TransactionItemSerializer(serializers.ModelSerializer):
         max_digits=14, decimal_places=2, read_only=True
     )
     cost_total = serializers.SerializerMethodField()
+    # Единица измерения строки — для печатных форм: в накладной и счёте колонка
+    # «Ед.» обязательна, а вывести её на фронте не из чего: у резки количество
+    # в погонных метрах, у листа — в штуках, у куска — в квадратных.
+    unit_label = serializers.SerializerMethodField()
 
     class Meta:
         model = TransactionItem
@@ -50,6 +54,7 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             "price_per_item",
             "line_total",
             "cost_total",
+            "unit_label",
             "sale_mode",
             "width",
             "length",
@@ -58,6 +63,19 @@ class TransactionItemSerializer(serializers.ModelSerializer):
 
     def get_cost_total(self, obj):
         return obj.cost_total if _is_admin(self.context) else None
+
+    def get_unit_label(self, obj):
+        if obj.type == TransactionItem.Type.MATERIAL:
+            if obj.sale_mode == TransactionItem.SaleMode.PIECE:
+                return "шт"
+            if obj.material_id and obj.material.is_roll_material:
+                return "кв.м"
+            return obj.material.get_unit_display() if obj.material_id else "шт"
+        # Работа резки считается погонными метрами, остальные услуги — штуками
+        # (буквы наружной установки) или разом за заказ.
+        if obj.service_id and obj.service.uses_running_meter:
+            return "пог.м"
+        return "шт"
 
 
 class ReceiptSerializer(serializers.ModelSerializer):

@@ -14,6 +14,9 @@ const EMPTY_CFG = {
   materialId: "",
   running_meters: "",
   cutRate: "",
+  // Как считать длину реза: обычный рез (одна сторона куска — «Длина») или
+  // фигурный (длину кривой вводит мастер). Так же, как в кассе.
+  cutMode: "SIDE",
 };
 
 /** Configure and append one item (дозаказ) to an existing receipt. */
@@ -29,7 +32,11 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
 
   useEffect(() => {
     api.get("/services/services/").then((r) => setServices(r.data.results.filter((s) => s.is_active !== false)));
-    api.get("/warehouse/materials/", { params: { ordering: "name" } }).then((r) => setMaterials(r.data.results));
+    // page_size: без него приходит первая страница из 25 материалов, и
+    // остального каталога в списке дозаказа просто нет.
+    api
+      .get("/warehouse/materials/", { params: { ordering: "name", page_size: 500 } })
+      .then((r) => setMaterials(r.data.results));
   }, []);
 
   const areaMaterials = materials.filter((m) => m.is_roll_material);
@@ -56,6 +63,10 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
   const matSqmPrice = cfgMat
     ? Number(cfgMat.sqm_price ?? cfgMat.price_per_sqm ?? cfgMat.price_per_unit ?? 0)
     : 0;
+  // Длина реза в погонных метрах: у обычного реза это ОДНА сторона куска
+  // («Длина»), у фигурного — то, что ввёл мастер.
+  const runM =
+    cfg.cutMode === "SIDE" ? Number(cfg.length) || 0 : Number(cfg.running_meters) || 0;
 
   // Live price preview — по той же формуле, что считает бэкенд.
   let preview = 0;
@@ -65,7 +76,7 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
     // Резка: работа = пог.м × ставка, материал = площадь × цена за кв.м. Пока
     // погонные метры не введены, работа = 0 — площадь вместо длины реза давала
     // цену втрое ниже реальной.
-    const work = usesRunM ? (Number(cfg.running_meters) || 0) * rate : area * rate;
+    const work = usesRunM ? runM * rate : area * rate;
     preview = work + area * matSqmPrice;
   } else if (svc?.uses_pieces) preview = Number(svc.rate_per_piece) * Number(cfg.qty || 0);
   else if (svc) preview = Number(svc.base_price) * Number(cfg.qty || 0);
@@ -75,7 +86,7 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
     if (svc.uses_area) {
       const it = { type: "SERVICE", service: svc.id, material: Number(cfg.materialId), width: Number(cfg.width), length: Number(cfg.length) };
       if (svc.uses_letter_type) it.letter_type = cfg.letter_type;
-      if (usesRunM) it.running_meters = Number(cfg.running_meters) || 0;
+      if (usesRunM) it.running_meters = runM;
       if (isAdmin && cfg.cutRate !== "") it.cut_rate = Number(cfg.cutRate) || 0;
       return it;
     }
@@ -167,19 +178,42 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
             <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} /></div>
             <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} /></div>
           </div>
-          {/* Погонометр: длину реза вводит мастер, из размеров куска она не
-              выводится. Не введена — работа резки не начисляется, как в кассе. */}
+          {/* Как считать длину реза — так же, как в кассе: обычный рез берёт
+              одну сторону куска, фигурный ждёт длину кривой от мастера. */}
           {usesRunM && (
-            <div className="field">
-              <label>{t("checkout.runningMeters")}</label>
-              <input
-                type="number"
-                step="any"
-                value={cfg.running_meters}
-                onChange={(e) => setCfg({ ...cfg, running_meters: e.target.value })}
-              />
-              <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("checkout.runMetersHint")}</p>
-            </div>
+            <>
+              <div className="field">
+                <div className="tabs" style={{ marginTop: 0 }}>
+                  {["SIDE", "CURVE"].map((mode) => (
+                    <button
+                      key={mode}
+                      className={cfg.cutMode === mode ? "active" : ""}
+                      onClick={() => setCfg({ ...cfg, cutMode: mode })}
+                    >
+                      {t(`checkout.mode${mode === "SIDE" ? "Side" : "Curve"}`)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {cfg.cutMode === "CURVE" ? (
+                <div className="field">
+                  <label>{t("checkout.runningMeters")}</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={cfg.running_meters}
+                    onChange={(e) => setCfg({ ...cfg, running_meters: e.target.value })}
+                  />
+                  <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("checkout.runMetersHint")}</p>
+                </div>
+              ) : (
+                runM > 0 && (
+                  <p className="muted" style={{ fontSize: 12, margin: "0 0 12px" }}>
+                    {t("checkout.sideAuto", { value: runM })}
+                  </p>
+                )
+              )}
+            </>
           )}
           {isAdmin && usesRunM && (
             <div className="field">

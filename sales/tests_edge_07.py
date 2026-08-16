@@ -100,7 +100,7 @@ class EdgeFinanceTests(APITestCase):
         return {row["id"]: row for row in resp.data["rows"]}
 
     # ---- revenue -----------------------------------------------------------
-    def test_revenue_paid_plus_pending_prepay_excludes_cancelled(self):
+    def test_revenue_counts_all_live_orders_excludes_cancelled(self):
         self._receipt(payment_status=Receipt.PaymentStatus.PAID, total="1000",
                       amount_paid="1000")
         self._receipt(payment_status=Receipt.PaymentStatus.PENDING, total="800",
@@ -110,24 +110,34 @@ class EdgeFinanceTests(APITestCase):
                       status=Receipt.Status.CANCELLED, total="5000", amount_paid="5000")
 
         data = self._report()
-        # 1000 (PAID total) + 300 (PENDING предоплата) = 1300.
-        self.assertEqual(Decimal(str(data["revenue"])), Decimal("1300"))
+        # 1000 + 800 = 1800: заказ в долг — тоже выручка, отменённый — нет.
+        self.assertEqual(Decimal(str(data["revenue"])), Decimal("1800"))
+        # Сколько из неё уже на руках: 1000 + 300.
+        self.assertEqual(Decimal(str(data["revenue_paid"])), Decimal("1300"))
 
-    def test_pending_contributes_prepay_not_total(self):
+    def test_pending_order_is_revenue_and_debt_at_once(self):
+        """Заказ в долг попадает в выручку целиком, а неоплаченная часть — в долг.
+
+        Раньше в выручку шла только предоплата: работа сделана и материал списан,
+        а месяц выглядел пустым, пока клиент не рассчитается.
+        """
         self._receipt(payment_status=Receipt.PaymentStatus.PENDING, total="1000",
                       amount_paid="300")
         data = self._report()
-        # В выручку идёт только предоплата 300, не вся сумма чека.
-        self.assertEqual(Decimal(str(data["revenue"])), Decimal("300"))
+        self.assertEqual(Decimal(str(data["revenue"])), Decimal("1000"))
+        self.assertEqual(Decimal(str(data["revenue_paid"])), Decimal("300"))
+        self.assertEqual(Decimal(str(data["client_debt"])), Decimal("700"))
 
-    # ---- materials block removed -------------------------------------------
+    # ---- materials block ---------------------------------------------------
     def test_report_has_materials_block(self):
-        """Блок «Материалы» вернули по структуре Excel заказчика: остаток на
-        начало, закуп, остаток на конец, транспорт, долг + подытог."""
+        """Блок «Материалы» — строки трат и подытог. Остатков на начало и на
+        конец в нём больше нет (просьба заказчика, 2026-08-14)."""
         data = self._report()
         self.assertIn("materials", data)
-        for key in ("stock_start", "stock_end", "spend", "total"):
+        for key in ("spend", "rows", "total"):
             self.assertIn(key, data["materials"], key)
+        for key in ("stock_start", "stock_end"):
+            self.assertNotIn(key, data["materials"], key)
 
     # ---- client_debt -------------------------------------------------------
     def test_client_debt_only_positive_pending(self):

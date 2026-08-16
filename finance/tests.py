@@ -63,7 +63,12 @@ class DailyReportTests(APITestCase):
         return r.data, {row["day"]: row for row in r.data["rows"]}
 
     # ---- revenue grouping ---------------------------------------------------
-    def test_revenue_grouped_by_day_paid_plus_prepay(self):
+    def test_revenue_grouped_by_day_counts_whole_orders(self):
+        """Выручка дня — ВСЕ заказы этого дня, а не только оплаченные.
+
+        Раньше день, отработанный в долг, показывал только предоплату (или ноль)
+        и выглядел убыточным: материал списан, работа сделана, а выручки нет.
+        """
         self._receipt(day=date(2026, 6, 5), payment_status=Receipt.PaymentStatus.PAID,
                       total="1000", amount_paid="1000")
         self._receipt(day=date(2026, 6, 5), payment_status=Receipt.PaymentStatus.PENDING,
@@ -71,7 +76,7 @@ class DailyReportTests(APITestCase):
         self._receipt(day=date(2026, 6, 6), payment_status=Receipt.PaymentStatus.PAID,
                       total="300", amount_paid="300")
         _, rows = self._rows(2026, 6)
-        self.assertEqual(Decimal(str(rows[5]["revenue"])), Decimal("1200"))  # 1000 + 200 prepay
+        self.assertEqual(Decimal(str(rows[5]["revenue"])), Decimal("1500"))  # 1000 + 500
         self.assertEqual(Decimal(str(rows[6]["revenue"])), Decimal("300"))
         self.assertEqual(Decimal(str(rows[7]["revenue"])), Decimal("0"))
 
@@ -518,23 +523,27 @@ class CogsTests(APITestCase):
 
 
 class MaterialsBlockTests(APITestCase):
-    """Блок «Материалы» как в Excel: три блока с подытогами, прибыль считается
-    по итогу материалов, вложения в прибыль не входят."""
+    """Блок «Материалы»: расход материала = закуп + транспорт (+ свои виды).
+
+    Остатков на начало и на конец в блоке НЕТ — заказчик попросил убрать обе
+    строки (2026-08-14). До этого расход выводился через склад
+    («начало + закуп + транспорт − конец»), и пока остатки не заполнены,
+    формула уходила в минус на всю стоимость склада.
+    """
 
     URL = "/api/finance/report/"
 
     def setUp(self):
-        from finance.models import FinanceSettings
         from warehouse.models import Material
 
         self.admin = User.objects.create_user(username="m_admin", password="x", role=User.Role.ADMIN)
         self.client.force_authenticate(self.admin)
-        FinanceSettings.objects.update_or_create(pk=1, defaults={"stock_start": Decimal("1000")})
-        # Закуп и долг материала — теперь виды расхода с записями, как остальные
+        # Закуп и долг материала — виды расхода с записями, как остальные
         # строки отчёта, а не поля настроек.
         entry("MATERIAL_PURCHASE", "5000", timezone.localdate())
         entry("MATERIAL_DEBT", "700", timezone.localdate())
-        # Остаток на конец = склад по закупочной цене: 10 × 200 = 2000.
+        # Склад на итог блока больше не влияет — материал заведён, чтобы это и
+        # проверить.
         Material.objects.create(
             name="Акрил", quantity=Decimal("10"),
             purchase_price=Decimal("200"),
@@ -549,14 +558,18 @@ class MaterialsBlockTests(APITestCase):
         entry("TRANSPORT", "300", timezone.localdate())
         data = self._report()
         m = data["materials"]
-        self.assertEqual(Decimal(str(m["stock_start"])), Decimal("1000"))
-        self.assertEqual(Decimal(str(m["stock_end"])), Decimal("2000"))
         self.assertEqual(
             Decimal(str(row_by_code(m, "MATERIAL_PURCHASE")["amount"])), Decimal("5000")
         )
         self.assertEqual(Decimal(str(row_by_code(m, "TRANSPORT")["amount"])), Decimal("300"))
-        # 1000 + (5000 + 300) − 2000 = 4300
-        self.assertEqual(Decimal(str(m["total"])), Decimal("4300"))
+        # 5000 + 300 = 5300; склад (10 × 200) в итог не входит.
+        self.assertEqual(Decimal(str(m["total"])), Decimal("5300"))
+
+    def test_block_has_no_stock_balances(self):
+        """Остатков в блоке нет ни строками, ни в ответе API."""
+        m = self._report()["materials"]
+        for key in ("stock_start", "stock_end", "needs_setup"):
+            self.assertNotIn(key, m, key)
 
     def test_material_debt_is_informational_not_in_total(self):
         """Долг материала — строка со снятым флагом «входит в прибыль»:
@@ -565,8 +578,8 @@ class MaterialsBlockTests(APITestCase):
         debt = row_by_code(m, "MATERIAL_DEBT")
         self.assertEqual(Decimal(str(debt["amount"])), Decimal("700"))
         self.assertFalse(debt["in_profit"])
-        # 1000 + 5000 − 2000 = 4000, долг не добавлен.
-        self.assertEqual(Decimal(str(m["total"])), Decimal("4000"))
+        # Только закуп: долг не добавлен.
+        self.assertEqual(Decimal(str(m["total"])), Decimal("5000"))
 
     def test_transport_counted_once_not_in_variable(self):
         entry("TRANSPORT", "300", timezone.localdate())
@@ -589,8 +602,8 @@ class MaterialsBlockTests(APITestCase):
             amount=Decimal("500"), spent_at=timezone.localdate(),
         )
         m = self._report()["materials"]
-        # 1000 + (5000 + 500) − 2000 = 4500
-        self.assertEqual(Decimal(str(m["total"])), Decimal("4500"))
+        # 5000 + 500 = 5500
+        self.assertEqual(Decimal(str(m["total"])), Decimal("5500"))
 
     def test_investments_shown_but_not_in_profit(self):
         entry("EQUIPMENT", "9000", timezone.localdate())
@@ -619,20 +632,16 @@ class MaterialsBlockTests(APITestCase):
         # Себестоимость осталась справочной цифрой и в расходы не добавлена.
         self.assertIn("cogs", data)
 
-    def test_negative_total_does_not_inflate_profit(self):
-        """Пока вводные не заполнены, формула уходит в минус на стоимость склада.
-        Отрицательный расход раздул бы прибыль — в прибыль такое не пускаем."""
-        from finance.models import FinanceSettings
+    def test_full_stock_with_no_purchases_gives_zero_not_minus(self):
+        """Полный склад и ни одной траты за месяц — расход материала ноль.
 
-        FinanceSettings.objects.update_or_create(
-            pk=1, defaults={"stock_start": Decimal("0")},
-        )
+        Раньше в этом же случае формула («начало + закуп − конец») уходила в
+        минус на всю стоимость склада, и отрицательный расход пришлось бы
+        отдельно не пускать в прибыль.
+        """
         ExpenseEntry.objects.all().delete()
         m = self._report()["materials"]
-        self.assertTrue(m["needs_setup"])
         self.assertEqual(Decimal(str(m["total"])), Decimal("0"))
-        # Остаток на конец при этом честно показан.
-        self.assertEqual(Decimal(str(m["stock_end"])), Decimal("2000"))
 
 
 class MaterialStockReportTests(APITestCase):
@@ -880,47 +889,20 @@ class AutoComputedInputsTests(APITestCase):
         row = row_by_code(self._report()["materials"], "MATERIAL_PURCHASE")
         self.assertEqual(Decimal(str(row["amount"])), Decimal("0"))
 
-    # ---- остаток на начало в сомах считается по складскому листу ------------
-    def test_stock_start_computed_from_the_sheet(self):
-        from warehouse.models import MaterialMonthOpening
+    # ---- остатки в блок «Материалы» больше не входят ------------------------
+    def test_month_opening_does_not_touch_the_materials_block(self):
+        """Остаток на начало месяца из складского листа на расход не влияет.
 
-        # 8 листов × 2 кв.м × 50 сом = 800.
-        MaterialMonthOpening.objects.create(
-            material=self.material, year=2026, month=6, quantity=Decimal("8")
-        )
-        m = self._report()["materials"]
-        self.assertEqual(Decimal(str(m["stock_start"])), Decimal("800"))
-        self.assertEqual(Decimal(str(m["stock_start_auto"])), Decimal("800"))
-        self.assertFalse(m["stock_start_is_manual"])
-
-    def test_manual_stock_start_beats_the_computed_one(self):
-        from finance.models import FinanceSettings
+        Он и раньше был единственным, ради чего блоку нужен был склад; после
+        отказа от остатков (просьба заказчика, 2026-08-14) расход материала —
+        это только траты периода.
+        """
         from warehouse.models import MaterialMonthOpening
 
         MaterialMonthOpening.objects.create(
             material=self.material, year=2026, month=6, quantity=Decimal("8")
         )
-        FinanceSettings.objects.filter(pk=1).update(stock_start=Decimal("1234"))
+        self._supply(qty=100, price=30, day=date(2026, 6, 5))  # 3000
         m = self._report()["materials"]
-        self.assertEqual(Decimal(str(m["stock_start"])), Decimal("1234"))
-        self.assertEqual(Decimal(str(m["stock_start_auto"])), Decimal("800"))
-        self.assertTrue(m["stock_start_is_manual"])
-
-    def test_manual_zero_is_a_real_zero_not_empty(self):
-        """Ноль — настоящий ноль, а не «не заполнено»: иначе его нельзя было бы
-        поставить осознанно."""
-        from finance.models import FinanceSettings
-        from warehouse.models import MaterialMonthOpening
-
-        MaterialMonthOpening.objects.create(
-            material=self.material, year=2026, month=6, quantity=Decimal("8")
-        )
-        FinanceSettings.objects.filter(pk=1).update(stock_start=Decimal("0"))
-        m = self._report()["materials"]
-        self.assertEqual(Decimal(str(m["stock_start"])), Decimal("0"))
-        self.assertTrue(m["stock_start_is_manual"])
-
-    def test_partial_period_has_no_computed_stock_start(self):
-        """Остаток на начало привязан к месяцу — за огрызок периода его нет."""
-        m = self._report(date_from="2026-06-05", date_to="2026-06-20")["materials"]
-        self.assertEqual(Decimal(str(m["stock_start_auto"])), Decimal("0"))
+        self.assertEqual(Decimal(str(m["total"])), Decimal("3000"))
+        self.assertNotIn("stock_start", m)

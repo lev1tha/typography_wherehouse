@@ -21,6 +21,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from finance.periods import ensure_open
 from accounts.permissions import IsAdmin, IsNotAccountant
 from audit.models import AuditLog
 
@@ -284,6 +285,14 @@ class ClientViewSet(viewsets.ModelViewSet):
         )
 
         client = self.get_object()
+        # Общая выплата задним числом в закрытый месяц не пускается: она
+        # раскидывается по заказам и двигает их долги. Разбор даты оставляем
+        # внутри try — кривая дата это тоже 400, а не пятисотка.
+        try:
+            paid_on = parse_paid_on(request.data.get("paid_on"))
+        except PaymentRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        ensure_open(paid_on or timezone.localdate(), "Принять выплату этой датой")
 
         raw_ids = request.data.get("receipt_ids")
         if raw_ids in (None, "", []):
@@ -302,7 +311,7 @@ class ClientViewSet(viewsets.ModelViewSet):
                 parse_amount(request.data.get("amount")),
                 receipt_ids=receipt_ids,
                 user=request.user,
-                paid_on=parse_paid_on(request.data.get("paid_on")),
+                paid_on=paid_on,
                 method=request.data.get("method") or None,
             )
         except PaymentRejected as e:

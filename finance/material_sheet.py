@@ -21,10 +21,11 @@ from __future__ import annotations
 from collections import defaultdict
 from decimal import Decimal
 
+from django.db.models import Sum
 from django.db.models.functions import TruncMonth
 
 from sales.models import Receipt, TransactionItem
-from warehouse.models import InventoryLog, MaterialMonthOpening
+from warehouse.models import InventoryLog, MaterialMonthOpening, SupplyLine
 
 ZERO = Decimal("0")
 _CENT = Decimal("0.01")
@@ -111,14 +112,27 @@ def purchases_from_stock(d_from=None, d_to=None):
 
     Приходы без указанной цены пропускаем — сумму по ним не выдумываем.
     """
+    # Приход ДОКУМЕНТОМ несёт точную сумму строки — её и берём. Через цену за
+    # единицу та же поставка давала копеечный «хвост»: 48000 / 29.768 кв.м
+    # округляется до 1612.47, обратно даёт 48000.01, и закуп переставал сходиться
+    # с накладной поставщика ровно там, где заказчик их и сверяет.
+    lines = SupplyLine.objects.all()
+    if d_from:
+        lines = lines.filter(supply__received_on__gte=d_from)
+    if d_to:
+        lines = lines.filter(supply__received_on__lte=d_to)
+    from_documents = lines.aggregate(v=Sum("cost"))["v"] or ZERO
+
+    # Всё остальное — одиночные приходы: там суммы нет, есть цена за единицу.
     qs = InventoryLog.objects.filter(
-        type=InventoryLog.Type.SUPPLY, quantity_changed__gt=0, actual_price__isnull=False
+        type=InventoryLog.Type.SUPPLY, quantity_changed__gt=0,
+        actual_price__isnull=False, supply__isnull=True,
     )
     if d_from:
         qs = qs.filter(happened_at__date__gte=d_from)
     if d_to:
         qs = qs.filter(happened_at__date__lte=d_to)
-    return sum(
+    return from_documents + sum(
         (row["quantity_changed"] * row["actual_price"]
          for row in qs.values("quantity_changed", "actual_price")),
         ZERO,

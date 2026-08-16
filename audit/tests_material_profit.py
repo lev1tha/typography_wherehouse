@@ -68,14 +68,18 @@ class DashboardMaterialProfitTests(APITestCase):
         self.assertEqual(Decimal(str(b["material_profit"])), Decimal("1200"))
 
     def test_cost_covers_the_same_lines_as_revenue(self):
-        """Себестоимость снимается с ТЕХ ЖЕ строк: неоплаченный заказ не должен
-        попасть в себестоимость, раз его выручки в цифре нет."""
+        """Себестоимость снимается с ТЕХ ЖЕ строк, что и выручка.
+
+        Заказ в долг теперь считается выручкой (материал ушёл, работа сделана) —
+        значит и его себестоимость должна быть в цифре, иначе прибыль с
+        материала завышена ровно на неё.
+        """
         self._sale(sheets=2)  # оплачен
-        self._sale(sheets=5, paid=False)  # в долг — в выручку не идёт
+        self._sale(sheets=5, paid=False)  # в долг — тоже выручка
         b = self._breakdown()
-        self.assertEqual(Decimal(str(b["material_revenue"])), Decimal("2000"))
-        self.assertEqual(Decimal(str(b["material_cost"])), Decimal("1200"))
-        self.assertEqual(Decimal(str(b["material_profit"])), Decimal("800"))
+        self.assertEqual(Decimal(str(b["material_revenue"])), Decimal("7000"))
+        self.assertEqual(Decimal(str(b["material_cost"])), Decimal("4200"))
+        self.assertEqual(Decimal(str(b["material_profit"])), Decimal("2800"))
 
     def test_returned_lines_drop_out_of_both(self):
         """Возврат убирает строку и из выручки, и из себестоимости — иначе

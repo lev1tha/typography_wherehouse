@@ -52,7 +52,8 @@
     "myOrders": "My orders",
     "home": "Home",
     "sectionDaily": "Every day",
-    "sectionRare": "Less often"
+    "sectionRare": "Less often",
+    "cash": "Cash"
   },
   "roles": {
     "admin": "Administrator",
@@ -122,13 +123,13 @@
     "filterCategory": "Category",
     "unit": "Unit",
     "isRoll": "Sheet / roll material (by m²)",
-    "rollHint": "Measured in m² and received as sheets or rolls. Stock and price come from intakes — the «Receive» button on the material.",
+    "rollHint": "Measured in sq.m. Stock and cost come from intakes — the «Intake» button on the material row.",
     "sheetsShort": "sht",
-    "sheetSale": "Whole-sheet sale",
+    "sheetSale": "Whole-unit sale ({{unit}})",
     "pieceArea": "Area of 1 sheet, sq.m",
     "piecePrice": "Price per sheet",
-    "wholesalePrice": "Wholesale price per sheet",
-    "wholesaleMin": "Wholesale from (sheets)",
+    "wholesalePrice": "Wholesale price per {{unit}}",
+    "wholesaleMin": "Wholesale from, pcs",
     "wholesaleHint": "The wholesale price kicks in automatically once the customer takes at least this many sheets. Leave the wholesale price empty or 0 if there is no wholesale.",
     "tabMaterials": "Materials",
     "tabMovement": "Movement",
@@ -154,13 +155,21 @@
     "addRef": "+ add…",
     "newRefPh": "Name, then Enter",
     "purchasePerSqm": "Purchase, som per sq.m",
-    "purchasePerSheet": "Purchase, som per sheet",
+    "purchasePerSheet": "Purchase, som/{{unit}}",
     "retailPerSqm": "Sale price, som per sq.m",
-    "retailPerSheet": "Sale price, som per sheet",
+    "retailPerSheet": "Sale price, som/{{unit}}",
     "perUnitShort": "som/{{unit}}",
     "perSheetShort": "som/sheet",
     "sheetAreaHint": "Fill in either field — the other is computed from the sheet area ({{area}} sq.m).",
-    "piecePriceHint": "Computed from the per-sq.m price. Type your own number if a whole sheet sells cheaper — recalculation will leave it alone from then on. Zero means whole-sheet sale is unavailable."
+    "piecePriceHint": "Computed from the per-sq.m price. Type your own number if a whole sheet sells cheaper — recalculation will leave it alone from then on. Zero means whole-sheet sale is unavailable.",
+    "stockForm": "Material form",
+    "formPiece": "By piece",
+    "formPieceHint": "Counted in pieces: fasteners, glue, finished goods. Intake is entered as a quantity.",
+    "unitSheet": "sheet",
+    "unitRoll": "roll",
+    "stockValueTotal": "Stock value",
+    "stockValueCol": "Value",
+    "tabSupplies": "Deliveries"
   },
   "unit": {
     "SQM": "sqm",
@@ -286,7 +295,9 @@
     "mergeConfirm": "The card “{{drop}}” will be deleted and its orders ({{orders}}) will move to “{{keep}}”. This cannot be undone. Continue?",
     "mergeDone": "Card “{{name}}” merged",
     "onlyChange": "With change only",
-    "changeDue": "Change owed"
+    "changeDue": "Change owed",
+    "inn": "Tax ID",
+    "innPh": "for the invoice"
   },
   "checkout": {
     "outOfStock": "Out of stock",
@@ -322,7 +333,7 @@
     "sellWhole": "Whole sheet",
     "sellByArea": "Cut a piece",
     "pieceUnit": "pc",
-    "runningMeters": "Running metres (cut length)",
+    "runningMeters": "Curve length, running m",
     "matPriceLabel": "Material price, som/sqm",
     "cutRateLabel": "Cut rate, som/running m",
     "sellWithCut": "Cut",
@@ -349,7 +360,14 @@
     "orderDateHint": "Today. Set a past date if the order is being entered later.",
     "orderDateBack": "The order will be backdated — reports and stock will use this date.",
     "cutMachine": "Machine",
-    "changeHint": "Stays owed to the client until handed over — visible in Receipts and on the client card."
+    "changeHint": "Stays owed to the client until handed over — visible in Receipts and on the client card.",
+    "modeCurve": "Curve length",
+    "modeSide": "One side",
+    "modeSqm": "Square metre",
+    "modePiece": "By piece",
+    "piecePriceLabel": "Price per {{unit}}, som",
+    "modePieceNoPrice": "This material has no per-sheet price — selling it whole is unavailable. Set it in Stock → «Edit».",
+    "modePieceHint": "Sold as a whole {{unit}} at the per-piece price. Cutting can be added as a separate line."
   },
   "receipts": {
     "title": "Receipts",
@@ -456,7 +474,11 @@
     "costPerSqm": "Cost, som/sqm",
     "batchPlaceholder": "Batch / supplier (optional)",
     "receivedOn": "Received on",
-    "receivedOnHint": "Can be back-dated — the lot queues for consumption by its real date."
+    "receivedOnHint": "Can be back-dated — the lot queues for consumption by its real date.",
+    "currentPrice": "Current purchase price",
+    "priceWas": "was {{value}}",
+    "priceUnchanged": "Empty — the purchase price stays as it is",
+    "costPerSheet": "Cost, som/{{unit}}"
   },
   "journal": {
     "title": "Journal",
@@ -617,7 +639,20 @@
     "cuttingByUserHint": "By whoever entered the order. There is no separate 'operator at the machine' field — if you need the actual cutter, it has to be picked at the till on every cut.",
     "cuttingUserPm": "{{pm}} running m of cut",
     "allExpensesTitle": "All spending for the period",
-    "allExpensesHint": "The whole history in one list: when, on what, and which report line it landed in. Entries are added in the blocks above, by clicking a line."
+    "allExpensesHint": "The whole history in one list: when, on what, and which report line it landed in. Entries are added in the blocks above, by clicking a line.",
+    "revenuePaid": "Paid",
+    "revenueDebt": "On credit",
+    "revenueTitle": "Revenue for the period",
+    "dailySubtitle": "Profit for each day of the month: the day's revenue minus that day's purchases and its share of the fixed costs. Green is a day in the black, red in the red.",
+    "companyTitle": "Company details for documents",
+    "coName": "Company name",
+    "coInn": "Tax ID",
+    "coAddress": "Address",
+    "coBank": "Bank",
+    "coAccount": "Account number",
+    "coBik": "BIC",
+    "coDirector": "Director",
+    "coAccountant": "Accountant"
   },
   "expenses": {
     "amount": "Amount",
@@ -735,5 +770,74 @@
     "colMatRevenue": "Material revenue",
     "colCutRevenue": "Cutting revenue",
     "colRevenue": "Total"
+  },
+  "monthsOf": [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December"
+  ],
+  "print": {
+    "title": "Print order",
+    "print": "Print",
+    "docCheck": "Sales receipt",
+    "docWaybill": "Delivery note",
+    "docInvoice": "Invoice",
+    "actTitle": "Reconciliation act",
+    "docSupply": "Goods received note",
+    "acceptedBy": "Received by",
+    "handedBy": "Handed over by"
+  },
+  "supplies": {
+    "newDoc": "New delivery note",
+    "docTitle": "Delivery note",
+    "number": "Note number",
+    "date": "Date",
+    "supplier": "Supplier",
+    "positions": "Lines",
+    "total": "System total",
+    "statedTotal": "Total on the note",
+    "diff": "Discrepancy",
+    "matches": "matches",
+    "debt": "Owed to supplier",
+    "paid": "paid",
+    "paidTo": "Paid to supplier",
+    "received": "Received",
+    "lineCost": "Line total",
+    "addLine": "add line",
+    "posted": "Delivery posted — stock updated",
+    "openDoc": "Open",
+    "cancel": "Cancel the note"
+  },
+  "cash": {
+    "title": "Cash and bank",
+    "total": "Total",
+    "date": "Date",
+    "account": "Account",
+    "article": "Article",
+    "amount": "Amount",
+    "in": "In",
+    "out": "Out",
+    "who": "By",
+    "auto": "system",
+    "note": "Note",
+    "addIn": "Money in",
+    "addOut": "Money out",
+    "count": "Count the cash"
+  },
+  "period": {
+    "title": "Period lock",
+    "closeThrough": "Lock through",
+    "close": "Lock the period",
+    "open_": "Unlock",
+    "closedThrough": "Locked through {{date}}"
   }
 }

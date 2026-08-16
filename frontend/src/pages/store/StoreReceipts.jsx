@@ -8,6 +8,7 @@ import DataTable from "../../components/DataTable.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
 import PayDebtModal from "../../components/PayDebtModal.jsx";
+import PrintDocs from "../../components/PrintDocs.jsx";
 import { FulfillmentBadge, PaymentBadge } from "../../components/StatusBadge.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
@@ -18,6 +19,7 @@ export default function StoreReceipts() {
   const [stats, setStats] = useState(null);
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(null);
+  const [printing, setPrinting] = useState(null);
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [advancingId, setAdvancingId] = useState(null);
@@ -199,9 +201,20 @@ export default function StoreReceipts() {
       key: "actions",
       label: t("common.actions"),
       render: (r) => (
-        <button className="ghost" onClick={() => setOpen(r)} aria-label={t("common.edit")}>
-          <Icon name="arrow-right" size={18} />
-        </button>
+        <div className="row" style={{ gap: 6, alignItems: "center", margin: 0, flexWrap: "nowrap" }}>
+          {/* Накладную и товарный чек выдаёт складовщик — печать нужна ему
+              не меньше, чем админу. */}
+          <button
+            className="secondary row-btn"
+            onClick={(e) => { e.stopPropagation(); setPrinting(r); }}
+            title={t("print.title")}
+          >
+            <Icon name="printer" size={14} /> {t("print.print")}
+          </button>
+          <button className="ghost" onClick={() => setOpen(r)} aria-label={t("common.edit")}>
+            <Icon name="arrow-right" size={18} />
+          </button>
+        </div>
       ),
     },
   ];
@@ -343,6 +356,8 @@ export default function StoreReceipts() {
           }}
         />
       )}
+
+      {printing && <PrintDocs receipt={printing} onClose={() => setPrinting(null)} />}
 
       {paying && (
         <PayDebtModal

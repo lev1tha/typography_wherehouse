@@ -10,11 +10,13 @@ from django.db.models.functions import Coalesce, TruncDate
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
 from accounts.permissions import IsAdminOrAccountantRead, SeesMoney
+from audit.models import AuditLog
 from sales.models import Receipt, TransactionItem
 from services.models import PrintingService
 from warehouse.models import InventoryLog, Material
@@ -27,8 +29,19 @@ from .material_sheet import (
     purchases_from_stock,
     q2,
 )
-from .models import ExpenseEntry, ExpenseKind, FinanceSettings
+from .models import (
+    CashEntry,
+    CompanyProfile,
+    ExpenseEntry,
+    ExpenseKind,
+    FinanceSettings,
+    PeriodLock,
+)
+from .periods import ensure_open
 from .serializers import (
+    CashEntrySerializer,
+    PeriodLockSerializer,
+    CompanyProfileSerializer,
     ExpenseEntrySerializer,
     ExpenseKindSerializer,
     FinanceSettingsSerializer,
@@ -74,36 +87,6 @@ def _filter_by_month(qs, request, field):
     if not year or not (1 <= month <= 12):
         return qs
     return qs.filter(**{f"{field}__year": year, f"{field}__month": month})
-
-
-def _stock_start_from_sheet(materials, d_from, d_to):
-    """Стоимость склада на начало периода — по складскому листу.
-
-    Σ(остаток на начало месяца по материалу × его закупочная цена). Остаток
-    берётся тот же, что показан в листе: перенос с прошлого месяца или
-    вписанное вручную значение. Период должен совпадать с календарным месяцем —
-    остаток на начало привязан к месяцу; иначе считать неоткуда.
-    """
-    if not (d_from and d_to) or d_from.day != 1:
-        return Decimal("0")
-    last = calendar.monthrange(d_from.year, d_from.month)[1]
-    if d_to != date(d_from.year, d_from.month, last):
-        return Decimal("0")
-
-    manual = collect_manual(materials)
-    received, sold = collect_flows(materials)
-    target = (d_from.year, d_from.month)
-    total = Decimal("0")
-    for m in materials:
-        qty, _is_manual = opening_for(
-            m.id, target, manual=manual, received=received, sold=sold
-        )
-        # Лист считает в листах, склад хранит цену за единицу (кв.м) — при
-        # переводе обратно умножаем на площадь листа.
-        per_sheet = counting_unit(m)
-        in_stock_units = qty * per_sheet if per_sheet else qty
-        total += in_stock_units * (m.purchase_price or Decimal("0"))
-    return total
 
 
 def _prorate_factor(d_from, d_to):
@@ -194,7 +177,47 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
+        # Трата задним числом в закрытый месяц изменила бы принятый отчёт.
+        ensure_open(serializer.validated_data.get("spent_at"), "Записать трату этой датой")
         serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        ensure_open(serializer.instance.spent_at, "Править трату закрытого периода")
+        ensure_open(serializer.validated_data.get("spent_at"), "Перенести трату этой датой")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        ensure_open(instance.spent_at, "Удалить трату закрытого периода")
+        instance.delete()
+
+
+class CompanyProfileView(APIView):
+    """GET/PATCH реквизитов организации — шапки печатных документов.
+
+    Читать может ЛЮБОЙ сотрудник: накладную и товарный чек печатает складовщик,
+    а без реквизитов у документа не будет шапки. Править — только админ.
+    Отдельно от `/finance/settings/` именно из-за прав: там деньги, и складовщику
+    туда нельзя.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(CompanyProfileSerializer(CompanyProfile.load()).data)
+
+    def patch(self, request):
+        if not request.user.is_admin_role:
+            return Response(
+                {"detail": "Реквизиты меняет только администратор."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        serializer = CompanyProfileSerializer(
+            CompanyProfile.load(), data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        AuditLog.record(request.user, "Изменены реквизиты организации")
+        return Response(serializer.data)
 
 
 class FinanceSettingsView(APIView):
@@ -319,37 +342,19 @@ class FinanceReportView(APIView):
         # флага не имеет и остаётся справочным — материал, взятый в долг, уже
         # сидит в закупе, иначе посчитали бы дважды.
         #
-        #   расход материала = остаток на начало + Σ(строки блока) − остаток на конец
+        #   расход материала = Σ(строки блока) = закуп + транспорт
         #
-        # Остаток на конец берём живой, со склада.
+        # Остатки на начало и на конец из формулы УБРАНЫ (решение заказчика,
+        # 2026-08-14). Раньше было «начало + закуп + транспорт − конец»: расход
+        # выводился через склад, и пока остатки не заполнены, формула уходила в
+        # минус на всю стоимость склада — приходилось держать признак
+        # needs_setup и не пускать такой итог в прибыль. Теперь в расход идёт то,
+        # что за месяц реально потратили на материал.
         materials_spend = block_total(material_rows)
-        all_materials = list(Material.objects.all())
-        stock_end = sum(
-            (m.quantity * m.purchase_price for m in all_materials), Decimal("0")
-        )
-        # Остаток на начало система считает по складскому листу: остаток на
-        # начало месяца по каждому материалу × его закупочная цена. Раньше это
-        # число вбивали руками; ручное значение по-прежнему возможно и
-        # побеждает расчёт (пустое поле = «считай сам»).
-        stock_start_auto = _stock_start_from_sheet(all_materials, d_from, d_to)
-        stock_start_manual = s.stock_start
-        stock_start = stock_start_manual if stock_start_manual is not None else stock_start_auto
-        # Расход не может быть отрицательным: пока склад не заполнен, «остаток
-        # на конец» больше начала со всем закупом, и формула уходит в минус.
-        materials_raw = stock_start + materials_spend - stock_end
-
-        # Если склад ещё не заполнен, формула уходит в минус на всю его
-        # стоимость — а отрицательный расход РАЗДУЛ БЫ прибыль. В прибыль такой
-        # результат не пускаем и отдаём признак, что вводные не готовы.
         materials = {
-            "stock_start": stock_start,
-            "stock_start_auto": stock_start_auto,
-            "stock_start_is_manual": stock_start_manual is not None,
-            "stock_end": stock_end,              # считается по складу
             "spend": materials_spend,            # сумма строк блока, идущих в итог
             "rows": material_rows,               # виды расхода этого блока
-            "total": max(materials_raw, Decimal("0")),
-            "needs_setup": materials_raw < 0,
+            "total": materials_spend,
         }
 
         # Себестоимость проданного: закупочная стоимость материала, ушедшего в
@@ -365,14 +370,19 @@ class FinanceReportView(APIView):
 
         total_expenses = materials["total"] + total_fixed + operating_variable
 
-        # Выручка = оплаченные чеки (полная сумма) + предоплаты по открытым заказам.
+        # Выручка = ВСЕ заказы периода, кроме отменённых, за вычетом возвратов.
+        # Раньше считались только полностью оплаченные чеки плюс предоплаты по
+        # открытым: заказ, отданный в долг, в выручку не попадал вовсе — работа
+        # сделана, материал списан, а в отчёте её нет. Долг от этого не исчез,
+        # он показан отдельной строкой: сколько из выручки уже на руках
+        # (`revenue_paid`), а сколько ещё должны (`client_debt`).
         live = by_created(Receipt.objects.exclude(status=Receipt.Status.CANCELLED))
-        revenue_paid = live.filter(payment_status=Receipt.PaymentStatus.PAID).aggregate(
-            v=_SUM("total_price")
+        revenue = live.aggregate(v=_SUM("total_price"))["v"] - live.aggregate(
+            v=_SUM("refunded_amount")
         )["v"]
+        # Сколько денег по этим заказам реально приняли — включая предоплаты.
+        revenue_paid = live.aggregate(v=_SUM("amount_paid"))["v"]
         pending = live.filter(payment_status=Receipt.PaymentStatus.PENDING)
-        revenue_prepay = pending.aggregate(v=_SUM("amount_paid"))["v"]
-        revenue = revenue_paid + revenue_prepay
 
         # Долг клиентов = Σ (сумма − предоплата − возвраты) по открытым чекам.
         client_debt = Decimal("0")
@@ -533,6 +543,10 @@ class FinanceReportView(APIView):
                 "investments": investments,
                 "total_expenses": total_expenses,
                 "revenue": revenue,
+                # Из чего складывается выручка: сколько уже на руках и сколько
+                # ещё должны. Одной суммы мало — «выручка 300 000» при 200 000
+                # долга и «выручка 300 000» деньгами это разные месяцы.
+                "revenue_paid": revenue_paid,
                 "client_debt": client_debt,
                 "profit": revenue - total_expenses,
                 "cutting": cutting,
@@ -586,23 +600,18 @@ class DailyReportView(APIView):
         live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED).filter(
             created_at__date__gte=first_day, created_at__date__lt=next_month_first
         )
+        # Выручка дня — все заказы этого дня, кроме отменённых, минус возвраты.
+        # Та же формула, что в отчёте за месяц: раньше здесь (как и там) в
+        # выручку шли только оплаченные чеки и предоплаты, и день, отработанный
+        # в долг, выглядел убыточным.
         revenue_by_day = defaultdict(lambda: Decimal("0"))
-        paid = (
-            live.filter(payment_status=Receipt.PaymentStatus.PAID)
-            .annotate(day=TruncDate("created_at"))
+        by_day = (
+            live.annotate(day=TruncDate("created_at"))
             .values("day")
-            .annotate(v=_SUM("total_price"))
+            .annotate(v=_SUM("total_price"), refunds=_SUM("refunded_amount"))
         )
-        for row in paid:
-            revenue_by_day[row["day"]] += row["v"]
-        pending = (
-            live.filter(payment_status=Receipt.PaymentStatus.PENDING)
-            .annotate(day=TruncDate("created_at"))
-            .values("day")
-            .annotate(v=_SUM("amount_paid"))
-        )
-        for row in pending:
-            revenue_by_day[row["day"]] += row["v"]
+        for row in by_day:
+            revenue_by_day[row["day"]] += row["v"] - row["refunds"]
 
         variable_by_day = defaultdict(lambda: Decimal("0"))
         # Переменные и транспорт падают на свой день. Вложения (оборудование/
@@ -802,6 +811,10 @@ class MaterialReportView(APIView):
         # Остаток на начало месяца система переносит с конца прошлого месяца
         # сама — вписать его нужно один раз, в месяце начала учёта. Вписанное
         # вручную значение всегда побеждает расчётное (см. material_sheet).
+        # Скрытые материалы («Удалить» по материалу, у которого были продажи)
+        # берём, но ниже оставим только те их строки, где в периоде реально
+        # что-то было. Совсем выкидывать нельзя: продажи прошлых месяцев — это
+        # настоящие деньги, и отчёт за тот месяц обязан их показать.
         materials = list(Material.objects.all().order_by("name"))
         sheet_manual = collect_manual(materials)
         sheet_received, sheet_sold = collect_flows(materials)
@@ -861,6 +874,20 @@ class MaterialReportView(APIView):
                 }
             )
 
+        # Скрытый материал без единого движения в периоде из таблицы убираем:
+        # админ его удалил, и пустая строка «на память» ему не нужна. Если же в
+        # периоде по нему были продажи или приход — строка остаётся, иначе
+        # деньги месяца не сойдутся.
+        archived_ids = {m.id for m in materials if m.is_archived}
+        if archived_ids:
+            def has_numbers(row):
+                return any(
+                    Decimal(str(row[key] or 0)) != 0
+                    for key in ("sold_area", "material_revenue", "cut_revenue", "received")
+                )
+
+            rows = [r for r in rows if r["id"] not in archived_ids or has_numbers(r)]
+
         # ИТОГО. Заказы не складываем по строкам: один чек может содержать
         # несколько материалов и посчитался бы дважды — берём уникальные чеки.
         all_orders = set()
@@ -894,3 +921,178 @@ class MaterialReportView(APIView):
                 "to": d_to.isoformat() if d_to else None,
             },
         })
+
+
+class CashEntryViewSet(viewsets.ModelViewSet):
+    """Кассовая книга: движение денег по кассе и по банку.
+
+    Отвечает на вопрос, которого системе не хватало: «сколько сейчас должно быть
+    в ящике». Оплаты, сдачу, возвраты и откаты пишет сама система — руками сюда
+    вносят то, чего она знать не может: закуп за наличные, зарплату, инкассацию.
+
+    Права как у остальных денежных экранов: админ ведёт, бухгалтер смотрит.
+    """
+
+    serializer_class = CashEntrySerializer
+    permission_classes = [IsAdminOrAccountantRead]
+    filterset_fields = ["account", "kind", "article"]
+    ordering = ["-happened_on", "-created_at"]
+
+    def get_queryset(self):
+        qs = CashEntry.objects.select_related("created_by", "receipt")
+        d_from = _parse_date(self.request.query_params.get("date_from"))
+        d_to = _parse_date(self.request.query_params.get("date_to"))
+        if d_from:
+            qs = qs.filter(happened_on__gte=d_from)
+        if d_to:
+            qs = qs.filter(happened_on__lte=d_to)
+        return qs
+
+    def perform_create(self, serializer):
+        ensure_open(serializer.validated_data.get("happened_on"), "Записать операцию этой датой")
+        entry = serializer.save(created_by=self.request.user, is_auto=False)
+        AuditLog.record(
+            self.request.user,
+            f"Касса: {entry.get_kind_display().lower()} {entry.amount} сом "
+            f"({entry.get_article_display()}, {entry.get_account_display().lower()})",
+        )
+
+    def _guard_auto(self, instance):
+        """Записи системы руками не трогаем: они отражают чеки, и правка здесь
+        развела бы кассу с продажами — а объяснить расхождение было бы нечем."""
+        if instance.is_auto:
+            return Response(
+                {"detail": "Эту запись создала система по чеку — править её нельзя. "
+                           "Нужно изменить сам чек или оплату."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return None
+
+    def update(self, request, *args, **kwargs):
+        blocked = self._guard_auto(self.get_object())
+        return blocked or super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        blocked = self._guard_auto(instance)
+        if blocked:
+            return blocked
+        ensure_open(instance.happened_on, "Удалить кассовую запись закрытого периода")
+        AuditLog.record(
+            request.user, f"Касса: удалена запись {instance.amount} сом "
+                          f"({instance.get_article_display()})"
+        )
+        return super().destroy(request, *args, **kwargs)
+
+    @action(detail=False, methods=["get"])
+    def balance(self, request):
+        """Сколько денег есть сейчас и что двигалось за период.
+
+        Остаток считается по ВСЕЙ истории, обороты — за выбранный период: иначе
+        «остаток за июль» означал бы разное для разных людей.
+        """
+        d_from = _parse_date(request.query_params.get("date_from"))
+        d_to = _parse_date(request.query_params.get("date_to"))
+
+        def side(account, kind):
+            qs = CashEntry.objects.filter(kind=kind)
+            if account:
+                qs = qs.filter(account=account)
+            if d_from:
+                qs = qs.filter(happened_on__gte=d_from)
+            if d_to:
+                qs = qs.filter(happened_on__lte=d_to)
+            return qs.aggregate(v=_SUM("amount"))["v"]
+
+        accounts = []
+        for value, label in CashEntry.Account.choices:
+            accounts.append({
+                "account": value,
+                "label": str(label),
+                "balance": CashEntry.balance(value, upto=d_to),
+                "income": side(value, CashEntry.Kind.IN),
+                "outcome": side(value, CashEntry.Kind.OUT),
+            })
+        return Response({
+            "accounts": accounts,
+            "total": CashEntry.balance(upto=d_to),
+            "income": side(None, CashEntry.Kind.IN),
+            "outcome": side(None, CashEntry.Kind.OUT),
+        })
+
+    @action(detail=False, methods=["post"])
+    def count(self, request):
+        """Пересчёт кассы: «в ящике столько-то».
+
+        Как инвентаризация на складе: система пишет разницу отдельной строкой,
+        а не переписывает историю. Недостача видна и остаётся в книге —
+        затирать её значит терять единственный след того, что деньги пропали.
+        """
+        try:
+            counted = Decimal(str(request.data.get("counted")))
+        except (TypeError, ValueError, ArithmeticError):
+            return Response(
+                {"detail": "Укажите, сколько денег насчитали."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        account = request.data.get("account") or CashEntry.Account.CASH
+        if account not in CashEntry.Account.values:
+            return Response({"detail": "Неизвестный счёт."}, status=status.HTTP_400_BAD_REQUEST)
+
+        current = CashEntry.balance(account)
+        diff = counted - current
+        if diff == 0:
+            return Response({"diff": "0", "detail": "Сошлось — расхождения нет."})
+        entry = CashEntry.objects.create(
+            account=account,
+            kind=CashEntry.Kind.IN if diff > 0 else CashEntry.Kind.OUT,
+            article=CashEntry.Article.COUNT,
+            amount=abs(diff),
+            note=request.data.get("note") or f"Пересчёт: было {current}, насчитали {counted}",
+            created_by=request.user,
+            is_auto=False,
+        )
+        AuditLog.record(
+            request.user,
+            f"Пересчёт кассы ({entry.get_account_display()}): {current} → {counted} сом",
+        )
+        return Response(
+            {"diff": str(diff), "entry": CashEntrySerializer(entry).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class PeriodLockView(APIView):
+    """GET/PATCH закрытия периода: «по такое-то число трогать нельзя».
+
+    Читают все, кому открыты деньги (бухгалтеру важно знать, что месяц закрыт),
+    меняет только админ. Открытие обратно — такое же осознанное действие, как
+    закрытие, и оба попадают в журнал: если цифры прошлого месяца всё-таки
+    поехали, по журналу видно, кто снял замок.
+    """
+
+    permission_classes = [IsAdminOrAccountantRead]
+
+    def get(self, request):
+        return Response(PeriodLockSerializer(PeriodLock.load()).data)
+
+    def patch(self, request):
+        if not request.user.is_admin_role:
+            return Response(
+                {"detail": "Закрывать и открывать период может только администратор."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        lock = PeriodLock.load()
+        was = lock.closed_through
+        serializer = PeriodLockSerializer(lock, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(updated_by=request.user)
+        now = serializer.instance.closed_through
+        if now == was:
+            return Response(serializer.data)
+        AuditLog.record(
+            request.user,
+            f"Период закрыт по {now:%d.%m.%Y}" if now
+            else f"Период ОТКРЫТ (был закрыт по {was:%d.%m.%Y})",
+        )
+        return Response(serializer.data)

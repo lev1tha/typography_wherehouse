@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 
 from .models import (
@@ -8,6 +10,9 @@ from .models import (
     MaterialType,
     ProductionSite,
     Roll,
+    Supplier,
+    Supply,
+    SupplyLine,
 )
 
 
@@ -49,6 +54,7 @@ class MaterialSerializer(serializers.ModelSerializer):
             "suggested_name",
             "unit",
             "is_roll_material",
+            "intake_form",
             "quantity",
             "critical_balance",
             "purchase_price",
@@ -212,8 +218,12 @@ class InventoryLogSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_by"]
 
 
-class SupplySerializer(serializers.Serializer):
-    """Storekeeper receives a new supply batch (increments stock)."""
+class QuickIntakeSerializer(serializers.Serializer):
+    """Быстрый приход одной позиции — кнопка «Поступление» на строке материала.
+
+    Остаётся рядом с накладной: одна банка клея, привезённая между делом,
+    документа не заслуживает. Имя Supply* отдано приходной НАКЛАДНОЙ.
+    """
 
     material = serializers.PrimaryKeyRelatedField(queryset=Material.objects.all())
     quantity = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0)
@@ -387,3 +397,73 @@ class ProductionSiteSerializer(serializers.ModelSerializer):
         validated_data["code"] = ProductionSite.make_code(validated_data.get("name", ""))
         validated_data["is_builtin"] = False
         return super().create(validated_data)
+
+
+class SupplierSerializer(serializers.ModelSerializer):
+    """Справочник поставщиков. Читают все, правит любой, кто принимает товар:
+    новую фирму заводит складовщик прямо в накладной."""
+
+    supplies_count = serializers.SerializerMethodField()
+    debt = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Supplier
+        fields = [
+            "id", "name", "phone", "inn", "note", "is_archived",
+            "supplies_count", "debt",
+        ]
+
+    def get_supplies_count(self, obj) -> int:
+        return obj.supplies.count()
+
+    def get_debt(self, obj):
+        """Сколько мы должны этому поставщику по всем его накладным."""
+        return sum((s.debt for s in obj.supplies.prefetch_related("lines")), Decimal("0"))
+
+
+class SupplyLineSerializer(serializers.ModelSerializer):
+    material_name = serializers.CharField(source="material.name", read_only=True)
+    unit_cost = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    # Единица, в которой лежит `quantity`: у площадных — кв.м, у штучных — своя.
+    unit = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SupplyLine
+        fields = [
+            "id", "material", "material_name", "form",
+            "width", "height", "length", "sheet_count",
+            "quantity", "unit", "cost", "unit_cost", "code",
+        ]
+        extra_kwargs = {
+            # У штучного материала количество ВВОДЯТ, у площадного оно считается
+            # из размеров и присланное значение игнорируется (см. `line_quantity`).
+            "quantity": {"required": False},
+        }
+
+    def get_unit(self, obj):
+        return "кв.м" if obj.material.is_roll_material and obj.form != SupplyLine.Form.QTY \
+            else obj.material.get_unit_display()
+
+
+class SupplySerializer(serializers.ModelSerializer):
+    lines = SupplyLineSerializer(many=True)
+    supplier_name = serializers.CharField(source="supplier.name", read_only=True)
+    # Реквизиты поставщика нужны печатной форме: лист приёмки без них — просто
+    # список позиций, по которому потом не докажешь, от кого он.
+    supplier_inn = serializers.CharField(source="supplier.inn", read_only=True)
+    supplier_phone = serializers.CharField(source="supplier.phone", read_only=True)
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True)
+    total_cost = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    discrepancy = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    debt = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = Supply
+        fields = [
+            "id", "number", "supplier", "supplier_name",
+            "supplier_inn", "supplier_phone", "received_on",
+            "stated_total", "paid_amount", "note", "lines",
+            "total_cost", "discrepancy", "debt",
+            "created_by", "created_by_name", "created_at",
+        ]
+        read_only_fields = ["created_by", "created_at"]

@@ -66,6 +66,12 @@ export default function Finance() {
   const [report, setReport] = useState(null);
   const reportFor = useRef("");   // какой месяц ждём — чтобы не осел ответ устаревшего запроса
   const [settings, setSettings] = useState(null);
+  // Реквизиты организации — шапка печатных документов.
+  const [company, setCompany] = useState(null);
+  const [coSaving, setCoSaving] = useState(false);
+  // Закрытие периода: до какой даты всё «на замке».
+  const [lock, setLock] = useState(null);
+  const [lockDraft, setLockDraft] = useState("");
   // Открытые диалоги: записи вида и настройка вида.
   const [openKind, setOpenKind] = useState(null);
   const [editKind, setEditKind] = useState(null); // {kind} | {block} для нового
@@ -105,6 +111,8 @@ export default function Finance() {
   }
   useEffect(() => {
     api.get("/finance/settings/").then((r) => setSettings(r.data));
+    api.get("/finance/company/").then((r) => setCompany(r.data)).catch(() => setCompany({}));
+    api.get("/finance/period/").then((r) => { setLock(r.data); setLockDraft(r.data.closed_through || ""); }).catch(() => setLock({}));
     api
       .get("/finance/expense-kinds/")
       .then((r) => setKinds(r.data.results || r.data))
@@ -126,11 +134,33 @@ export default function Finance() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(loadMaterialReport, [period.year, period.month, matDay]);
 
-  // Пустое поле — не ноль, а «считай сам»: ноль тут настоящий ноль, который
-  // можно поставить осознанно.
+  // Реквизиты правятся всей карточкой сразу, а не по полю на blur: это не
+  // «одна цифра в отчёте», а бланк, который заполняют один раз целиком.
+  const setCo = (field) => (e) => setCompany({ ...company, [field]: e.target.value });
+  function saveCompany() {
+    setCoSaving(true);
+    api
+      .patch("/finance/company/", company)
+      .then((r) => { setCompany(r.data); toast(t("common.saved")); })
+      .catch((e) => toast(e.response?.data?.detail || t("common.error"), "error"))
+      .finally(() => setCoSaving(false));
+  }
+
+  // Закрыть период — обычное действие месяца; открыть обратно тоже можно, но
+  // это осознанный шаг, и оба попадают в журнал действий.
+  function saveLock(value) {
+    api
+      .patch("/finance/period/", { closed_through: value || null })
+      .then((r) => {
+        setLock(r.data);
+        setLockDraft(r.data.closed_through || "");
+        toast(value ? t("period.closed", { date: new Date(value).toLocaleDateString("ru-RU") }) : t("period.opened"));
+      })
+      .catch((e) => toast(e.response?.data?.detail || t("common.error"), "error"));
+  }
+
   function saveField(field, value) {
-    const nullable = field === "stock_start";
-    const payload = value === "" ? (nullable ? null : 0) : Number(value);
+    const payload = value === "" ? 0 : Number(value);
     api
       .patch("/finance/settings/", { [field]: payload })
       .then(loadReport)
@@ -199,7 +229,7 @@ export default function Finance() {
   const salaryKinds = kinds.filter((k) => k.code === "SALARY");
   const purchaseKinds = kinds.filter((k) => k.block === "VARIABLE" || k.block === "MATERIALS");
 
-  if (!report || !settings) return <p className="muted">{t("common.loading")}</p>;
+  if (!report || !settings || !company || !lock) return <p className="muted">{t("common.loading")}</p>;
 
   const editRow = (label, field) => (
     <div className="crow" key={field}>
@@ -210,29 +240,6 @@ export default function Finance() {
         onChange={(e) => setSettings({ ...settings, [field]: e.target.value })}
         onBlur={(e) => saveField(field, e.target.value)}
         placeholder="0"
-        style={{ width: 150, height: 34, textAlign: "right" }}
-      />
-    </div>
-  );
-
-  // Строка, которую система считает сама. Поле оставлено пустым — тогда берётся
-  // расчёт; вписанное значение побеждает. Так заказчику не приходится вбивать
-  // то, что и так известно, но и поправить он может что угодно, как в Excel.
-  const autoRow = (label, field, autoValue, isManual, hint) => (
-    <div className="crow" key={field} style={{ alignItems: "flex-start" }}>
-      <span className="k">
-        {label}
-        <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>
-          {isManual ? t("finance.autoOverridden", { value: som(autoValue) }) : hint}
-        </div>
-      </span>
-      <input
-        type="number"
-        value={settings[field] ?? ""}
-        onChange={(e) => setSettings({ ...settings, [field]: e.target.value })}
-        onBlur={(e) => saveField(field, e.target.value)}
-        placeholder={String(Math.round(Number(autoValue) || 0))}
-        title={t("finance.autoPlaceholderHint")}
         style={{ width: 150, height: 34, textAlign: "right" }}
       />
     </div>
@@ -344,7 +351,14 @@ export default function Finance() {
       </p>
 
       <div className="stat-grid" style={{ marginBottom: 18 }}>
-        <Stat label={t("finance.revenue")} value={som(report.revenue)} />
+        {/* Выручка — по всем заказам периода, включая отданные в долг. Под
+            цифрой сразу видно, сколько из неё уже на руках: без этого «выручка
+            300 000» при 200 000 долга читается как 300 000 деньгами. */}
+        <Stat
+          label={t("finance.revenue")}
+          value={som(report.revenue)}
+          sub={`${t("finance.revenuePaid")}: ${som(report.revenue_paid)} · ${t("finance.revenueDebt")}: ${som(report.client_debt)}`}
+        />
         <Stat label={t("finance.expenses")} value={som(report.total_expenses)} />
         <Stat
           label={t("finance.profit")}
@@ -363,18 +377,10 @@ export default function Finance() {
       {report.materials && (
         <div className="card" style={{ marginTop: 16 }}>
           {blockHead(t("finance.blockMaterials"))}
-          {autoRow(
-            t("finance.stockStart"),
-            "stock_start",
-            report.materials.stock_start_auto,
-            report.materials.stock_start_is_manual,
-            t("finance.stockStartAuto"),
-          )}
+          {/* Остатков на начало и на конец в блоке больше нет (просьба
+              заказчика): расход материала — это то, что за месяц потратили,
+              закуп плюс транспорт. */}
           {materialRow("MATERIAL_PURCHASE")}
-          <div className="crow">
-            <span className="k">{t("finance.stockEnd")}</span>
-            <span>{som(report.materials.stock_end)}</span>
-          </div>
           {materialRow("TRANSPORT")}
           {materialRow("MATERIAL_DEBT")}
           {otherMaterialRows.map(kindRow)}
@@ -382,11 +388,6 @@ export default function Finance() {
           <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
             {t("finance.materialsHint")}
           </p>
-          {report.materials.needs_setup && (
-            <p style={{ fontSize: 12, margin: "6px 0 0", color: "var(--danger)" }}>
-              {t("finance.materialsNeedSetup")}
-            </p>
-          )}
           {totalRow(t("finance.totalMaterials"), report.materials.total)}
         </div>
       )}
@@ -421,6 +422,98 @@ export default function Finance() {
           <span style={{ color: "var(--danger)" }}>− {som(report.cogs)}</span>
         </div>
         {totalRow(t("finance.grossMargin"), report.gross_margin)}
+      </div>
+
+      {/* Реквизиты — шапка печатных документов. Живут здесь, а не в «Ценах»:
+          это про организацию и деньги, и правит их владелец. */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <h3>{t("finance.companyTitle")}</h3>
+        <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.companyHint")}</p>
+        <div className="row">
+          <div className="field grow" style={{ margin: 0 }}>
+            <label>{t("finance.coName")}</label>
+            <input value={company.name ?? ""} onChange={setCo("name")} placeholder={t("finance.coNamePh")} />
+          </div>
+          <div className="field grow" style={{ margin: 0 }}>
+            <label>{t("finance.coInn")}</label>
+            <input value={company.inn ?? ""} onChange={setCo("inn")} />
+          </div>
+        </div>
+        <div className="row">
+          <div className="field grow" style={{ margin: 0 }}>
+            <label>{t("finance.coAddress")}</label>
+            <input value={company.address ?? ""} onChange={setCo("address")} />
+          </div>
+          <div className="field grow" style={{ margin: 0 }}>
+            <label>{t("clients.phone")}</label>
+            <input value={company.phone ?? ""} onChange={setCo("phone")} />
+          </div>
+        </div>
+        <div className="row">
+          <div className="field grow" style={{ margin: 0 }}>
+            <label>{t("finance.coBank")}</label>
+            <input value={company.bank_name ?? ""} onChange={setCo("bank_name")} />
+          </div>
+          <div className="field grow" style={{ margin: 0 }}>
+            <label>{t("finance.coAccount")}</label>
+            <input value={company.bank_account ?? ""} onChange={setCo("bank_account")} />
+          </div>
+          <div className="field" style={{ margin: 0, width: 130 }}>
+            <label>{t("finance.coBik")}</label>
+            <input value={company.bik ?? ""} onChange={setCo("bik")} />
+          </div>
+        </div>
+        <div className="row">
+          <div className="field grow" style={{ margin: 0 }}>
+            <label>{t("finance.coDirector")}</label>
+            <input value={company.director ?? ""} onChange={setCo("director")} placeholder={t("finance.coSignPh")} />
+          </div>
+          <div className="field grow" style={{ margin: 0 }}>
+            <label>{t("finance.coAccountant")}</label>
+            <input value={company.accountant ?? ""} onChange={setCo("accountant")} placeholder={t("finance.coSignPh")} />
+          </div>
+        </div>
+        <div className="field">
+          <label>{t("finance.coNote")}</label>
+          <input value={company.note ?? ""} onChange={setCo("note")} placeholder={t("finance.coNotePh")} />
+        </div>
+        <div className="row" style={{ justifyContent: "flex-end", margin: 0 }}>
+          <button onClick={saveCompany} disabled={coSaving}>{t("common.save")}</button>
+        </div>
+      </div>
+
+      {/* Закрытие периода: после него отчёт за месяц перестаёт меняться. */}
+      <div className="card" style={{ marginTop: 16 }}>
+        <h3>{t("period.title")}</h3>
+        <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("period.hint")}</p>
+        {lock.closed_through ? (
+          <p style={{ margin: "0 0 12px", color: "var(--accent-strong)", fontWeight: 600 }}>
+            <Icon name="lock" size={15} />{" "}
+            {t("period.closedThrough", { date: new Date(lock.closed_through).toLocaleDateString("ru-RU") })}
+            {lock.updated_by_name ? <span className="muted" style={{ fontWeight: 400 }}> · {lock.updated_by_name}</span> : null}
+          </p>
+        ) : (
+          <p className="muted" style={{ margin: "0 0 12px" }}>{t("period.open")}</p>
+        )}
+        <div className="row" style={{ gap: 10, alignItems: "flex-end", margin: 0, flexWrap: "wrap" }}>
+          <div className="field" style={{ margin: 0, width: 190 }}>
+            <label>{t("period.closeThrough")}</label>
+            <input
+              type="date"
+              value={lockDraft}
+              max={new Date().toLocaleDateString("sv-SE")}
+              onChange={(e) => setLockDraft(e.target.value)}
+            />
+          </div>
+          <button onClick={() => saveLock(lockDraft)} disabled={!lockDraft}>
+            {t("period.close")}
+          </button>
+          {lock.closed_through && (
+            <button className="secondary" onClick={() => saveLock(null)}>
+              {t("period.open_")}
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>

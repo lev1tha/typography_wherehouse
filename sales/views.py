@@ -10,6 +10,8 @@ from rest_framework.response import Response
 
 from accounts.permissions import IsAdmin, IsNotAccountant
 from audit.models import AuditLog
+from finance import cash
+from finance.periods import ensure_open
 from clients.models import Client
 from clients.phones import find_client_by_phone
 from clients.serializers import ClientSerializer
@@ -226,6 +228,13 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 {"detail": "Править чеки может только администратор."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        # И сам чек, и дата, куда его двигают, должны быть в открытом периоде:
+        # иначе правкой можно вынести деньги из закрытого месяца или занести их
+        # туда.
+        receipt = self.get_object()
+        ensure_open(timezone.localtime(receipt.created_at), "Править заказ закрытого периода")
+        if "order_date" in request.data:
+            ensure_open(_parse_date(request.data.get("order_date")), "Перенести заказ этой датой")
         unknown = set(request.data) - self.EDITABLE_FIELDS
         if unknown:
             return Response(
@@ -292,6 +301,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         receipt = self.get_object()
+        ensure_open(timezone.localtime(receipt.created_at), "Удалить заказ закрытого периода")
         summary = receipt_summary(receipt)
         delete_receipt(receipt, user=request.user)
         AuditLog.record(request.user, f"Удалён чек {summary}")
@@ -351,6 +361,8 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                     {"detail": "Оформить заказ задним числом может только администратор."},
                     status=status.HTTP_403_FORBIDDEN,
                 )
+        # Закрытый период не пускает даже админа: отчёт за тот месяц уже принят.
+        ensure_open(order_date or timezone.localdate(), "Оформить заказ этой датой")
 
         try:
             receipt = create_sale(
@@ -379,6 +391,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     def refund(self, request, pk=None):
         """POST /receipts/<id>/refund/ — refund whole receipt or given items."""
         receipt = self.get_object()
+        ensure_open(timezone.localtime(receipt.created_at), "Оформить возврат по заказу закрытого периода")
         serializer = RefundSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         receipt = refund_receipt(
@@ -409,12 +422,18 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         (POST /clients/<id>/pay-debt/).
         """
         receipt = self.get_object()
+        # Разбор даты — внутри try: кривая дата это 400, а не пятисотка.
+        try:
+            paid_on = parse_paid_on(request.data.get("paid_on"))
+        except PaymentRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        ensure_open(paid_on or timezone.localdate(), "Принять оплату этой датой")
         try:
             amount = apply_payment(
                 receipt,
                 parse_amount(request.data.get("amount")),
                 user=request.user,
-                paid_on=parse_paid_on(request.data.get("paid_on")),
+                paid_on=paid_on,
                 method=request.data.get("method") or None,
                 keep_change=True,
             )
@@ -443,6 +462,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         отгружён при продаже). Недоступно для отменённых и возвращённых чеков.
         """
         receipt = self.get_object()
+        ensure_open(timezone.localtime(receipt.created_at), "Откатить оплату закрытого периода")
         if receipt.status == Receipt.Status.CANCELLED:
             return Response({"detail": "Чек отменён."}, status=status.HTTP_400_BAD_REQUEST)
         if receipt.payment_status in (
@@ -462,6 +482,10 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             )
 
         returned = receipt.amount_paid
+        # Из кассы уходит всё, что по этому чеку в неё попало: зачтённая сумма
+        # плюс НЕ ВЫДАННАЯ сдача — она физически лежит в ящике и уходит вместе
+        # с откатом (см. обнуление `change_due` ниже).
+        returned_cash = returned + receipt.change_due
         receipt.amount_paid = Decimal("0")
         # Сдача уходит вместе с оплатой: откат означает «денег не брали», а
         # сдача — это часть тех же денег. Оставить её значило бы, что цех должен
@@ -474,6 +498,10 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         # Записи оплат тоже убираем: откат означает «денег не брали», а
         # оставшаяся запись показывала бы в истории клиента платёж, которого нет.
         receipt.payments.all().delete()
+        # А вот кассовую книгу не подчищаем — пишем встречный расход: по ней
+        # должно быть видно, что деньги приходили и их откатили, иначе остаток
+        # сойдётся, а объяснить его будет нечем.
+        cash.payment_reverted(receipt, returned_cash, user=request.user)
 
         AuditLog.record(request.user, f"Откат оплаты по чеку {receipt.order_number}: −{returned} сом")
         return self._fresh_response(receipt)
@@ -487,6 +515,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         если итог упал ниже уже принятых денег, разница становится сдачей.
         """
         receipt = self.get_object()
+        ensure_open(timezone.localtime(receipt.created_at), "Править состав заказа закрытого периода")
         changes = request.data.get("items")
         if not isinstance(changes, list) or not changes:
             return Response(
@@ -517,6 +546,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         хватить и во второй раз, «отдал тысячу из полутора» — рабочая ситуация.
         """
         receipt = self.get_object()
+        ensure_open(timezone.localtime(receipt.created_at), "Выдать сдачу по заказу закрытого периода")
         try:
             given = give_change(receipt, parse_amount(request.data.get("amount")), user=request.user)
         except PaymentRejected as e:

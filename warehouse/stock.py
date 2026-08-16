@@ -24,6 +24,7 @@ def apply_stock_change(
     user=None,
     happened_at=None,
     receipt=None,
+    supply=None,
 ) -> Material:
     """Add `delta` (may be negative) to a material's quantity.
 
@@ -50,6 +51,7 @@ def apply_stock_change(
             actual_price=actual_price,
             reason=reason,
             receipt=receipt,
+            supply=supply,
             created_by=user,
         )
         if happened_at:

@@ -46,6 +46,7 @@ class ClientSerializer(serializers.ModelSerializer):
             "full_name",
             "company_name",
             "phone",
+            "inn",
             "telegram_chat_id",
             "display_name",
             "is_telegram_linked",
@@ -251,6 +252,12 @@ class ClientDetailSerializer(ClientSerializer):
                 "title": r.title,
                 "created_at": r.created_at,
                 "total_price": r.total_price,
+                # Сколько по заказу реально приняли. Нужно акту сверки: платёж,
+                # принятый в момент продажи, записи `sales.Payment` не создаёт —
+                # она заводится только при погашении долга. Без этой суммы акт
+                # показывал бы все заказы неоплаченными.
+                "amount_paid": r.amount_paid,
+                "refunded_amount": r.refunded_amount,
                 "payment_status": r.payment_status,
                 "fulfillment_status": r.fulfillment_status,
                 "debt": r.debt,

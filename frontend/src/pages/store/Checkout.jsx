@@ -35,11 +35,10 @@ function lineQty(line) {
 }
 function lineTotal(line) {
   // Резка = работа (погонный метр × ставка) + материал (площадь × цена/кв.м).
-  // Погонный метр вводится вручную; если пусто — берём площадь куска.
   // Резка = 2 строки в чеке (работа + материал), каждая округляется вверх
   // отдельно — как на бэкенде.
   if (line.kind === "cutting") {
-    const work = Number(line.rate) * Number(line.runM || line.area || 0);
+    const work = Number(line.rate) * Number(line.runM || 0);
     const material = Number(line.materialPrice) * Number(line.area || 0);
     return ceilSom(work) + ceilSom(material);
   }
@@ -51,6 +50,29 @@ function lineTotal(line) {
 // Сегодня в формате YYYY-MM-DD по МЕСТНОЙ дате: toISOString() отдаёт UTC и в
 // Бишкеке вечером показывал бы завтрашний день.
 const todayStr = () => new Date().toLocaleDateString("sv-SE");
+
+// Четыре способа продать материал по кв.м — так их называет заказчик.
+// Раньше вкладок было две («отрезать кусок» и «весь лист»), и в первую из них
+// были свалены три разных случая: фигурный рез, обычный рез и продажа площади
+// без реза. Отличались они только тем, что мастер вписывал (или не вписывал) в
+// поле погонных метров, — то есть не отличались ничем, что видно в кассе.
+//   CURVE — фигурный рез: длину кривой вводит мастер;
+//   SIDE  — обычный рез: в работу идёт ОДНА сторона, «Длина»;
+//   SQM   — только материал по площади, работы реза нет;
+//   PIECE — лист/рулон целиком по цене за штуку.
+const MODES = ["SIDE", "CURVE", "SQM", "PIECE"];
+// Режимы, где материал считается по площади куска (нужны ширина и длина).
+const AREA_MODES = ["SIDE", "CURVE", "SQM"];
+// Режимы с работой реза.
+const CUT_MODES = ["SIDE", "CURVE"];
+
+// Длина реза в погонных метрах для режима. У обычного реза она НЕ вводится:
+// это одна сторона куска — та, что вписана в «Длину».
+function runMetersFor(cut) {
+  if (cut.mode === "SIDE") return Number(cut.length) || 0;
+  if (cut.mode === "CURVE") return Number(cut.running_meters) || 0;
+  return 0;
+}
 
 export default function Checkout() {
   const { t } = useTranslation();
@@ -77,7 +99,13 @@ export default function Checkout() {
   const [cut, setCut] = useState(null); // unified material / service config modal
 
   useEffect(() => {
-    api.get("/warehouse/materials/", { params: { ordering: "name" } }).then((r) => setMaterials(r.data.results));
+    // page_size обязателен: без него приходит первая страница из 25 материалов
+    // (PAGE_SIZE в настройках). В кассе не было видно остальной номенклатуры, а
+    // выпадашка «категория» собиралась по этим же 25 — и половины категорий в
+    // ней просто не существовало.
+    api
+      .get("/warehouse/materials/", { params: { ordering: "name", page_size: 500 } })
+      .then((r) => setMaterials(r.data.results));
     api.get("/services/services/").then((r) => setServices(r.data.results));
     api.get("/clients/clients/").then((r) => setClientsList(r.data.results));
     // Подсказки по названию заказа — как живой поиск клиента, чтобы повторные
@@ -131,6 +159,7 @@ export default function Checkout() {
       piece_area: Number(m.piece_area ?? 0),
       cut_rate_per_pm: Number(m.cut_rate_per_pm ?? 0),
       is_roll_material: m.is_roll_material,
+      intake_form: m.intake_form || "SHEET",
       unit: m.unit,
       quantity: Number(m.quantity ?? 0),
       is_below_critical: !!m.is_below_critical,
@@ -193,18 +222,20 @@ export default function Checkout() {
     setError("");
     if (stockState(p)?.out) return; // нет на складе — продажа заблокирована
     if (p.kind === "material") {
-      // Sheet material → one unified modal (резка toggle + live price).
+      // Материал по кв.м → окно с четырьмя режимами продажи.
       if (p.is_roll_material) {
         const m = materials.find((x) => x.id === p.id) || p;
         setCut({
           material: m,
-          saleMode: "AREA", // AREA (отрезать кусок = материал + резка) | PIECE (весь лист)
-          cutting: true, // «кусок» всегда режется → работа реза по пог.м
+          // Обычный рез — самый частый случай, с него и открываемся.
+          mode: "SIDE",
           width: "",
           length: "",
           running_meters: "",
           qty: "1",
           matPrice: String(matSqm(m)),
+          piecePrice: String(Number(m.piece_price || 0)),
+          priceEdited: false,
           cutServiceId: cuttingService?.id ?? "",
           cutRate: rateFor(cuttingService, m),
         });
@@ -243,21 +274,32 @@ export default function Checkout() {
   function matSqm(m) {
     return Number(m.sqm_price ?? m.price_per_sqm ?? m.price_per_unit ?? 0);
   }
+  // Лист или рулон — как задано на самом материале. «Цена за лист» у плёнки,
+  // которая приходит рулоном, отвечает не на тот вопрос.
+  const wholeUnitOf = (m) =>
+    (m?.intake_form || "SHEET") === "ROLL" ? t("warehouse.unitRoll") : t("warehouse.unitSheet");
 
   function addCutting() {
     const matPrice = Number(cut.matPrice || 0); // overridable material price/кв.м
 
-    // --- Unified material modal (opened by tapping a sheet material) ---
+    // --- Окно материала: четыре режима продажи ---
     if (cut.material && !cut.service) {
       const m = cut.material;
-      // Whole sheet/roll.
-      if (cut.saleMode === "PIECE") {
+      // Штучно: лист/рулон целиком.
+      if (cut.mode === "PIECE") {
         const q = Number(cut.qty) || 1;
+        // Цену за штуку админ может перебить прямо в кассе. Пока он её не
+        // трогал, шлём её на сервер НЕ ЯВНО — иначе оптовая цена, которую
+        // сервер включает сам от нужного количества, была бы затёрта розничной.
+        const edited = !!cut.priceEdited;
         addOrInc({
           key: `M${m.id}-PIECE`, kind: "material", id: m.id, name: m.name,
-          price: Number(m.piece_price || 0), mode: "PIECE",
-          wholesale_price: Number(m.wholesale_price || 0),
-          wholesale_min_qty: Number(m.wholesale_min_qty || 0),
+          price: edited ? Number(cut.piecePrice || 0) : Number(m.piece_price || 0),
+          mode: "PIECE",
+          priceEdited: edited,
+          unitWord: wholeUnitOf(m),
+          wholesale_price: edited ? 0 : Number(m.wholesale_price || 0),
+          wholesale_min_qty: edited ? 0 : Number(m.wholesale_min_qty || 0),
         });
         // addOrInc adds qty 1; bump to requested count.
         if (q > 1) setCart((prev) => prev.map((l) => (l.key === `M${m.id}-PIECE` ? { ...l, qty: q } : l)));
@@ -266,7 +308,7 @@ export default function Checkout() {
         const pieceSvc = svcById(cut.cutServiceId);
         if (cut.pieceCut && pieceSvc && runM > 0) {
           setCart((prev) => [...prev, {
-            key: `CW${m.id}-${Date.now()}`, kind: "cut-work",
+            key: `CW${m.id}-${prev.length}-${runM}`, kind: "cut-work",
             serviceId: pieceSvc.id, name: pieceSvc.name || "Резка",
             materialId: m.id, materialName: m.name,
             rate: Number(cut.cutRate || 0), runM, qty: 1,
@@ -279,15 +321,12 @@ export default function Checkout() {
       const l = Number(cut.length);
       if (!w || !l) return;
       const area = +(w * l).toFixed(3);
-      // «Отрезать кусок» = материал (площадь) + работа реза (погонный метр).
-      // Длину реза вводит мастер. Пока не ввёл — работа 0: раньше сюда
-      // подставлялась площадь и умножалась на ставку за пог.м, то есть кв.м
-      // считались как пог.м и цена работы выходила неверной.
-      const runM = Number(cut.running_meters) || 0;
-      if (!cuttingService) {
-        // В каталоге нет услуги резки → продаём только кусок материала.
+      const runM = runMetersFor(cut);
+      // «Квадратный метр» — материал по площади и всё: работы реза в этом
+      // режиме нет. Так же ведём себя, если услуги резки нет в каталоге.
+      if (cut.mode === "SQM" || !cuttingService) {
         setCart((prev) => [...prev, {
-          key: `MA${m.id}-${cart.length}`, kind: "material-area",
+          key: `MA${m.id}-${prev.length}`, kind: "material-area",
           id: m.id, name: m.name, price: matPrice, width: w, length: l, area, qty: 1,
         }]);
         setCut(null);
@@ -295,10 +334,11 @@ export default function Checkout() {
       }
       const areaSvc = svcById(cut.cutServiceId);
       setCart((prev) => [...prev, {
-        key: `C${m.id}-${cart.length}`, kind: "cutting",
+        key: `C${m.id}-${prev.length}`, kind: "cutting",
         serviceId: areaSvc.id, name: areaSvc.name || "Резка",
         materialId: m.id, materialName: m.name, materialPrice: matPrice,
         rate: Number(cut.cutRate || 0),
+        cutMode: cut.mode,
         width: w, length: l, area, runM, qty: 1,
       }]);
       setCut(null);
@@ -346,7 +386,12 @@ export default function Checkout() {
     setBusy(true);
     const items = cart.map((l) => {
       if (l.kind === "material")
-        return { type: "MATERIAL", material: l.id, quantity: l.qty, mode: l.mode || "SQM" };
+        return {
+          type: "MATERIAL", material: l.id, quantity: l.qty, mode: l.mode || "SQM",
+          // Цену шлём, только если админ правил её руками. Иначе сервер сам
+          // решит, розничная тут цена или оптовая (опт включается от количества).
+          ...(isAdmin && l.priceEdited ? { material_price: l.price } : {}),
+        };
       if (l.kind === "material-area")
         return {
           type: "MATERIAL", material: l.id, quantity: l.area, mode: "SQM",
@@ -398,32 +443,42 @@ export default function Checkout() {
     }
   }
 
-  const isMatModal = !!(cut && cut.material && !cut.service); // unified material modal
-  const cutPiece = isMatModal && cut.saleMode === "PIECE";
+  const isMatModal = !!(cut && cut.material && !cut.service); // окно материала
+  const cutPiece = isMatModal && cut.mode === "PIECE";
   const cutArea = cut && Number(cut.width) && Number(cut.length) ? +(Number(cut.width) * Number(cut.length)).toFixed(3) : 0;
   const cutMat = cut ? (cut.material || materials.find((m) => m.id === Number(cut.materialId))) : null;
   // Editable (overridable) prices — default to the material's catalogue values.
   const cutMatSqm = cut ? Number(cut.matPrice || 0) : 0;
-  // Work is on for: interior-install service, or the material modal «Резка» switch.
-  const cutWorkOn = cut?.service ? true : !!cut?.cutting;
-  // Work rate per кв.м (cutting → material rate; interior → service rate).
+  // Работа реза считается у услуги «внутренний монтаж» и в режимах реза.
+  const cutWorkOn = cut?.service ? true : isMatModal && CUT_MODES.includes(cut.mode);
+  // Ставка: у монтажа — своя за кв.м, у реза — ставка станка/материала.
   const cutWorkRate = cut?.service
     ? (cut.service.uses_running_meter ? Number(cut.cutRate || 0) : Number(cut.service.rate_flat))
-    : (cut?.cutting ? Number(cut.cutRate || 0) : 0);
-  // Работа резки — строго по введённой длине реза (пог.м), без подстановки площади.
-  const cutRunM = cut?.cutting ? Number(cut?.running_meters) || 0 : 0;
+    : cutWorkOn
+    ? Number(cut?.cutRate || 0)
+    : 0;
+  // Длина реза: у кривой — то, что ввёл мастер; у обычного реза — ОДНА сторона
+  // куска, та, что вписана в «Длину». Площадь сюда не подставляется: кв.м и
+  // пог.м разные величины, и работа от такой подстановки выходила втрое дешевле.
+  const cutRunM = cut?.service ? cutArea : isMatModal ? runMetersFor(cut) : 0;
   const cutWork = cutWorkOn ? cutWorkRate * cutRunM : 0;
   const cutMaterialSum = cutMatSqm * cutArea;
   const cutPieceQty = Number(cut?.qty) || 1;
-  const cutWholeMin = cutPiece ? Number(cut.material.wholesale_min_qty || 0) : 0;
-  const cutWholePrice = cutPiece ? Number(cut.material.wholesale_price || 0) : 0;
+  // Цену за штуку админ может перебить прямо в кассе. Пока не трогал — работает
+  // оптовая цена; вписанная руками цена оптовую отменяет (иначе непонятно, что
+  // победило: та, что видишь в поле, или та, что включилась сама).
+  const cutPriceEdited = !!cut?.priceEdited;
+  const cutWholeMin = cutPiece && !cutPriceEdited ? Number(cut.material.wholesale_min_qty || 0) : 0;
+  const cutWholePrice = cutPiece && !cutPriceEdited ? Number(cut.material.wholesale_price || 0) : 0;
   const cutPieceWholesale = cutPiece && cutWholePrice > 0 && cutWholeMin > 0 && cutPieceQty >= cutWholeMin;
-  const cutPieceUnit = cutPieceWholesale ? cutWholePrice : Number(cut?.material?.piece_price || 0);
+  const cutPieceUnit = cutPieceWholesale ? cutWholePrice : Number(cut?.piecePrice || 0);
   const cutPieceTotal = cutPiece ? cutPieceQty * cutPieceUnit : 0;
   // «Весь лист» тоже можно резать: работа = пог.м × ставка реза материала.
   const cutPieceRunM = Number(cut?.running_meters) || 0;
   const cutPieceRate = Number(cut?.cutRate || 0);
   const cutPieceWork = cutPiece && cut?.pieceCut ? cutPieceRate * cutPieceRunM : 0;
+  // Слово для целой единицы в этом окне: лист или рулон.
+  const cutWholeUnit = wholeUnitOf(cutMat);
   // Итог = сумма округлённых вверх строк (как в чеке): лист/материал + работа.
   const cutTotal = cutPiece
     ? ceilSom(cutPieceTotal) + ceilSom(cutPieceWork)
@@ -467,15 +522,32 @@ export default function Checkout() {
                   {stock && <div className="p-stock">{t("checkout.stockLeft")} {stock}</div>}
                 </div>
                 <div className="p-price">
-                  {p.kind === "material"
-                    ? p.piece_price > 0
-                      ? `${ceilSom(p.piece_price)} сом/${t("checkout.pieceUnit")}`
-                      : `${ceilSom(p.price)} сом`
-                    : p.uses_area
-                    ? `${ceilSom(p.rate_flat)} сом/кв.м`
-                    : p.uses_pieces
-                    ? `${ceilSom(p.rate_per_piece)} сом/букву`
-                    : `${ceilSom(p.base_price)} сом`}
+                  {p.kind === "material" ? (
+                    p.is_roll_material ? (
+                      <>
+                        {/* Обе цены сразу: за квадрат — по ней считается кусок,
+                            за лист — по ней продают целиком. Раньше на плитке
+                            стояла одна, и у материала без цены за лист касса
+                            показывала «0 сом» (price_per_unit у листового
+                            материала не заполняется). */}
+                        {ceilSom(p.sqm_price)} сом/кв.м
+                        {p.piece_price > 0 && (
+                          <div className="muted" style={{ fontSize: 12 }}>
+                            {ceilSom(p.piece_price)}{" "}
+                            {t("checkout.perPieceShort", { unit: wholeUnitOf(p) })}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      `${ceilSom(p.price)} сом`
+                    )
+                  ) : p.uses_area ? (
+                    `${ceilSom(p.rate_flat)} сом/кв.м`
+                  ) : p.uses_pieces ? (
+                    `${ceilSom(p.rate_per_piece)} сом/букву`
+                  ) : (
+                    `${ceilSom(p.base_price)} сом`
+                  )}
                 </div>
               </button>
               );
@@ -493,7 +565,8 @@ export default function Checkout() {
                   <div className="cl-name">{l.name}</div>
                   {l.kind === "cutting" ? (
                     <div className="cl-sub">
-                      {l.width}×{l.length} = {l.area} кв.м · {l.materialName} · {t("checkout.rateWork")} {l.rate}
+                      {l.width}×{l.length} = {l.area} кв.м · {l.materialName} ·{" "}
+                      {t("checkout.rateWork")} {l.rate} × {l.runM} {t("checkout.pmShort")}
                     </div>
                   ) : l.kind === "cut-work" ? (
                     <div className="cl-sub">
@@ -503,7 +576,7 @@ export default function Checkout() {
                     <div className="cl-sub">{l.width}×{l.length} = {l.area} кв.м · {l.price} сом/кв.м</div>
                   ) : l.mode === "PIECE" ? (
                     <div className="cl-sub">
-                      {t("checkout.sellWhole")} · {unitPrice(l)} сом / {t("checkout.pieceUnit")}
+                      {unitPrice(l)} {t("checkout.perPieceShort", { unit: l.unitWord || t("warehouse.unitSheet") })}
                       {isWholesale(l) && (
                         <span className="badge ok" style={{ marginLeft: 6 }}>{t("checkout.wholesale")}</span>
                       )}
@@ -701,7 +774,7 @@ export default function Checkout() {
                 onClick={addCutting}
                 disabled={
                   cutPiece
-                    ? !(Number(cut.qty) > 0) || !(Number(cut.material.piece_price) > 0)
+                    ? !(Number(cut.qty) > 0) || !(cutPieceUnit > 0)
                     : !cutArea || (cut.service && !cut.materialId)
                 }
               >
@@ -710,31 +783,44 @@ export default function Checkout() {
             </>
           }
         >
-          {/* Material modal: sale-mode (по площади / целиком) + резка toggle */}
+          {/* Четыре способа продажи материала. Раньше вкладок было две, и в
+              первую («отрезать кусок») попадали три разных случая — фигурный
+              рез, обычный рез и продажа площади без реза; отличались они лишь
+              тем, что мастер вписал в поле погонных метров. */}
           {isMatModal && (
             <>
-              <div className="tabs" style={{ marginTop: 0 }}>
-                <button className={cut.saleMode === "AREA" ? "active" : ""} onClick={() => setCut({ ...cut, saleMode: "AREA" })}>
-                  {t("checkout.sellByArea")}
-                </button>
-                {Number(cut.material.piece_price) > 0 && (
-                  <button className={cut.saleMode === "PIECE" ? "active" : ""} onClick={() => setCut({ ...cut, saleMode: "PIECE" })}>
-                    {t("checkout.sellWhole")}
-                  </button>
-                )}
+              <div className="tabs tabs-grid" style={{ marginTop: 0 }}>
+                {MODES.map((mode) => {
+                  // Продажа целиком возможна, только когда у материала задана
+                  // цена за лист. Вкладку всё равно показываем — но неактивной
+                  // и с объяснением: заказчик знает свои четыре способа по
+                  // именам, и молча пропавший из них читается как поломка.
+                  const noPiecePrice = mode === "PIECE" && !(Number(cut.material.piece_price) > 0);
+                  return (
+                    <button
+                      key={mode}
+                      className={cut.mode === mode ? "active" : ""}
+                      disabled={noPiecePrice}
+                      title={noPiecePrice ? t("checkout.modePieceNoPrice") : undefined}
+                      onClick={() => setCut({ ...cut, mode })}
+                    >
+                      {t(`checkout.mode${mode[0]}${mode.slice(1).toLowerCase()}`)}
+                    </button>
+                  );
+                })}
               </div>
-              {cut.saleMode === "AREA" && (
-                <p className="muted" style={{ fontSize: 13, margin: "10px 0 2px" }}>
-                  {t("checkout.cutInfo")}
-                </p>
-              )}
+              <p className="muted" style={{ fontSize: 13, margin: "10px 0 16px" }}>
+                {t(`checkout.mode${cut.mode[0]}${cut.mode.slice(1).toLowerCase()}Hint`, {
+                  unit: cutWholeUnit,
+                })}
+              </p>
             </>
           )}
 
           {/* Станок: ЧПУ или лазер. Показываем, только когда станков правда
               несколько — если он один, спрашивать не о чем, и лишний ряд кнопок
               в кассе только мешает. Смена станка подставляет ЕГО ставку. */}
-          {isMatModal && cuttingServices.length > 1 && (cut.saleMode === "AREA" || cut.pieceCut) && (
+          {isMatModal && cuttingServices.length > 1 && (CUT_MODES.includes(cut.mode) || cut.pieceCut) && (
             <div className="field">
               <label>{t("checkout.cutMachine")}</label>
               <div className="tabs" style={{ marginTop: 0 }}>
@@ -776,12 +862,29 @@ export default function Checkout() {
             </div>
           )}
 
-          {/* Whole-sheet sale: quantity + optional cutting (running metres) */}
+          {/* Штучно: количество, цена за штуку и (по желанию) рез */}
           {cutPiece ? (
             <>
-              <div className="field">
-                <label>{t("common.quantity")} ({t("checkout.pieceUnit")})</label>
-                <input type="number" value={cut.qty} onChange={(e) => setCut({ ...cut, qty: e.target.value })} />
+              <div className="row">
+                <div className="field grow" style={{ margin: 0 }}>
+                  <label>{t("common.quantity")} ({t("checkout.pieceUnit")})</label>
+                  <input type="number" value={cut.qty} onChange={(e) => setCut({ ...cut, qty: e.target.value })} />
+                </div>
+                {/* Цена за лист/рулон — на виду и правится прямо здесь, как
+                    цена за кв.м у куска. Раньше её в кассе не было вообще:
+                    продать лист по особой цене можно было только через
+                    справочник, то есть переписав цену всем следующим заказам. */}
+                {isAdmin && (
+                  <div className="field grow" style={{ margin: 0 }}>
+                    <label>{t("checkout.piecePriceLabel", { unit: cutWholeUnit })}</label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={cut.piecePrice ?? ""}
+                      onChange={(e) => setCut({ ...cut, piecePrice: e.target.value, priceEdited: true })}
+                    />
+                  </div>
+                )}
               </div>
               <label className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <input
@@ -821,7 +924,10 @@ export default function Checkout() {
                 <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cut.length} onChange={(e) => setCut({ ...cut, length: e.target.value })} /></div>
               </div>
               <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("checkout.sizeHint")}</p>
-              {cut.cutting && (
+              {/* Длина кривой — только у фигурного реза. У обычного её вводить
+                  не нужно: в рез идёт одна сторона куска, и система берёт её
+                  сама из «Длины». */}
+              {isMatModal && cut.mode === "CURVE" && (
                 <div className="field">
                   <label>{t("checkout.runningMeters")}</label>
                   <input
@@ -829,10 +935,14 @@ export default function Checkout() {
                     step="any"
                     value={cut.running_meters}
                     onChange={(e) => setCut({ ...cut, running_meters: e.target.value })}
-                    placeholder={cutArea ? String(cutArea) : ""}
                   />
                   <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("checkout.runMetersHint")}</p>
                 </div>
+              )}
+              {isMatModal && cut.mode === "SIDE" && cutRunM > 0 && (
+                <p className="muted" style={{ fontSize: 12, margin: "0 0 12px" }}>
+                  {t("checkout.sideAuto", { value: cutRunM })}
+                </p>
               )}
               {/* Admin-only: override catalogue prices at sale time */}
               {isAdmin && (
@@ -857,16 +967,25 @@ export default function Checkout() {
             <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
               {cutPiece ? (
                 <>
+                  {/* Строка «подпись — расчёт», как в режимах по площади ниже.
+                      Раньше здесь болталось одинокое «4381 сом × 1» слева, без
+                      пары справа, и итог не читался как продолжение строки. */}
                   <div className="crow">
-                    <span className="k">{cutPieceUnit} сом × {cut.qty}</span>
-                    {cutPieceWholesale && <span className="badge ok">{t("checkout.wholesale")}</span>}
+                    <span className="k">
+                      {/* Подпись строки — с заглавной, как «Площадь» и
+                          «Материал» в соседних режимах. */}
+                      {cutWholeUnit.charAt(0).toUpperCase() + cutWholeUnit.slice(1)}
+                      {cutPieceWholesale && (
+                        <span className="badge ok" style={{ marginLeft: 6 }}>{t("checkout.wholesale")}</span>
+                      )}
+                    </span>
+                    <span>{cutPieceUnit} × {cutPieceQty} = {ceilSom(cutPieceTotal)}</span>
                   </div>
                   {!cutPieceWholesale && cutWholePrice > 0 && cutWholeMin > 0 && (
-                    <div className="crow">
+                    <div className="crow" style={{ paddingTop: 0 }}>
                       <span className="muted" style={{ fontSize: 12 }}>
                         {t("checkout.wholesaleFrom", { n: cutWholeMin, price: cutWholePrice })}
                       </span>
-                      <span />
                     </div>
                   )}
                   {cut.pieceCut && cutPieceWork > 0 && (

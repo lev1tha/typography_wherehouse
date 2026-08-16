@@ -66,6 +66,21 @@ const ICONS = {
     </>
   ),
 
+  wallet: (
+    <>
+      <path d="M19 7V5a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4" />
+      <path d="M3 6v12a2 2 0 0 0 2 2h14a1 1 0 0 0 1-1v-4" />
+      <path d="M18 12a2 2 0 0 0 0 4h3v-4Z" />
+    </>
+  ),
+  printer: (
+    <>
+      <path d="M6 9V2h12v7" />
+      <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+      <rect x="6" y="14" width="12" height="8" rx="1" />
+    </>
+  ),
+
   // — Controls —
   x: (
     <>

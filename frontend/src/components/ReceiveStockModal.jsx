@@ -13,7 +13,11 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
   const { t } = useTranslation();
   const { toast } = useUI();
   const roll = !!material.is_roll_material;
-  const [form, setForm] = useState(roll ? "ROLL" : "QTY");
+  // Форма прихода берётся С МАТЕРИАЛА: акрил всегда листами, плёнка всегда
+  // рулоном. Раньше окно всегда открывалось на «Рулоне», и на листовом складе
+  // (а он у заказчика почти весь листовой) первым делом приходилось
+  // переключать вкладку.
+  const [form, setForm] = useState(roll ? material.intake_form || "SHEET" : "QTY");
   const [v, setV] = useState({
     width: "", length: "", height: "", sheet_count: "",
     quantity: "", purchase_cost: "", actual_price: "", code: "",
@@ -36,6 +40,21 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
   const cur = Number(material.quantity) || 0;
   const unit = t(`unit.${material.unit}`);
   const added = roll ? area : Number(v.quantity) || 0;
+  // Слово для целой единицы: лист или рулон — как задано на материале.
+  const wholeUnit =
+    (material.intake_form || "SHEET") === "ROLL" || form === "ROLL"
+      ? t("warehouse.unitRoll")
+      : t("warehouse.unitSheet");
+  // Цена за целую единицу — и старая, и новая. Заказчик покупает листами и
+  // цену помнит за лист, а в базе она лежит за кв.м: без этой строки сравнить
+  // «почём было» и «почём стало» он мог только в уме.
+  const sheetArea =
+    form === "SHEET" && Number(v.width) && Number(v.height)
+      ? Number(v.width) * Number(v.height)
+      : Number(material.piece_area) || 0;
+  const oldPerSqm = Number(material.purchase_price) || 0;
+  const perSheet = (perSqm) => (sheetArea > 0 ? Math.round(perSqm * sheetArea) : null);
+  const money = (n) => Number(n).toLocaleString("ru-RU");
 
   const valid = roll
     ? (form === "ROLL" ? v.width && v.length : v.width && v.height && v.sheet_count) && v.purchase_cost
@@ -96,13 +115,19 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
       }
     >
       {roll && (
-        <div className="tabs" style={{ marginTop: 0 }}>
-          {[["ROLL", t("supply.formRoll")], ["SHEET", t("supply.formSheet")]].map(([k, label]) => (
-            <button key={k} className={form === k ? "active" : ""} onClick={() => setForm(k)}>
-              {label}
-            </button>
-          ))}
-        </div>
+        <>
+          {/* Лист впереди рулона: листами приходит почти вся номенклатура. */}
+          <div className="tabs" style={{ marginTop: 0 }}>
+            {[["SHEET", t("supply.formSheet")], ["ROLL", t("supply.formRoll")]].map(([k, label]) => (
+              <button key={k} className={form === k ? "active" : ""} onClick={() => setForm(k)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
+            {t("supply.intakeFormHint")}
+          </p>
+        </>
       )}
 
       {roll && form === "ROLL" && (
@@ -122,25 +147,39 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
         <div className="field" style={{ marginTop: 12 }}>
           <label>{t("supply.batchCost")}</label>
           <input type="number" step="any" value={v.purchase_cost} onChange={set("purchase_cost")} />
+          {/* Почём материал стоил до этого прихода — рядом, а не в другом
+              разделе: приход по новой цене это первое, на что смотрят. */}
+          {oldPerSqm > 0 && (
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+              {t("supply.currentPrice")}: {money(oldPerSqm)} сом/кв.м
+              {perSheet(oldPerSqm) ? ` · ${money(perSheet(oldPerSqm))} ${t("warehouse.perUnitShort", { unit: wholeUnit })}` : ""}
+            </p>
+          )}
         </div>
       )}
 
       {!roll && (
-        <div className="row">
-          {numField(`${t("common.quantity")} (${unit})`, "quantity", { autoFocus: true })}
-          {numField(t("supply.actualPrice"), "actual_price")}
-        </div>
+        <>
+          <div className="row">
+            {numField(`${t("common.quantity")} (${unit})`, "quantity", { autoFocus: true })}
+            {numField(t("supply.actualPrice"), "actual_price")}
+          </div>
+          <p className="muted" style={{ fontSize: 12, margin: "-8px 0 14px" }}>
+            {oldPerSqm > 0 ? `${t("supply.currentPrice")}: ${money(oldPerSqm)} ${t("warehouse.perUnitShort", { unit })}. ` : ""}
+            {t("supply.priceUnchanged")}
+          </p>
+        </>
       )}
 
       <div className="field">
-        <div className="field">
-          <label>{t("supply.receivedOn")}</label>
-          <input type="date" value={v.received_on} onChange={set("received_on")} />
-          <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
-            {t("supply.receivedOnHint")}
-          </p>
-        </div>
+        <label>{t("supply.receivedOn")}</label>
+        <input type="date" value={v.received_on} onChange={set("received_on")} />
+        <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+          {t("supply.receivedOnHint")}
+        </p>
+      </div>
 
+      <div className="field">
         <label>{t("supply.rollCode")}</label>
         <input value={v.code} onChange={set("code")} placeholder={t("supply.batchPlaceholder")} />
       </div>
@@ -151,7 +190,35 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
             <>
               <div className="crow"><span className="k">{t("supply.area")}</span><strong>{area.toFixed(2)} кв.м</strong></div>
               {costPerSqm && (
-                <div className="crow"><span className="k">{t("supply.costPerSqm")}</span><strong>{costPerSqm} сом/кв.м</strong></div>
+                <>
+                  <div className="crow">
+                    <span className="k">{t("supply.costPerSqm")}</span>
+                    <strong>
+                      {costPerSqm} сом/кв.м
+                      {/* Насколько подорожал или подешевел этот приход. */}
+                      {oldPerSqm > 0 && (
+                        <span className="muted" style={{ fontWeight: 400 }}>
+                          {" "}({t("supply.priceWas", { value: money(oldPerSqm) })})
+                        </span>
+                      )}
+                    </strong>
+                  </div>
+                  {/* Цена за целую единицу — тем же числом, каким её называет
+                      поставщик: «лист 980», а не «329 за квадрат». */}
+                  {perSheet(Number(costPerSqm)) && (
+                    <div className="crow">
+                      <span className="k">{t("supply.costPerSheet", { unit: wholeUnit })}</span>
+                      <strong>
+                        {money(perSheet(Number(costPerSqm)))} сом
+                        {oldPerSqm > 0 && perSheet(oldPerSqm) && (
+                          <span className="muted" style={{ fontWeight: 400 }}>
+                            {" "}({t("supply.priceWas", { value: money(perSheet(oldPerSqm)) })})
+                          </span>
+                        )}
+                      </strong>
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}

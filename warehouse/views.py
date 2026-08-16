@@ -3,7 +3,7 @@ from decimal import Decimal
 from datetime import datetime
 
 from django.db import transaction
-from django.db.models import Count
+from django.db.models import Count, F, ProtectedError
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 
@@ -13,8 +13,9 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from accounts.permissions import IsAdmin, IsAdminOrReadOnly
+from accounts.permissions import IsAdmin, IsAdminOrReadOnly, IsNotAccountant
 from audit.models import AuditLog
+from finance.periods import ensure_open
 
 from .models import (
     InventoryLog,
@@ -24,8 +25,11 @@ from .models import (
     MaterialType,
     ProductionSite,
     Roll,
+    Supplier,
+    Supply,
 )
 from .rolls import receive_lot
+from .supplies import SupplyError, post_supply, unpost_supply
 from .serializers import (
     build_ref_index,
     MaterialBulkRowSerializer,
@@ -38,7 +42,9 @@ from .serializers import (
     MaterialPriceUpdateSerializer,
     MaterialSerializer,
     RollIntakeSerializer,
+    QuickIntakeSerializer,
     RollSerializer,
+    SupplierSerializer,
     SupplySerializer,
     WriteOffSerializer,
 )
@@ -60,7 +66,9 @@ class MaterialViewSet(viewsets.ModelViewSet):
     and filters ?type=&color=&thickness_mm=, matching the warehouse screens.
     """
 
-    queryset = Material.objects.prefetch_related("images").all()
+    # rolls — ради stock_value: он считается по остаткам партий, и без prefetch
+    # каждый материал в списке уводил бы в отдельный запрос.
+    queryset = Material.objects.prefetch_related("images", "rolls").all()
     serializer_class = MaterialSerializer
     permission_classes = [IsAdminOrReadOnly]
     filterset_fields = ["type", "color", "thickness_mm", "production"]
@@ -77,30 +85,70 @@ class MaterialViewSet(viewsets.ModelViewSet):
         return qs.filter(is_archived=False)
 
     def destroy(self, request, *args, **kwargs):
-        """Удаление материала. Если по нему уже была история (продажи, приход,
-        партии) — не удаляем, а скрываем: иначе суммы в старых чеках и отчётах
-        поехали бы задним числом. Товар без истории удаляется насовсем."""
+        """Удаление материала.
+
+        Границу проводим по ПРОДАЖАМ, а не по любой истории. Раньше материал
+        прятался (архивировался) уже из-за одного прихода — а это самый частый
+        случай: завели материал, приняли поставку, увидели, что это дубль или
+        опечатка. Из каталога он пропадал, но оставался в стоимости склада, в
+        закупе материала и в отчёте по материалам: «удалил, а он в финансах».
+
+        Продаж не было → удаляем НАСОВСЕМ вместе с партиями и складским
+        журналом: ошибочная запись должна исчезнуть отовсюду, включая закуп
+        (он считается по приходам).
+
+        Продажи были → только прячем. Удалить нельзя: строки старых чеков
+        ссылаются на материал, и суммы закрытых заказов поехали бы задним
+        числом. Скрытый материал в расчёты периода тоже больше не лезет — см.
+        фильтры `is_archived` в обзоре и отчёте по материалам.
+        """
         material = self.get_object()
-        has_history = (
-            material.transaction_items.exists()
-            or material.inventory_logs.exists()
-            or material.rolls.exists()
-        )
-        if has_history:
-            material.is_archived = True
-            material.save(update_fields=["is_archived", "updated_at"])
-            AuditLog.record(request.user, f"Материал «{material.name}» скрыт из каталога")
-            return Response(
-                {
-                    "archived": True,
-                    "detail": "Материал скрыт из каталога — по нему есть история продаж или поступлений.",
-                },
-                status=status.HTTP_200_OK,
-            )
         name = material.name
-        material.delete()
-        AuditLog.record(request.user, f"Удалён материал «{name}»")
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        if not material.transaction_items.exists():
+            lots = material.rolls.count()
+            logs = material.inventory_logs.count()
+            try:
+                with transaction.atomic():
+                    # PROTECT на обеих связях — убираем их своими руками и в
+                    # одной транзакции, чтобы при отказе не осталось материала
+                    # без партий.
+                    material.rolls.all().delete()
+                    material.inventory_logs.all().delete()
+                    material.delete()
+            except ProtectedError:
+                # Материал держит что-то ещё (например, техкарта услуги) —
+                # прятать безопаснее, чем ломать связь.
+                pass
+            else:
+                AuditLog.record(
+                    request.user,
+                    f"Удалён материал «{name}» (партий: {lots}, движений: {logs})",
+                )
+                return Response(
+                    {
+                        "deleted": True,
+                        "detail": (
+                            "Материал удалён вместе с приходами — они ушли и из закупа."
+                            if logs or lots
+                            else "Товар удалён"
+                        ),
+                    },
+                    status=status.HTTP_200_OK,
+                )
+        material.is_archived = True
+        material.save(update_fields=["is_archived", "updated_at"])
+        AuditLog.record(request.user, f"Материал «{name}» скрыт из каталога")
+        return Response(
+            {
+                "archived": True,
+                "detail": (
+                    "Материал скрыт из каталога — по нему были продажи, "
+                    "и удалить его нельзя: поехали бы суммы старых чеков. "
+                    "В расчёты нового периода он больше не входит."
+                ),
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
     def restore(self, request, pk=None):
@@ -202,8 +250,9 @@ class MaterialViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], permission_classes=[IsAdmin])
     def supply(self, request):
         """POST /materials/supply/ — receive a new supply batch."""
-        serializer = SupplySerializer(data=request.data)
+        serializer = QuickIntakeSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        ensure_open(serializer.validated_data.get("happened_on"), "Оформить поступление этой датой")
         data = serializer.validated_data
         material = apply_stock_change(
             data["material"],
@@ -264,6 +313,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
         или лист: ширина×высота×кол-во) → площадь кв.м + себестоимость + наценка."""
         serializer = RollIntakeSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        ensure_open(serializer.validated_data.get("received_on"), "Принять партию этой датой")
         data = serializer.validated_data
         roll = receive_lot(
             data["material"],
@@ -458,4 +508,125 @@ class ProductionSiteViewSet(viewsets.ModelViewSet):
             site.save(update_fields=["is_archived"])
             return Response({"archived": True}, status=status.HTTP_200_OK)
         site.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class SupplierViewSet(viewsets.ModelViewSet):
+    """Справочник поставщиков.
+
+    Заводит его тот, кто принимает товар: новая фирма всплывает в момент
+    приёмки, и гонять складовщика к админу за строчкой справочника — верный
+    способ получить накладную «без поставщика». Удалять — только админ.
+    """
+
+    serializer_class = SupplierSerializer
+    permission_classes = [IsAuthenticated, IsNotAccountant]
+    pagination_class = None
+    search_fields = ["name", "phone", "inn"]
+    ordering = ["name"]
+
+    def get_queryset(self):
+        qs = Supplier.objects.prefetch_related("supplies__lines")
+        if self.request.query_params.get("archived") == "1":
+            return qs
+        return qs.filter(is_archived=False)
+
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.is_admin_role:
+            return Response(
+                {"detail": "Удалять поставщиков может только администратор."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        supplier = self.get_object()
+        # Поставщик с накладными не удаляется, а скрывается: на нём висит
+        # история поставок, и FK стоит на PROTECT.
+        if supplier.supplies.exists():
+            supplier.is_archived = True
+            supplier.save(update_fields=["is_archived"])
+            return Response(
+                {"archived": True, "detail": "Поставщик скрыт — по нему есть накладные."},
+                status=status.HTTP_200_OK,
+            )
+        supplier.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class SupplyViewSet(viewsets.ModelViewSet):
+    """Приходные накладные — поставка целиком, одним документом.
+
+    Создаёт и видит их тот, кто принимает товар (админ и складовщик); отменяет
+    только админ: отмена снимает материал с остатка.
+    """
+
+    serializer_class = SupplySerializer
+    permission_classes = [IsAuthenticated, IsNotAccountant]
+    filterset_fields = ["supplier"]
+    search_fields = ["number", "note", "supplier__name"]
+    ordering = ["-received_on", "-id"]
+
+    def get_queryset(self):
+        qs = (
+            Supply.objects.select_related("supplier", "created_by")
+            .prefetch_related("lines__material")
+        )
+        d_from = self.request.query_params.get("date_from")
+        d_to = self.request.query_params.get("date_to")
+        if d_from:
+            qs = qs.filter(received_on__gte=d_from)
+        if d_to:
+            qs = qs.filter(received_on__lte=d_to)
+        if self.request.query_params.get("unpaid") == "1":
+            qs = qs.filter(paid_amount__lt=F("stated_total"))
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        # Приход двигает закуп месяца — в закрытый период его не заводим.
+        ensure_open(serializer.validated_data.get("received_on"), "Провести накладную этой датой")
+        lines = serializer.validated_data.pop("lines", [])
+        try:
+            with transaction.atomic():
+                supply = Supply.objects.create(
+                    **serializer.validated_data, created_by=request.user
+                )
+                post_supply(supply, lines, user=request.user)
+        except SupplyError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        supply = self.get_queryset().get(pk=supply.pk)
+        AuditLog.record(
+            request.user,
+            f"Приход по накладной {supply.number or f'#{supply.pk}'}"
+            f"{f' от {supply.supplier.name}' if supply.supplier_id else ''}: "
+            f"{supply.lines.count()} поз. на {supply.total_cost} сом",
+        )
+        return Response(
+            self.get_serializer(supply).data, status=status.HTTP_201_CREATED
+        )
+
+    def update(self, request, *args, **kwargs):
+        """Состав накладной не правим — только её «бумажную» часть.
+
+        Переписывать проведённые строки значило бы двигать склад задним числом:
+        часть материала уже могла уйти в заказы. Ошиблись в позициях — отмените
+        накладную и заведите заново; номер, дата, сумма по бумаге и оплата
+        правятся спокойно.
+        """
+        request.data.pop("lines", None)
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if not request.user.is_admin_role:
+            return Response(
+                {"detail": "Отменять накладные может только администратор."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        supply = self.get_object()
+        ensure_open(supply.received_on, "Отменить накладную закрытого периода")
+        label = supply.number or f"#{supply.pk}"
+        try:
+            unpost_supply(supply)
+        except SupplyError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        AuditLog.record(request.user, f"Отменена приходная накладная {label}")
         return Response(status=status.HTTP_204_NO_CONTENT)

@@ -4,10 +4,19 @@ import { useTranslation } from "react-i18next";
 import api from "../api/api.js";
 
 const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
-const BAR_H = 90; // px above and below the zero baseline
+const num = (n) => Math.round(Number(n) || 0).toLocaleString("ru-RU");
 
-// Day-by-day profit/loss bar chart for one calendar month, so the owner can
-// see which days were in the red — not just the month-end total.
+// Прибыль по дням месяца — чтобы владелец видел, какие дни ушли в минус, а не
+// только итог за месяц.
+//
+// График переписан 2026-08-14: заказчик сказал «непонятно, как показывает».
+// Было три беды сразу. Под убытки всегда резервировалась ровно половина
+// высоты — в месяце без убытков нижняя половина карточки стояла пустой, а все
+// столбики жались к верху. Дни не были подписаны: какой столбик какое число,
+// можно было узнать только наведением мышью (о чём и просила подпись под
+// графиком). И не было масштаба — по столбику нельзя понять, там пять тысяч
+// или пятьсот. Теперь нулевая линия стоит там, где ей место (внизу, если
+// убытков нет), под столбиками стоят числа, а слева — шкала.
 export default function DailyProfitChart({ year: propYear, month: propMonth, reloadKey = 0 }) {
   const { t } = useTranslation();
   const now = new Date();
@@ -42,12 +51,20 @@ export default function DailyProfitChart({ year: propYear, month: propMonth, rel
 
   const isCurrentMonth = year === now.getFullYear() && month === now.getMonth() + 1;
   const rows = data?.rows || [];
-  // Future days (profit === null — the day hasn't happened yet) don't get a
-  // bar at all, so the chart simply stops at today instead of showing them
-  // as pre-emptively "in the red" for rent they haven't had a chance to earn.
+  // Будущие дни (profit === null — день ещё не наступил) столбика не получают:
+  // иначе они стояли бы в минусе на аренду, которую ещё не было шанса отбить.
+  // Колонку под них оставляем пустой, чтобы месяц не «заканчивался» 14-м числом.
   const pastRows = rows.filter((r) => r.profit != null);
-  const maxAbs = Math.max(1, ...pastRows.map((r) => Math.abs(Number(r.profit))));
+  const values = pastRows.map((r) => Number(r.profit));
+  const maxPos = Math.max(0, ...values);
+  const maxNeg = Math.min(0, ...values);
+  // Высоту делим между плюсом и минусом по их РЕАЛЬНОМУ размаху: нет убытков —
+  // нулевая линия внизу и весь график про прибыль.
+  const span = maxPos - maxNeg;
+  const zeroPct = span > 0 ? (maxPos / span) * 100 : 100;
   const hovered = hoverDay != null ? rows.find((r) => r.day === hoverDay) : null;
+  // В дате месяц идёт в родительном падеже: «15 июля», а не «15 Июль».
+  const monthOf = t("monthsOf", { returnObjects: true })[month - 1] || t(`finance.m${month}`);
 
   return (
     <div className="card" style={{ marginTop: 16 }}>
@@ -70,82 +87,105 @@ export default function DailyProfitChart({ year: propYear, month: propMonth, rel
           </button>
         </div>
       </div>
+      {/* Что именно на графике — прямо под заголовком, а не мелким текстом
+          в самом низу карточки, где это никто не читает. */}
+      <p className="muted" style={{ fontSize: 13, margin: "2px 0 14px" }}>
+        {t("finance.dailySubtitle")}
+      </p>
 
       {!data ? (
         <p className="muted">{t("common.loading")}</p>
       ) : (
         <>
-          <svg
-            viewBox={`0 0 ${rows.length * 20} ${BAR_H * 2 + 4}`}
-            style={{ width: "100%", height: 170, display: "block" }}
-            preserveAspectRatio="none"
-          >
-            <line
-              x1="0" y1={BAR_H + 2} x2={rows.length * 20} y2={BAR_H + 2}
-              stroke="var(--canvas)" strokeWidth="2"
-            />
-            {rows.map((r, i) => {
-              if (r.profit == null) return null; // future day — no bar yet
-              const profit = Number(r.profit);
-              const h = Math.max(1, (Math.abs(profit) / maxAbs) * BAR_H);
-              const x = i * 20 + 3;
-              const isToday = data.today === r.date;
-              const y = profit >= 0 ? BAR_H + 2 - h : BAR_H + 2;
-              return (
-                <rect
-                  key={r.date}
-                  x={x} y={y} width={14} height={h}
-                  rx="2"
-                  fill={profit >= 0 ? "var(--ok)" : "var(--danger)"}
-                  opacity={hoverDay == null || hoverDay === r.day ? 1 : 0.45}
-                  stroke={isToday ? "var(--accent-strong)" : "none"}
-                  strokeWidth={isToday ? 2 : 0}
-                  onMouseEnter={() => setHoverDay(r.day)}
-                  onMouseLeave={() => setHoverDay(null)}
-                >
-                  <title>
-                    {r.day} {t(`finance.m${month}`)}: {profit >= 0 ? "+" : ""}
-                    {som(profit)}
-                  </title>
-                </rect>
-              );
-            })}
-          </svg>
+          <div className="dc">
+            {/* Шкала: сколько стоит самый высокий столбик. Без неё непонятно,
+                пять там тысяч или пятьсот. */}
+            <div className="dc-axis">
+              <span className="dc-tick" style={{ top: 0 }}>{num(maxPos)}</span>
+              <span className="dc-tick" style={{ top: `${zeroPct}%` }}>0</span>
+              {maxNeg < 0 && (
+                <span className="dc-tick dc-tick-neg" style={{ top: "100%" }}>{num(maxNeg)}</span>
+              )}
+            </div>
 
-          <p className="muted" style={{ textAlign: "center", minHeight: 20, marginTop: 4 }}>
-            {hovered ? (
+            <div className="dc-chart">
+              {rows.map((r) => {
+                const profit = r.profit == null ? null : Number(r.profit);
+                const isToday = data.today === r.date;
+                const height = profit == null || span <= 0 ? 0 : (Math.abs(profit) / span) * 100;
+                return (
+                  <div
+                    className="dc-col"
+                    key={r.date}
+                    onMouseEnter={() => setHoverDay(r.day)}
+                    onMouseLeave={() => setHoverDay(null)}
+                    title={
+                      profit == null
+                        ? undefined
+                        : `${r.day} ${monthOf}: ${profit >= 0 ? "+" : ""}${som(profit)}`
+                    }
+                  >
+                    <div className="dc-plot" style={{ "--zero": `${zeroPct}%` }}>
+                      {profit != null && (
+                        <div
+                          /* День без продаж и трат — серый огрызок у нуля, не
+                             зелёный: ноль это не «в плюсе». Ряд зелёных чёрточек
+                             в начале месяца читался как «работали и заработали
+                             ничего». */
+                          className={`dc-bar ${profit === 0 ? "zero" : profit > 0 ? "pos" : "neg"}`}
+                          style={
+                            profit >= 0
+                              ? { bottom: `${100 - zeroPct}%`, height: `${height}%` }
+                              : { top: `${zeroPct}%`, height: `${height}%` }
+                          }
+                          data-dim={hoverDay != null && hoverDay !== r.day ? "1" : undefined}
+                        />
+                      )}
+                    </div>
+                    <div className={`dc-day${isToday ? " today" : ""}${r.day % 5 === 0 || r.day === 1 ? " keep" : ""}`}>
+                      {r.day}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <p className="muted" style={{ textAlign: "center", minHeight: 20, marginTop: 6 }}>
+            {hovered && hovered.profit != null ? (
               <>
-                {hovered.day} {t(`finance.m${month}`)}:{" "}
+                {hovered.day} {monthOf}:{" "}
                 <strong style={{ color: Number(hovered.profit) >= 0 ? "var(--ok)" : "var(--danger)" }}>
                   {Number(hovered.profit) >= 0 ? "+" : ""}
                   {som(hovered.profit)}
                 </strong>
+                {" · "}
+                <span style={{ fontSize: 13 }}>
+                  {t("finance.revenue")} {som(hovered.revenue)}
+                </span>
               </>
             ) : (
               t("finance.dailyHoverHint")
             )}
           </p>
 
-          <div className="stat-grid" style={{ marginTop: 8 }}>
-            <div className="stat">
-              <div className="label">{t("finance.revenue")}</div>
-              <div className="value">{som(data.totals.revenue)}</div>
-            </div>
-            <div className="stat">
-              <div className="label">{t("finance.expenses")}</div>
-              <div className="value">
-                {som(Number(data.totals.variable) + Number(data.totals.fixed))}
-              </div>
-            </div>
-            <div className="stat">
-              <div className="label">{t("finance.profit")}</div>
-              <div
-                className="value"
-                style={{ color: Number(data.totals.profit) >= 0 ? "var(--ok)" : "var(--danger)" }}
-              >
+          {/* Итоги месяца — строкой, а не рядом плиток: карточка в карточке
+              выглядела вторым, спорящим с верхом страницы блоком. */}
+          <div className="dc-totals">
+            <span>
+              <span className="k">{t("finance.revenue")}</span>
+              <strong>{som(data.totals.revenue)}</strong>
+            </span>
+            <span>
+              <span className="k">{t("finance.expenses")}</span>
+              <strong>{som(Number(data.totals.variable) + Number(data.totals.fixed))}</strong>
+            </span>
+            <span>
+              <span className="k">{t("finance.profit")}</span>
+              <strong style={{ color: Number(data.totals.profit) >= 0 ? "var(--ok)" : "var(--danger)" }}>
                 {som(data.totals.profit)}
-              </div>
-            </div>
+              </strong>
+            </span>
           </div>
           <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>
             {t("finance.dailyHint")}

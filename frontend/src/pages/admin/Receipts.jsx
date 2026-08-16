@@ -8,6 +8,7 @@ import EditReceiptModal from "../../components/EditReceiptModal.jsx";
 import GiveChangeModal from "../../components/GiveChangeModal.jsx";
 import Icon from "../../components/Icon.jsx";
 import PayDebtModal from "../../components/PayDebtModal.jsx";
+import PrintDocs from "../../components/PrintDocs.jsx";
 import { FulfillmentBadge, PaymentBadge } from "../../components/StatusBadge.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
@@ -37,6 +38,8 @@ function ReceiptsTab() {
   const [paying, setPaying] = useState(null);
   const [givingChange, setGivingChange] = useState(null);
   const [editing, setEditing] = useState(null);
+  // Заказ, по которому открыты печатные формы (чек / накладная / счёт).
+  const [printing, setPrinting] = useState(null);
   const [sort, setSort] = useState({ key: "_debt", dir: "desc" });
 
   const filtered = method || pstatus || search || client || dateFrom || dateTo || onlyChange;
@@ -287,6 +290,21 @@ function ReceiptsTab() {
       sortKey: "created_at",
       render: (r) => new Date(r.created_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }),
     },
+    // Печать — отдельной колонкой и ВСЕМ ролям: накладную выдаёт складовщик,
+    // счёт спрашивает бухгалтерия клиента. Это чтение, ничего не меняет.
+    {
+      key: "print",
+      label: "",
+      render: (r) => (
+        <button
+          className="secondary row-btn"
+          onClick={(e) => { e.stopPropagation(); setPrinting(r); }}
+          title={t("print.title")}
+        >
+          <Icon name="printer" size={14} /> {t("print.print")}
+        </button>
+      ),
+    },
     // Правка и удаление — только админу. Кнопки ПОДПИСАНЫ, а не одни иконки:
     // на складе те же две иконки без подписей заказчик просто не нашёл и решил,
     // что функции нет вовсе.
@@ -415,6 +433,8 @@ function ReceiptsTab() {
           onGiven={() => { setGivingChange(null); load(); }}
         />
       )}
+
+      {printing && <PrintDocs receipt={printing} onClose={() => setPrinting(null)} />}
 
       {editing && (
         <EditReceiptModal

@@ -9,6 +9,7 @@ import Login from "./pages/Login.jsx";
 import Dashboard from "./pages/admin/Dashboard.jsx";
 import Stock from "./pages/admin/Stock.jsx";
 import Pricing from "./pages/admin/Pricing.jsx";
+import Cash from "./pages/admin/Cash.jsx";
 import Clients from "./pages/admin/Clients.jsx";
 import ReferralRequests from "./pages/admin/ReferralRequests.jsx";
 import Receipts from "./pages/admin/Receipts.jsx";
@@ -27,6 +28,7 @@ const ADMIN_NAV = [
       { to: "/admin/clients", label: "nav.clients", icon: "users" },
       { to: "/admin/catalog", label: "nav.warehouse", icon: "package" },
       { to: "/admin/finance", label: "nav.finance", icon: "clipboard" },
+      { to: "/admin/cash", label: "nav.cash", icon: "wallet" },
     ],
   },
   {
@@ -59,6 +61,7 @@ const ACCOUNTANT_NAV = [
     items: [
       { to: "/acc", label: "nav.receipts", end: true, icon: "receipt" },
       { to: "/acc/finance", label: "nav.finance", icon: "clipboard" },
+      { to: "/acc/cash", label: "nav.cash", icon: "wallet" },
       { to: "/acc/dashboard", label: "nav.dashboard", icon: "dashboard" },
     ],
   },
@@ -118,6 +121,14 @@ export default function App() {
             </FinanceGate>
           }
         />
+        <Route
+          path="/admin/cash"
+          element={
+            <FinanceGate>
+              <Cash />
+            </FinanceGate>
+          }
+        />
         <Route path="/admin/expenses" element={<Navigate to="/admin/finance" replace />} />
       </Route>
 
@@ -149,6 +160,14 @@ export default function App() {
           element={
             <FinanceGate>
               <Finance />
+            </FinanceGate>
+          }
+        />
+        <Route
+          path="/acc/cash"
+          element={
+            <FinanceGate>
+              <Cash />
             </FinanceGate>
           }
         />

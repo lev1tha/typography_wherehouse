@@ -51,11 +51,23 @@ class DashboardView(APIView):
                 qs = qs.filter(**{f"{field}__date__lte": date_to})
             return qs
 
-        paid = by_period(Receipt.objects.filter(payment_status=Receipt.PaymentStatus.PAID))
+        # Выручка считается по ВСЕМ заказам периода, кроме отменённых, — по дате
+        # заказа. Раньше сюда попадали только полностью оплаченные чеки, и заказ
+        # в долг не считался выручкой вообще: материал со склада ушёл, работа
+        # сделана, а в отчёте её нет. Отдельно от этого «Финансы» показывают,
+        # сколько из выручки уже получено на руки, а сколько ещё в долгу.
+        paid = by_period(Receipt.objects.exclude(status=Receipt.Status.CANCELLED))
 
-        # Unrealised asset: sum(quantity * purchase_price) over all materials.
+        # Стоимость склада — по остаткам ПАРТИЙ, у каждой своя себестоимость
+        # (Material.stock_value). Раньше здесь стояло quantity × purchase_price,
+        # то есть весь остаток оценивался ценой последнего прихода.
+        #
+        # Скрытые материалы не считаем: администратор нажал «Удалить», и товар
+        # для него больше не существует. Оставлять его в стоимости склада —
+        # это «удалил, а он в отчётах», ровно то, на что жаловался заказчик.
+        live_materials = Material.objects.filter(is_archived=False)
         stock_value = sum(
-            (m.quantity * m.purchase_price for m in Material.objects.all()),
+            (m.stock_value for m in live_materials.prefetch_related("rolls")),
             Decimal("0"),
         )
 
@@ -69,10 +81,11 @@ class DashboardView(APIView):
         revenue_online = rev(Receipt.PaymentMethod.ONLINE)
         revenue_total = revenue_cash + revenue_mbank + revenue_demirbank + revenue_online
 
-        # Revenue split — work (services) vs material — over paid, non-returned lines.
+        # Разбивка выручки — работа против материала — по тем же заказам, что и
+        # выручка выше: все неотменённые, кроме возвращённых строк.
         paid_lines = by_period(
-            TransactionItem.objects.filter(
-                receipt__payment_status=Receipt.PaymentStatus.PAID, is_returned=False
+            TransactionItem.objects.filter(is_returned=False).exclude(
+                receipt__status=Receipt.Status.CANCELLED
             ),
             field="receipt__created_at",
         )
@@ -121,7 +134,9 @@ class DashboardView(APIView):
             )["v"]
         )
 
-        # Виды материалов на исходе (остаток ≤ критического) — список, не только счёт.
+        # Виды материалов на исходе (остаток ≤ критического) — список, не только
+        # счёт. Скрытые не показываем: докупать то, что удалили из каталога, не
+        # нужно.
         low_stock_items = [
             {
                 "id": m.id,
@@ -131,7 +146,7 @@ class DashboardView(APIView):
                 "critical_balance": m.critical_balance,
                 "sheets_remaining": m.sheets_remaining,
             }
-            for m in Material.objects.all()
+            for m in live_materials
             if m.is_below_critical
         ]
 

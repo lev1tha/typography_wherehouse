@@ -42,6 +42,7 @@ def receive_lot(
     code: str = "",
     user=None,
     received_at=None,
+    supply=None,
 ) -> Roll:
     """Receive a new lot (roll or sheets). Computes area from dimensions unless
     `area` is given directly; then creates the lot and refreshes material stock.
@@ -89,6 +90,8 @@ def receive_lot(
         actual_price=roll.cost_per_sqm,
         reason=f"Поступление: {roll.dimensions_label} ({area} кв.м), {purchase_cost} сом",
         created_by=user,
+        # Накладная, если приход пришёл документом, а не одиночной кнопкой.
+        supply=supply,
     )
     if received_at:
         entry.happened_at = received_at

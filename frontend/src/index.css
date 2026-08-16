@@ -134,6 +134,21 @@ input::placeholder {
   color: var(--ink-faint);
 }
 
+/* Стрелки «плюс/минус» у числовых полей убраны везде. Цены и размеры вводят с
+   клавиатуры, а шаг у стрелок всегда единица — щелчок по ней превращал 1470 в
+   1471, и заметить это в кассе было не по чему. Заодно они съедали половину
+   узкого поля в таблице массового ввода. */
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 input:focus,
 select:focus,
 textarea:focus {
@@ -369,9 +384,12 @@ label {
   padding: 20px;
 }
 
+/* auto-FIT, а не auto-fill: пустые колонки схлопываются, и ряд плиток
+   растягивается на всю ширину. При auto-fill на широком мониторе четыре плитки
+   вставали слева, а справа оставалась дыра в три пустых колонки. */
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: 14px;
 }
 
@@ -557,11 +575,14 @@ label {
   background: rgba(0, 0, 0, 0.05);
 }
 
+/* Контент занимает ВСЮ ширину под шапкой. Раньше он был колонкой в 1200px по
+   центру: на широком мониторе слева оставалась пустая полоса в четверть экрана,
+   а таблицы (чеки с себестоимостью, маржой и долгом; складской лист с колонками
+   приходов по датам) в эти 1200px не влезали и уезжали под правый край — место
+   рядом было, но им не пользовались. */
 .content {
   padding: 28px 32px;
-  max-width: 1200px;
   width: 100%;
-  margin: 0 auto;
 }
 
 /* Lang switcher — compact dropdown in the top bar */
@@ -1017,10 +1038,20 @@ label {
   border: 1px solid var(--hairline);
 }
 
+/* Шапка окна ПРИЛИПАЕТ к верху. Длинную форму (материал в кассе, карточка
+   материала) приходится прокручивать, и крестик закрытия уезжал наверх — из
+   середины формы окно было нечем закрыть, кроме клика мимо. */
 .modal-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   align-items: center;
-  margin-bottom: 16px;
+  gap: 8px;
+  margin: -24px -24px 16px;
+  padding: 20px 24px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
 }
 
 .modal-head h2 {
@@ -1074,6 +1105,35 @@ label {
   width: fit-content;
 }
 
+/* Режимы продажи — ОДИН ряд одинаковых кнопок во всю ширину. Обычный ряд с
+   переносом ставил три вкладки в строку, а четвёртую бросал на вторую строку
+   одну; сетка 2×2 переносила ту же проблему в двухэтажный серый блок на треть
+   окна. Колонки равные, поэтому от длины подписей ничего не съезжает; текст не
+   переносим — на узком экране (ниже) ряд сам становится 2×2. */
+.tabs-grid {
+  width: 100%;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+}
+
+/* 12px, а не 13: «Квадратный метр» — самая длинная подпись, и на 13px она не
+   помещалась в свою четверть ряда ровно на пару пикселей, получая многоточие. */
+.tabs-grid button {
+  padding: 0 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 720px) {
+  .tabs-grid {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 .tabs button {
   background: transparent;
   color: var(--ink-muted);
@@ -1081,6 +1141,11 @@ label {
   height: 34px;
   font-weight: 500;
   border-radius: var(--r-sm);
+}
+
+.tabs button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .tabs button:hover {
@@ -1425,6 +1490,344 @@ label {
 }
 
 /* --- Charts (dashboard) --- */
+/* Ячейка размера в сетке накладной: ширина/высота/количество листов стоят в
+   ряд. Во вложенном .row они переносились, и строка становилась трёхэтажной. */
+.size-cell {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.size-cell.three {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
+.size-cell input {
+  min-width: 0;
+  padding: 0 6px;
+}
+
+/* --- Печатные формы (PrintDocs) ---
+   Лист А4 прямо в окне: предпросмотр и есть то, что уйдёт на бумагу. Внутри
+   листа — свой мир: белый фон, чёрный текст и засечный шрифт независимо от
+   темы приложения. Документ печатают и подшивают, он не должен зависеть от
+   того, включена ли у кассира тёмная тема. */
+.print-sheet {
+  width: 210mm;
+  max-width: 100%;
+  min-height: 260mm;
+  margin: 0 auto;
+  padding: 16mm 15mm;
+  background: #ffffff;
+  color: #111111;
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  font-family: "Times New Roman", Georgia, "Liberation Serif", serif;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.print-modal {
+  max-width: min(240mm, 96vw);
+}
+
+.doc-org {
+  text-align: center;
+  line-height: 1.35;
+}
+
+.doc-org strong {
+  font-size: 15px;
+}
+
+.doc-org div {
+  font-size: 12px;
+  color: #333333;
+}
+
+.doc-title {
+  margin: 14px 0 12px;
+  text-align: center;
+  font-size: 16px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  border-top: 1.5px solid #111111;
+  border-bottom: 1.5px solid #111111;
+  padding: 7px 0;
+}
+
+.doc-line {
+  margin: 5px 0;
+}
+
+.doc-note {
+  margin: 12px 0 0;
+  font-style: italic;
+}
+
+.doc-bank {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+}
+
+.doc-bank td {
+  border: 1px solid #111111;
+  padding: 4px 8px;
+  vertical-align: top;
+}
+
+.doc-bank td:first-child {
+  width: 32%;
+  color: #333333;
+}
+
+.doc-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.doc-table th,
+.doc-table td {
+  border: 1px solid #111111;
+  padding: 5px 7px;
+  text-align: left;
+}
+
+.doc-table th {
+  background: #f2f2f2;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.doc-table td.r,
+.doc-table th.r {
+  text-align: right;
+}
+
+.doc-table td.c {
+  text-align: center;
+}
+
+.doc-total {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1.5px solid #111111;
+  padding-top: 7px;
+  font-size: 14px;
+}
+
+/* Строки подписи — две колонки с линейкой и расшифровкой под ней. */
+.doc-signs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 26px;
+  margin-top: 28px;
+}
+
+.doc-signs > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.doc-rule {
+  flex: 1;
+  border-bottom: 1px solid #111111;
+  height: 1em;
+}
+
+.doc-signs em {
+  font-style: normal;
+  font-size: 11px;
+  color: #333333;
+  white-space: nowrap;
+}
+
+/* Печать: на бумагу уходит только лист. Приложение, шапка окна и кнопки
+   скрываются целиком — иначе принтер выдаёт меню и боковую панель. */
+@media print {
+  @page {
+    size: A4;
+    margin: 0;
+  }
+
+  html,
+  body {
+    background: #ffffff;
+  }
+
+  .shell,
+  .no-print,
+  .toasts {
+    display: none !important;
+  }
+
+  .print-host {
+    position: static;
+    display: block;
+    padding: 0;
+    background: none;
+  }
+
+  .print-modal {
+    max-width: none;
+    max-height: none;
+    overflow: visible;
+    padding: 0;
+    border-radius: 0;
+    box-shadow: none;
+    background: #ffffff;
+    animation: none;
+  }
+
+  .print-sheet {
+    width: auto;
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
+    margin: 0;
+  }
+}
+
+/* --- Прибыль по дням (DailyProfitChart) ---
+   Столбики — обычные div'ы, а не SVG: у SVG с preserveAspectRatio="none" на
+   широкой карточке растягивались и сами столбики, и их скругления, и обводка
+   «сегодня» — по горизонтали сильнее, чем по вертикали. Плюс подписи дней в
+   растянутом viewBox пришлось бы масштабировать обратно. */
+.dc {
+  display: flex;
+  gap: 10px;
+  height: 200px;
+}
+
+/* Шкала слева. Нижний отступ равен высоте подписей дней, чтобы «0» на шкале
+   стоял ровно на нулевой линии графика, а не ниже неё. */
+.dc-axis {
+  position: relative;
+  width: 74px;
+  flex: none;
+  margin-bottom: 18px;
+}
+
+.dc-tick {
+  position: absolute;
+  right: 0;
+  transform: translateY(-50%);
+  font-size: 11px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+.dc-tick-neg {
+  color: var(--danger);
+  opacity: 0.7;
+}
+
+.dc-chart {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.dc-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dc-plot {
+  position: relative;
+  flex: 1;
+}
+
+/* Нулевая линия рисуется в каждой колонке — вместе они читаются как одна
+   сплошная (разрывы в 2px между колонками глазом не ловятся). */
+.dc-plot::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--zero);
+  border-top: 1px solid var(--hairline);
+}
+
+.dc-bar {
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  min-height: 2px;
+  border-radius: 2px;
+  transition: opacity 0.12s;
+}
+
+.dc-bar.pos {
+  background: var(--ok);
+}
+
+.dc-bar.neg {
+  background: var(--danger);
+}
+
+.dc-bar.zero {
+  background: var(--hairline);
+}
+
+/* Наведение подсвечивает свой столбик, приглушая остальные. */
+.dc-bar[data-dim] {
+  opacity: 0.35;
+}
+
+.dc-day {
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--ink-faint);
+  overflow: hidden;
+}
+
+.dc-day.today {
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+/* Итоги месяца строкой под графиком. */
+.dc-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+}
+
+.dc-totals > span {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  /* На телефоне 31 подпись в ряд не помещается — оставляем 1, 5, 10, 15… */
+  .dc-day:not(.keep) {
+    visibility: hidden;
+  }
+  .dc-axis {
+    width: 52px;
+  }
+  .dc {
+    gap: 6px;
+    height: 170px;
+  }
+}
+
 .chart-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

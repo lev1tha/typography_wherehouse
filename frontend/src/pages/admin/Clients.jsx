@@ -8,6 +8,7 @@ import BulkPayModal from "../../components/BulkPayModal.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
+import PrintAct from "../../components/PrintAct.jsx";
 import MonthPicker from "../../components/MonthPicker.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
@@ -23,6 +24,8 @@ export default function Clients() {
   const [clients, setClients] = useState([]);
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState(null);
+  // Клиент, по которому открыт акт сверки.
+  const [actFor, setActFor] = useState(null);
   const [reqForm, setReqForm] = useState({ referred_by: "", reason: "" });
   const [issuedPassword, setIssuedPassword] = useState(null); // показывается один раз
   const [period, setPeriod] = useState({ year: new Date().getFullYear(), month: null });
@@ -91,6 +94,20 @@ export default function Clients() {
     const { data } = await api.get(`/clients/clients/${id}/`, { params: periodParams() });
     setDetail(data);
     load();
+  }
+
+  // ИНН юрлица — нужен счёту на оплату. Сохраняем по уходу из поля, как
+  // остальные правки в карточке.
+  async function saveInn(value) {
+    const next = value.trim();
+    if (next === (detail.inn || "")) return;
+    try {
+      await api.patch(`/clients/clients/${detail.id}/`, { inn: next });
+      await refreshDetail(detail.id);
+      toast(t("common.saved"));
+    } catch (e) {
+      toast(e.response?.data?.detail || t("common.error"), "error");
+    }
   }
 
   // Пароль кабинета выдаёт админ и диктует клиенту. Показывается один раз:
@@ -368,6 +385,23 @@ export default function Clients() {
             <span className="k">{t("clients.type")}</span>
             <span>{detail.type === "OSOO" ? t("clients.osoo") : t("clients.physical")}</span>
           </div>
+          {/* ИНН — только у юрлица и только ради счёта на оплату. Правится
+              прямо здесь: клиента завели давно, а счёт понадобился сегодня. */}
+          {detail.type === "OSOO" && (
+            <div className="crow">
+              <span className="k">{t("clients.inn")}</span>
+              {isAdmin ? (
+                <input
+                  defaultValue={detail.inn || ""}
+                  placeholder={t("clients.innPh")}
+                  style={{ width: 200, height: 34, textAlign: "right" }}
+                  onBlur={(e) => saveInn(e.target.value)}
+                />
+              ) : (
+                <span>{detail.inn || "—"}</span>
+              )}
+            </div>
+          )}
           <div className="crow">
             <span className="k">{t("clients.telegram")}</span>
             <span>{detail.is_telegram_linked ? t("clients.linked") : t("clients.notLinked")}</span>
@@ -635,6 +669,14 @@ export default function Clients() {
             )}
           </div>
 
+          {/* Акт сверки — тем же документом, что и в 1С, закрывают спор о долге
+              с юрлицом. Данные уже в карточке, форма собирается из них. */}
+          <div className="row" style={{ marginTop: 16 }}>
+            <button className="secondary" onClick={() => setActFor(detail)}>
+              <Icon name="printer" size={16} /> {t("print.actTitle")}
+            </button>
+          </div>
+
           {/* Склейка двойников. Один человек, заведённый дважды (номер записали
               в разном формате), имел две карточки — и его заказы с долгом лежали
               двумя стопками. Прячем под раскрывашку: карточка удаляется
@@ -743,8 +785,22 @@ export default function Clients() {
               inputMode="tel"
             />
           </div>
+          {/* ИНН спрашиваем только у юрлица и только ради счёта на оплату: без
+              него бухгалтерия клиента счёт не проведёт. У физлица его нет. */}
+          {creating.type === "OSOO" && (
+            <div className="field">
+              <label>{t("clients.inn")}</label>
+              <input
+                value={creating.inn ?? ""}
+                onChange={(e) => setCreating({ ...creating, inn: e.target.value })}
+                placeholder={t("clients.innPh")}
+              />
+            </div>
+          )}
         </Modal>
       )}
+
+      {actFor && <PrintAct client={actFor} onClose={() => setActFor(null)} />}
 
       {payingClient && (
         <BulkPayModal

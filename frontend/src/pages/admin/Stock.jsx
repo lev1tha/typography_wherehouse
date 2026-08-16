@@ -3,9 +3,12 @@ import { useSearchParams } from "react-router-dom";
 
 import Catalog from "./Catalog.jsx";
 import MaterialStock from "./MaterialStock.jsx";
+import Supplies from "./Supplies.jsx";
 import Supply from "../store/Supply.jsx";
 
-const TABS = ["materials", "movement", "sheet"];
+// «Приходы» стоят вторыми: приёмка — самая частая работа на складе после
+// самого справочника, и прятать её вглубь нельзя.
+const TABS = ["materials", "supplies", "movement", "sheet"];
 
 // Единый раздел «Склад»: «Материалы» (справочник = Catalog), «Движение»
 // (приход / инвентаризация / списание = Supply) и «Остатки по месяцам» —
@@ -18,7 +21,12 @@ export default function Stock() {
   const tab = TABS.includes(raw) ? raw : "materials";
   const setTab = (key) => setParams(key === "materials" ? {} : { tab: key }, { replace: true });
 
-  const label = { materials: "tabMaterials", movement: "tabMovement", sheet: "tabSheet" };
+  const label = {
+    materials: "tabMaterials",
+    supplies: "tabSupplies",
+    movement: "tabMovement",
+    sheet: "tabSheet",
+  };
 
   return (
     <>
@@ -31,6 +39,7 @@ export default function Stock() {
         ))}
       </div>
       {tab === "materials" && <Catalog embedded />}
+      {tab === "supplies" && <Supplies embedded />}
       {tab === "movement" && <Supply embedded />}
       {tab === "sheet" && <MaterialStock embedded />}
     </>

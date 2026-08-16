@@ -1,6 +1,13 @@
 from rest_framework import serializers
 
-from .models import ExpenseEntry, ExpenseKind, FinanceSettings
+from .models import (
+    CashEntry,
+    CompanyProfile,
+    ExpenseEntry,
+    ExpenseKind,
+    FinanceSettings,
+    PeriodLock,
+)
 
 
 class ExpenseKindSerializer(serializers.ModelSerializer):
@@ -80,6 +87,22 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
         return kind
 
 
+class CompanyProfileSerializer(serializers.ModelSerializer):
+    # Подсказка интерфейсу: пускать ли на счёт на оплату. Считается на сервере,
+    # чтобы условие «есть банк и счёт» жило в одном месте.
+    has_bank = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = CompanyProfile
+        fields = [
+            "name", "inn", "address", "phone",
+            "bank_name", "bank_account", "bik",
+            "director", "accountant", "note",
+            "has_bank", "updated_at",
+        ]
+        read_only_fields = ["updated_at"]
+
+
 class FinanceSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = FinanceSettings
@@ -91,3 +114,59 @@ class FinanceSettingsSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["updated_at"]
+
+
+class CashEntrySerializer(serializers.ModelSerializer):
+    kind_display = serializers.CharField(source="get_kind_display", read_only=True)
+    article_display = serializers.CharField(source="get_article_display", read_only=True)
+    account_display = serializers.CharField(source="get_account_display", read_only=True)
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True)
+    order_number = serializers.IntegerField(source="receipt.order_number", read_only=True)
+
+    class Meta:
+        model = CashEntry
+        fields = [
+            "id", "account", "account_display", "kind", "kind_display",
+            "article", "article_display", "amount", "happened_on", "note",
+            "receipt", "order_number", "supply", "is_auto",
+            "created_by", "created_by_name", "created_at",
+        ]
+        read_only_fields = ["is_auto", "created_by", "created_at"]
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Сумма должна быть больше нуля.")
+        return value
+
+    def validate_article(self, value):
+        # Статьи, которые пишет только система: руками их вносить нельзя, иначе
+        # касса разойдётся с чеками и объяснить расхождение будет нечем.
+        auto_only = {
+            CashEntry.Article.SALE,
+            CashEntry.Article.CHANGE,
+            CashEntry.Article.REFUND,
+            CashEntry.Article.UNPAY,
+        }
+        if value in auto_only:
+            raise serializers.ValidationError(
+                "Эту статью система пишет сама — по оплатам, сдаче и возвратам."
+            )
+        return value
+
+
+class PeriodLockSerializer(serializers.ModelSerializer):
+    updated_by_name = serializers.CharField(source="updated_by.username", read_only=True)
+
+    class Meta:
+        model = PeriodLock
+        fields = ["closed_through", "note", "updated_by", "updated_by_name", "updated_at"]
+        read_only_fields = ["updated_by", "updated_at"]
+
+    def validate_closed_through(self, value):
+        from django.utils import timezone
+
+        if value and value > timezone.localdate():
+            raise serializers.ValidationError(
+                "Закрывать будущее нельзя — в нём ещё ничего не произошло."
+            )
+        return value

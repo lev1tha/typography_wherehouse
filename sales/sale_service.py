@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from django.db import transaction
 from django.utils import timezone
 
+from finance import cash
 from warehouse.models import InventoryLog, Material
 from warehouse.rolls import consume_area, restore_area
 from warehouse.stock import apply_stock_change
@@ -317,6 +318,19 @@ def create_sale(
         _create_online_invoice(receipt)
 
     receipt.save()
+    # Деньги, принятые при оформлении, — приход в кассовую книгу. Датируем
+    # ДАТОЙ ЗАКАЗА: заказ задним числом принёс деньги тогда же, а не сегодня.
+    #
+    # В кассу кладём то, что клиент ПРИНЁС, а не то, что зачлось за заказ:
+    # заказ на 36, принесли 100 — в ящике лежит 100, и 64 из них станут сдачей.
+    # Списывается она при выдаче (`give_change`). Записывай мы сюда зачтённые 36,
+    # выдача сдачи увела бы кассу в минус на ровном месте.
+    brought = receipt.amount_paid + receipt.change_due
+    if brought > 0:
+        cash.receipt_paid(
+            receipt, brought, user=cashier,
+            happened_on=timezone.localtime(receipt.created_at).date(),
+        )
     return receipt
 
 
@@ -483,13 +497,20 @@ def apply_payment(
         update_fields=["amount_paid", "change_due", "payment_status", "updated_at"]
     )
 
+    settled_on = paid_on or timezone.localdate()
     Payment.objects.create(
         receipt=receipt,
         amount=amount,
         method=method or receipt.payment_method,
-        paid_on=paid_on or timezone.localdate(),
+        paid_on=settled_on,
         note=note or "",
         created_by=user,
+    )
+    # Погашение долга — такой же приход денег, как оплата в кассе, и датируется
+    # днём, когда деньги реально принесли.
+    cash.receipt_paid(
+        receipt, amount, user=user, happened_on=settled_on,
+        method=method or receipt.payment_method,
     )
     return amount
 
@@ -709,6 +730,7 @@ def give_change(receipt: Receipt, amount=None, *, user=None) -> Decimal:
         raise PaymentRejected("Сумма выдачи должна быть больше нуля.")
     receipt.change_due = due - give
     receipt.save(update_fields=["change_due", "updated_at"])
+    cash.change_given(receipt, give, user=user)
     return give
 
 
@@ -799,4 +821,8 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None) -> Receipt:
         receipt.payment_status = Receipt.PaymentStatus.REFUNDED
         receipt.status = Receipt.Status.CANCELLED
     receipt.save(update_fields=["refunded_amount", "payment_status", "status", "updated_at"])
+    # Из кассы ушло не больше, чем в неё по этому заказу приходило: вернуть
+    # можно только полученные деньги, а неоплаченный заказ возврата денег не
+    # порождает вовсе.
+    cash.refund_paid(receipt, min(refunded_total, receipt.amount_paid), user=user)
     return receipt

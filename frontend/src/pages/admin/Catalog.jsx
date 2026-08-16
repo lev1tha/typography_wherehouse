@@ -22,6 +22,7 @@ const EMPTY = {
   sheet_height: "",
   unit: "PIECE",
   is_roll_material: false,
+  intake_form: "SHEET",
   critical_balance: "0",
   purchase_price: "0",
   price_per_unit: "0",
@@ -162,7 +163,9 @@ export default function Catalog({ embedded = false }) {
     if (!(await confirm(t("warehouse.deleteConfirm", { name: m.name })))) return;
     try {
       const { data } = await api.delete(`/warehouse/materials/${m.id}/`);
-      toast(data?.archived ? data.detail : t("warehouse.deleted"));
+      // Сервер сам говорит, что произошло: удалён насовсем (вместе с приходами)
+      // или спрятан, потому что по нему были продажи.
+      toast(data?.detail || t("warehouse.deleted"));
       load();
     } catch (e) {
       toast(apiError(e, t("common.error")), "error");
@@ -207,6 +210,29 @@ export default function Catalog({ embedded = false }) {
   // может быть назначена отдельно (скидка за целый лист). Поэтому пересчитываем
   // её только пока она «в паре» с ценой за кв.м: стоит вписать своё число — и
   // связь рвётся, ручное значение больше не затирается.
+  // Форма материала одной строкой: штучный / лист / рулон. В базе это по-прежнему
+  // «считаем в кв.м» (is_roll_material) плюс форма поступления (intake_form).
+  const matForm = !editing
+    ? "PIECE"
+    : editing.is_roll_material
+    ? editing.intake_form || "SHEET"
+    : "PIECE";
+  // Слово для целой единицы — лист или рулон. «Цена за лист» на плёнке, которая
+  // приходит рулоном, отвечает не на тот вопрос.
+  const wholeUnit = matForm === "ROLL" ? t("warehouse.unitRoll") : t("warehouse.unitSheet");
+  function setMatForm(next) {
+    if (next === "PIECE") {
+      setEditing({
+        ...editing,
+        is_roll_material: false,
+        // Единица «кв.м» осталась бы от рулонного и врала бы в подписях цен.
+        unit: editing.unit === "SQM" ? "PIECE" : editing.unit,
+      });
+      return;
+    }
+    setEditing({ ...editing, is_roll_material: true, intake_form: next, unit: "SQM" });
+  }
+
   function setSqmPrice(v) {
     const wasDerived =
       !Number(editing.piece_price) ||
@@ -503,21 +529,32 @@ export default function Catalog({ embedded = false }) {
             />
           </div>
 
-          <label className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              style={{ width: 20, height: 20, minHeight: 0 }}
-              checked={!!editing.is_roll_material}
-              onChange={(e) =>
-                setEditing({
-                  ...editing,
-                  is_roll_material: e.target.checked,
-                  unit: e.target.checked ? "SQM" : editing.unit,
-                })
-              }
-            />
-            {t("warehouse.isRoll")}
-          </label>
+          {/* Форма материала — три кнопки вместо галочки «листовой/рулонный».
+              Галочка отвечала на «считаем в кв.м?», но не на «чем он приходит»,
+              и форму (лист или рулон) складовщик выбирал заново в каждом
+              поступлении. Теперь она задана на материале и подставляется в
+              приход: акрил всегда листами, плёнка всегда рулоном. */}
+          <div className="field">
+            <label>{t("warehouse.stockForm")}</label>
+            <div className="tabs" style={{ marginTop: 0 }}>
+              {[
+                ["PIECE", t("warehouse.formPiece")],
+                ["SHEET", t("supply.formSheet")],
+                ["ROLL", t("supply.formRoll")],
+              ].map(([key, label]) => (
+                <button
+                  key={key}
+                  className={matForm === key ? "active" : ""}
+                  onClick={() => setMatForm(key)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
+              {matForm === "PIECE" ? t("warehouse.formPieceHint") : t("warehouse.rollHint")}
+            </p>
+          </div>
 
           {!editing.is_roll_material ? (
             <>
@@ -543,8 +580,6 @@ export default function Catalog({ embedded = false }) {
             </>
           ) : (
             <>
-              <p className="muted" style={{ fontSize: 12 }}>{t("warehouse.rollHint")}</p>
-
               <SectionLabel>{t("warehouse.priceStockSection")}</SectionLabel>
               {/* Закупка — одно значение в базе (за кв.м), но вводится любым из
                   двух полей: он покупает листами, а считается всё в квадратах. */}
@@ -558,7 +593,7 @@ export default function Catalog({ embedded = false }) {
                 {sheetArea > 0 && (
                   <NumField
                     grow
-                    label={t("warehouse.purchasePerSheet")}
+                    label={t("warehouse.purchasePerSheet", { unit: wholeUnit })}
                     value={toSheet(editing.purchase_price)}
                     onChange={(v) => setF("purchase_price")(toSqm(v))}
                   />
@@ -575,16 +610,16 @@ export default function Catalog({ embedded = false }) {
               )}
               <NumField label={`${t("warehouse.critical")} (кв.м)`} value={editing.critical_balance} onChange={setF("critical_balance")} />
 
-              <SectionLabel>{t("warehouse.sheetSale")}</SectionLabel>
+              <SectionLabel>{t("warehouse.sheetSale", { unit: wholeUnit })}</SectionLabel>
               <div className="row">
-                <NumField grow label={t("warehouse.retailPerSheet")} value={editing.piece_price} onChange={setF("piece_price")} />
+                <NumField grow label={t("warehouse.retailPerSheet", { unit: wholeUnit })} value={editing.piece_price} onChange={setF("piece_price")} />
               </div>
               <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
-                {t("warehouse.piecePriceHint")}
+                {t("warehouse.piecePriceHint", { unit: wholeUnit })}
               </p>
               <div className="row">
-                <NumField grow label={t("warehouse.wholesalePrice")} value={editing.wholesale_price} onChange={setF("wholesale_price")} />
-                <NumField grow label={t("warehouse.wholesaleMin")} value={editing.wholesale_min_qty} onChange={setF("wholesale_min_qty")} />
+                <NumField grow label={t("warehouse.wholesalePrice", { unit: wholeUnit })} value={editing.wholesale_price} onChange={setF("wholesale_price")} />
+                <NumField grow label={t("warehouse.wholesaleMin", { unit: wholeUnit })} value={editing.wholesale_min_qty} onChange={setF("wholesale_min_qty")} />
               </div>
               <p className="muted" style={{ fontSize: 12 }}>{t("warehouse.wholesaleHint")}</p>
             </>
