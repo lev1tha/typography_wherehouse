@@ -19,7 +19,7 @@ from accounts.permissions import IsAdminOrAccountantRead, SeesMoney
 from audit.models import AuditLog
 from sales.models import Receipt, TransactionItem
 from services.models import PrintingService
-from warehouse.models import InventoryLog, Material
+from warehouse.models import InventoryLog, Material, Supply
 
 from .material_sheet import (
     collect_flows,
@@ -190,6 +190,96 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         ensure_open(instance.spent_at, "Удалить трату закрытого периода")
         instance.delete()
+
+    @action(detail=False, methods=["get"])
+    def feed(self, request):
+        """GET /finance/expense-entries/feed/ — ВСЕ траты периода одной лентой.
+
+        Ручные записи — это лишь часть расхода. Закуп материала система считает
+        сама, по приходам на склад (`purchases_from_stock`), и в `ExpenseEntry`
+        он не попадает НИКОГДА. Поэтому список «Все траты за период», читавший
+        только ручные записи, у заказчика был пуст всегда: все его траты — это
+        приходы материала, а в отчёте сверху при этом стояло «Расходы 25 000».
+
+        Здесь обе стороны в одной ленте: ручная запись правится и удаляется,
+        приход показывается справочно и ведёт к своей накладной.
+        """
+        d_from = _parse_date(request.query_params.get("date_from"))
+        d_to = _parse_date(request.query_params.get("date_to"))
+        rows = [
+            {
+                "key": f"entry-{e.id}",
+                "source": "MANUAL",
+                "id": e.id,
+                "kind": e.kind_id,
+                "kind_name": e.kind.name,
+                "name": e.name,
+                "amount": e.amount,
+                "spent_at": e.spent_at,
+                "note": e.note,
+            }
+            for e in self.filter_queryset(self.get_queryset())
+        ]
+
+        purchase_kind = ExpenseKind.objects.filter(
+            code=ExpenseKind.MATERIAL_PURCHASE
+        ).first()
+        purchase_name = purchase_kind.name if purchase_kind else "Закуп материала"
+
+        # Приход накладной — ОДНА строка ленты на документ, а не на позицию:
+        # заказчик платит за поставку целиком, и сверяет он тоже её.
+        supplies = Supply.objects.select_related("supplier").prefetch_related("lines")
+        if d_from:
+            supplies = supplies.filter(received_on__gte=d_from)
+        if d_to:
+            supplies = supplies.filter(received_on__lte=d_to)
+        for supply in supplies:
+            total = supply.total_cost
+            if not total:
+                continue
+            label = supply.number or f"#{supply.id}"
+            rows.append({
+                "key": f"supply-{supply.id}",
+                "source": "SUPPLY",
+                "id": supply.id,
+                "kind": purchase_kind.id if purchase_kind else None,
+                "kind_name": purchase_name,
+                "name": f"Накладная {label}",
+                "amount": total,
+                "spent_at": supply.received_on,
+                "note": supply.supplier.name if supply.supplier_id else "",
+            })
+
+        # Одиночные приходы — те, что вводят кнопкой на строке материала, мимо
+        # накладной. В отчёте они считаются так же, значит и в ленте должны быть.
+        logs = InventoryLog.objects.filter(
+            type=InventoryLog.Type.SUPPLY,
+            quantity_changed__gt=0,
+            actual_price__isnull=False,
+            supply__isnull=True,
+        ).select_related("material")
+        if d_from:
+            logs = logs.filter(happened_at__date__gte=d_from)
+        if d_to:
+            logs = logs.filter(happened_at__date__lte=d_to)
+        for log in logs:
+            rows.append({
+                "key": f"log-{log.id}",
+                "source": "SUPPLY",
+                "id": log.id,
+                "kind": purchase_kind.id if purchase_kind else None,
+                "kind_name": purchase_name,
+                "name": log.material.name,
+                "amount": log.quantity_changed * log.actual_price,
+                "spent_at": timezone.localtime(log.happened_at).date(),
+                "note": log.reason,
+            })
+
+        rows.sort(key=lambda r: (r["spent_at"], r["key"]), reverse=True)
+        return Response({
+            "results": rows,
+            "total": sum((r["amount"] for r in rows), Decimal("0")),
+        })
 
 
 class CompanyProfileView(APIView):

@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import api from "../api/api.js";
 import Icon from "./Icon.jsx";
 import PrintHost from "./PrintHost.jsx";
 import amountInWords from "../utils/amountInWords.js";
@@ -23,13 +22,8 @@ const day = (iso) => (iso ? new Date(iso).toLocaleDateString("ru-RU") : "");
 export default function PrintAct({ client, onClose }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.resolvedLanguage;
-  const [company, setCompany] = useState(null);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-
-  useEffect(() => {
-    api.get("/finance/company/").then((r) => setCompany(r.data)).catch(() => setCompany({}));
-  }, []);
 
   // Строки акта: заказ — начисление, оплата — погашение. Обе стороны в одной
   // ленте по датам, как в 1С.
@@ -104,8 +98,6 @@ export default function PrintAct({ client, onClose }) {
   const credit = rows.reduce((s, r) => s + r.credit, 0);
   const closing = debit - credit;
 
-  if (!company) return null;
-
   return (
     <PrintHost>
       <div className="modal wide print-modal">
@@ -132,10 +124,10 @@ export default function PrintAct({ client, onClose }) {
           )}
         </div>
 
+        {/* Без шапки и без строки «Поставщик»: реквизиты организации из
+            системы убраны по просьбе заказчика. Акт от этого не ломается —
+            он про расчёты с конкретным клиентом. */}
         <div className="print-sheet">
-          <div className="doc-org">
-            <strong>{company.name || t("print.noName")}</strong>
-          </div>
           <h2 className="doc-title">
             {t("print.actHeading")}
             {(from || to) && (
@@ -147,10 +139,6 @@ export default function PrintAct({ client, onClose }) {
           </h2>
 
           <p className="doc-line">{t("print.actIntro")}</p>
-          <p className="doc-line">
-            <b>{t("print.supplier")}:</b> {company.name || "—"}
-            {company.inn ? `, ${t("print.inn")} ${company.inn}` : ""}
-          </p>
           <p className="doc-line">
             <b>{t("print.buyer")}:</b> {client.display_name}
             {client.inn ? `, ${t("print.inn")} ${client.inn}` : ""}
@@ -213,7 +201,7 @@ export default function PrintAct({ client, onClose }) {
             <div>
               <span>{t("print.actFromUs")}</span>
               <span className="doc-rule" />
-              <em>{company.director || ""}</em>
+              <em />
             </div>
             <div>
               <span>{t("print.actFromClient")}</span>

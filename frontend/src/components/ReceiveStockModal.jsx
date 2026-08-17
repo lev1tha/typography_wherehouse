@@ -6,9 +6,10 @@ import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 
 // Приём (поступление) нового прихода для КОНКРЕТНОГО материала — открывается с
-// его строки в «Складе». Рулонный: сегмент Рулон/Лист + размеры + себестоимость
-// партии (площадь и цена/кв.м считаются на лету). Штучный: количество (+ факт.
-// закупочная цена). Дёргает те же эндпоинты, что раньше делал экран «Поступление».
+// его строки в «Складе». Рулонный: сегмент Рулон/Лист + размеры + цена за лист
+// (площадь, себестоимость партии и цена/кв.м считаются на лету). Штучный:
+// количество (+ факт. закупочная цена). Дёргает те же эндпоинты, что раньше
+// делал экран «Поступление».
 export default function ReceiveStockModal({ material, onClose, onDone }) {
   const { t } = useTranslation();
   const { toast } = useUI();
@@ -20,7 +21,10 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
   const [form, setForm] = useState(roll ? material.intake_form || "SHEET" : "QTY");
   const [v, setV] = useState({
     width: "", length: "", height: "", sheet_count: "",
-    quantity: "", purchase_cost: "", actual_price: "", code: "",
+    // unit_cost — цена за ОДИН лист (рулон), как её называет поставщик и как она
+    // записана в накладной. Себестоимость партии считается из неё умножением:
+    // раньше это умножение заказчик делал в уме до того, как открыть окно.
+    quantity: "", unit_cost: "", actual_price: "", code: "",
     // Дата поступления: заказчик вносит поставки задним числом, когда доходят
     // руки — в его Excel даты идут вразнобой. По ней же выстраивается FIFO.
     received_on: new Date().toISOString().slice(0, 10),
@@ -36,28 +40,36 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
     return 0;
   }, [form, v.width, v.length, v.height, v.sheet_count]);
 
-  const costPerSqm = area && Number(v.purchase_cost) ? (Number(v.purchase_cost) / area).toFixed(2) : null;
+  // Партия = цена за штуку × сколько листов. В рулонной форме приходит один
+  // рулон, поэтому его цена и есть себестоимость партии.
+  const pieces = form === "SHEET" ? Number(v.sheet_count) || 0 : 1;
+  const batchCost = Number(v.unit_cost) > 0 && pieces > 0 ? Number(v.unit_cost) * pieces : 0;
+
+  const costPerSqm = area && batchCost ? (batchCost / area).toFixed(2) : null;
   const cur = Number(material.quantity) || 0;
   const unit = t(`unit.${material.unit}`);
   const added = roll ? area : Number(v.quantity) || 0;
-  // Слово для целой единицы: лист или рулон — как задано на материале.
-  const wholeUnit =
-    (material.intake_form || "SHEET") === "ROLL" || form === "ROLL"
-      ? t("warehouse.unitRoll")
-      : t("warehouse.unitSheet");
+  // Слово для целой единицы: лист или рулон — по выбранной вкладке.
+  const wholeUnit = form === "ROLL" ? t("warehouse.unitRoll") : t("warehouse.unitSheet");
   // Цена за целую единицу — и старая, и новая. Заказчик покупает листами и
   // цену помнит за лист, а в базе она лежит за кв.м: без этой строки сравнить
   // «почём было» и «почём стало» он мог только в уме.
+  // Площадь одной целой единицы: в рулонной форме — сам рулон (ширина×длина),
+  // в листовой — лист этой партии, а если размеры ещё не введены, лист из
+  // карточки материала. Раньше рулону подставлялась площадь листа, и старая
+  // цена показывалась «за рулон» числом, которое к рулону отношения не имело.
   const sheetArea =
-    form === "SHEET" && Number(v.width) && Number(v.height)
-      ? Number(v.width) * Number(v.height)
-      : Number(material.piece_area) || 0;
+    form === "ROLL"
+      ? Number(v.width) * Number(v.length) || 0
+      : Number(v.width) && Number(v.height)
+        ? Number(v.width) * Number(v.height)
+        : Number(material.piece_area) || 0;
   const oldPerSqm = Number(material.purchase_price) || 0;
   const perSheet = (perSqm) => (sheetArea > 0 ? Math.round(perSqm * sheetArea) : null);
   const money = (n) => Number(n).toLocaleString("ru-RU");
 
   const valid = roll
-    ? (form === "ROLL" ? v.width && v.length : v.width && v.height && v.sheet_count) && v.purchase_cost
+    ? (form === "ROLL" ? v.width && v.length : v.width && v.height && v.sheet_count) && batchCost > 0
     : !!v.quantity;
 
   async function submit() {
@@ -72,7 +84,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           length: form === "ROLL" ? Number(v.length) : null,
           height: form === "SHEET" ? Number(v.height) : null,
           sheet_count: form === "SHEET" ? Number(v.sheet_count) : null,
-          purchase_cost: Number(v.purchase_cost),
+          purchase_cost: batchCost,
           received_on: v.received_on || null,
         });
       } else {
@@ -145,14 +157,24 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
       )}
       {roll && (
         <div className="field" style={{ marginTop: 12 }}>
-          <label>{t("supply.batchCost")}</label>
-          <input type="number" step="any" value={v.purchase_cost} onChange={set("purchase_cost")} />
+          <label>{t("supply.unitCost", { unit: wholeUnit })}</label>
+          <input type="number" step="any" value={v.unit_cost} onChange={set("unit_cost")} />
+          {/* Себестоимость партии больше не спрашиваем — показываем, как она
+              вышла: «5 × 2 400 = 12 000». Заказчик вводит ровно то число, что
+              стоит в накладной поставщика. */}
+          {form === "SHEET" && batchCost > 0 && (
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+              {t("supply.batchCost")}: {pieces} × {money(Number(v.unit_cost))} = <strong>{money(batchCost)}</strong> сом
+            </p>
+          )}
           {/* Почём материал стоил до этого прихода — рядом, а не в другом
-              разделе: приход по новой цене это первое, на что смотрят. */}
+              разделе: приход по новой цене это первое, на что смотрят.
+              Сначала за лист — тем же числом, каким его вводят выше. */}
           {oldPerSqm > 0 && (
             <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
-              {t("supply.currentPrice")}: {money(oldPerSqm)} сом/кв.м
-              {perSheet(oldPerSqm) ? ` · ${money(perSheet(oldPerSqm))} ${t("warehouse.perUnitShort", { unit: wholeUnit })}` : ""}
+              {t("supply.currentPrice")}:{" "}
+              {perSheet(oldPerSqm) ? `${money(perSheet(oldPerSqm))} ${t("warehouse.perUnitShort", { unit: wholeUnit })} · ` : ""}
+              {money(oldPerSqm)} сом/кв.м
             </p>
           )}
         </div>

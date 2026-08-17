@@ -66,9 +66,6 @@ export default function Finance() {
   const [report, setReport] = useState(null);
   const reportFor = useRef("");   // какой месяц ждём — чтобы не осел ответ устаревшего запроса
   const [settings, setSettings] = useState(null);
-  // Реквизиты организации — шапка печатных документов.
-  const [company, setCompany] = useState(null);
-  const [coSaving, setCoSaving] = useState(false);
   // Закрытие периода: до какой даты всё «на замке».
   const [lock, setLock] = useState(null);
   const [lockDraft, setLockDraft] = useState("");
@@ -111,7 +108,6 @@ export default function Finance() {
   }
   useEffect(() => {
     api.get("/finance/settings/").then((r) => setSettings(r.data));
-    api.get("/finance/company/").then((r) => setCompany(r.data)).catch(() => setCompany({}));
     api.get("/finance/period/").then((r) => { setLock(r.data); setLockDraft(r.data.closed_through || ""); }).catch(() => setLock({}));
     api
       .get("/finance/expense-kinds/")
@@ -133,18 +129,6 @@ export default function Finance() {
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(loadMaterialReport, [period.year, period.month, matDay]);
-
-  // Реквизиты правятся всей карточкой сразу, а не по полю на blur: это не
-  // «одна цифра в отчёте», а бланк, который заполняют один раз целиком.
-  const setCo = (field) => (e) => setCompany({ ...company, [field]: e.target.value });
-  function saveCompany() {
-    setCoSaving(true);
-    api
-      .patch("/finance/company/", company)
-      .then((r) => { setCompany(r.data); toast(t("common.saved")); })
-      .catch((e) => toast(e.response?.data?.detail || t("common.error"), "error"))
-      .finally(() => setCoSaving(false));
-  }
 
   // Закрыть период — обычное действие месяца; открыть обратно тоже можно, но
   // это осознанный шаг, и оба попадают в журнал действий.
@@ -229,7 +213,7 @@ export default function Finance() {
   const salaryKinds = kinds.filter((k) => k.code === "SALARY");
   const purchaseKinds = kinds.filter((k) => k.block === "VARIABLE" || k.block === "MATERIALS");
 
-  if (!report || !settings || !company || !lock) return <p className="muted">{t("common.loading")}</p>;
+  if (!report || !settings || !lock) return <p className="muted">{t("common.loading")}</p>;
 
   const editRow = (label, field) => (
     <div className="crow" key={field}>
@@ -424,63 +408,9 @@ export default function Finance() {
         {totalRow(t("finance.grossMargin"), report.gross_margin)}
       </div>
 
-      {/* Реквизиты — шапка печатных документов. Живут здесь, а не в «Ценах»:
-          это про организацию и деньги, и правит их владелец. */}
-      <div className="card" style={{ marginTop: 16 }}>
-        <h3>{t("finance.companyTitle")}</h3>
-        <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.companyHint")}</p>
-        <div className="row">
-          <div className="field grow" style={{ margin: 0 }}>
-            <label>{t("finance.coName")}</label>
-            <input value={company.name ?? ""} onChange={setCo("name")} placeholder={t("finance.coNamePh")} />
-          </div>
-          <div className="field grow" style={{ margin: 0 }}>
-            <label>{t("finance.coInn")}</label>
-            <input value={company.inn ?? ""} onChange={setCo("inn")} />
-          </div>
-        </div>
-        <div className="row">
-          <div className="field grow" style={{ margin: 0 }}>
-            <label>{t("finance.coAddress")}</label>
-            <input value={company.address ?? ""} onChange={setCo("address")} />
-          </div>
-          <div className="field grow" style={{ margin: 0 }}>
-            <label>{t("clients.phone")}</label>
-            <input value={company.phone ?? ""} onChange={setCo("phone")} />
-          </div>
-        </div>
-        <div className="row">
-          <div className="field grow" style={{ margin: 0 }}>
-            <label>{t("finance.coBank")}</label>
-            <input value={company.bank_name ?? ""} onChange={setCo("bank_name")} />
-          </div>
-          <div className="field grow" style={{ margin: 0 }}>
-            <label>{t("finance.coAccount")}</label>
-            <input value={company.bank_account ?? ""} onChange={setCo("bank_account")} />
-          </div>
-          <div className="field" style={{ margin: 0, width: 130 }}>
-            <label>{t("finance.coBik")}</label>
-            <input value={company.bik ?? ""} onChange={setCo("bik")} />
-          </div>
-        </div>
-        <div className="row">
-          <div className="field grow" style={{ margin: 0 }}>
-            <label>{t("finance.coDirector")}</label>
-            <input value={company.director ?? ""} onChange={setCo("director")} placeholder={t("finance.coSignPh")} />
-          </div>
-          <div className="field grow" style={{ margin: 0 }}>
-            <label>{t("finance.coAccountant")}</label>
-            <input value={company.accountant ?? ""} onChange={setCo("accountant")} placeholder={t("finance.coSignPh")} />
-          </div>
-        </div>
-        <div className="field">
-          <label>{t("finance.coNote")}</label>
-          <input value={company.note ?? ""} onChange={setCo("note")} placeholder={t("finance.coNotePh")} />
-        </div>
-        <div className="row" style={{ justifyContent: "flex-end", margin: 0 }}>
-          <button onClick={saveCompany} disabled={coSaving}>{t("common.save")}</button>
-        </div>
-      </div>
+      {/* Карточки «Реквизиты для документов» здесь больше нет: заказчик просил
+          убрать реквизиты совсем, и печатные формы их больше не печатают.
+          Данные в базе остались — если понадобятся, блок возвращается назад. */}
 
       {/* Закрытие периода: после него отчёт за месяц перестаёт меняться. */}
       <div className="card" style={{ marginTop: 16 }}>

@@ -271,12 +271,52 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
     )]
 
 
+def client_change_available(client, *, exclude=None) -> Decimal:
+    """Сдача клиента, которую ему ещё не отдали, по всем его заказам."""
+    if client is None:
+        return Decimal("0")
+    qs = Receipt.objects.filter(client=client, change_due__gt=0)
+    if exclude is not None:
+        qs = qs.exclude(pk=exclude.pk)
+    return sum((r.change_due for r in qs), Decimal("0"))
+
+
+def _take_client_change(client, amount, *, exclude=None) -> Decimal:
+    """Погасить `amount` из сдачи клиента, начиная с самых старых заказов.
+
+    Сдача лежит НА ЗАКАЗАХ, а не общим балансом клиента: 1 500 по позавчерашней
+    вывеске и 200 по вчерашним визиткам — это две разные строки, и выдают их
+    тоже по заказам. Забираем с самого старого: он ждёт дольше всех.
+    """
+    left = Decimal(amount)
+    taken = Decimal("0")
+    qs = Receipt.objects.filter(client=client, change_due__gt=0).order_by("created_at", "id")
+    if exclude is not None:
+        qs = qs.exclude(pk=exclude.pk)
+    for source in qs.select_for_update():
+        if left <= 0:
+            break
+        part = min(source.change_due, left)
+        source.change_due -= part
+        source.save(update_fields=["change_due", "updated_at"])
+        left -= part
+        taken += part
+    return taken
+
+
 @transaction.atomic
 def create_sale(
     *, client, cashier, payment_method, items_data, amount_paid=None, title="",
-    created_at=None, pay_full=False,
+    created_at=None, pay_full=False, use_change=False,
 ) -> Receipt:
     """Create a receipt with its line items.
+
+    ``use_change=True`` — закрыть остаток заказа СДАЧЕЙ с прошлых заказов
+    клиента. Раньше сдача просто висела: клиент принёс 10 000 за заказ на 9 000,
+    мелочи в кассе не нашлось, и на следующем заказе эта тысяча в оплату не шла
+    никак — её приходилось сначала выдавать на руки, а потом принимать обратно.
+    Деньги при зачёте не двигаются (они с того раза лежат в кассе), поэтому в
+    кассовую книгу он не пишется — но остаётся виден в чеке отдельной строкой.
 
     ``pay_full=True`` — «заплатил ровно сколько вышло»: сумма чека известна
     только здесь, после сборки строк, и вызывающий её заранее назвать не может.
@@ -318,8 +358,17 @@ def create_sale(
         # 1500, принесли 3000, сдачи в кассе не было — 1500 остались у цеха, и
         # это его долг перед клиентом. Раньше здесь стоял `min(..., total)`, и
         # назавтра вспомнить, сколько за кем осталось, было нечем.
+        # «Вся сумма» при включённом зачёте — это ОСТАТОК после сдачи: кассир
+        # берёт с клиента 2 000 по заказу на 3 000, когда тысяча уже лежит у
+        # цеха с прошлого раза. Считает это сервер, а не касса: сумму чека знает
+        # только он, и расхождение округлений в сом оставляло фантомный долг.
+        offset = (
+            min(client_change_available(client, exclude=receipt), total)
+            if use_change and client is not None
+            else Decimal("0")
+        )
         if pay_full:
-            brought = total
+            brought = total - offset
         elif amount_paid is None:
             brought = Decimal("0")
         else:
@@ -335,6 +384,22 @@ def create_sale(
     else:
         _create_online_invoice(receipt)
 
+    # Зачёт сдачи — ПОСЛЕ обычной оплаты и только на остаток: клиент, который
+    # принёс всю сумму наличными, свою сдачу не тратит. Онлайн-счёт не трогаем:
+    # там оплату подтверждает шлюз.
+    if use_change and client is not None and payment_method != Receipt.PaymentMethod.ONLINE:
+        owed = total - receipt.amount_paid
+        if owed > 0:
+            applied = _take_client_change(client, owed, exclude=receipt)
+            if applied > 0:
+                receipt.amount_paid += applied
+                receipt.change_applied = applied
+                receipt.payment_status = (
+                    Receipt.PaymentStatus.PAID
+                    if receipt.amount_paid >= total
+                    else Receipt.PaymentStatus.PENDING
+                )
+
     receipt.save()
     # Деньги, принятые при оформлении, — приход в кассовую книгу. Датируем
     # ДАТОЙ ЗАКАЗА: заказ задним числом принёс деньги тогда же, а не сегодня.
@@ -343,7 +408,10 @@ def create_sale(
     # заказ на 36, принесли 100 — в ящике лежит 100, и 64 из них станут сдачей.
     # Списывается она при выдаче (`give_change`). Записывай мы сюда зачтённые 36,
     # выдача сдачи увела бы кассу в минус на ровном месте.
-    brought = receipt.amount_paid + receipt.change_due
+    #
+    # Зачтённая сдача сюда тоже НЕ идёт: эти деньги лежат в кассе с прошлого
+    # заказа, второй раз их не приносили.
+    brought = receipt.amount_paid - receipt.change_applied + receipt.change_due
     if brought > 0:
         cash.receipt_paid(
             receipt, brought, user=cashier,
@@ -791,6 +859,22 @@ def delete_receipt(receipt: Receipt, *, user=None) -> None:
     составом (см. ``receipt_summary``). Это ответственность администратора, у
     складовщика такой кнопки нет.
     """
+    # Сдача, зачтённая в этот заказ, возвращается клиенту: заказа не было,
+    # значит и тратить её было не на что. Кладём на самый свежий из его
+    # оставшихся заказов — выдают сдачу по заказу, и для выдачи важна сумма, а
+    # не то, на какой строке она числится. Не осталось ни одного заказа —
+    # возвращать некуда, и это видно в журнале действий вместе с удалением.
+    if receipt.change_applied > 0 and receipt.client_id:
+        host = (
+            Receipt.objects.filter(client_id=receipt.client_id)
+            .exclude(pk=receipt.pk)
+            .order_by("-created_at", "-id")
+            .first()
+        )
+        if host:
+            host.change_due += receipt.change_applied
+            host.save(update_fields=["change_due", "updated_at"])
+
     # Возвращаем только НЕвозвращённые строки: по возвращённым материал уже
     # вернулся на склад при возврате, второй раз его класть нельзя.
     for item in receipt.items.filter(is_returned=False):

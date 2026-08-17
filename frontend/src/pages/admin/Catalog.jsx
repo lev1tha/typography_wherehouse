@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
+import AdjustStockModal from "../../components/AdjustStockModal.jsx";
 import CatalogGrid from "../../components/CatalogGrid.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import GalleryModal from "../../components/GalleryModal.jsx";
@@ -138,6 +139,7 @@ export default function Catalog({ embedded = false }) {
   const [gallery, setGallery] = useState(null);
   const [editing, setEditing] = useState(null);
   const [receiving, setReceiving] = useState(null);
+  const [adjusting, setAdjusting] = useState(null);
   const [bulk, setBulk] = useState(false);
 
   function load() {
@@ -356,6 +358,16 @@ export default function Catalog({ embedded = false }) {
           >
             <Icon name="inbox" size={14} /> {t("supply.intake")}
           </button>
+          {/* Поправить остаток — рядом с приходом, а не в карточке материала:
+              «внесли 500 вместо 50» случается прямо здесь, и до сих пор
+              исправить это в интерфейсе было нечем. */}
+          <button
+            className="secondary row-btn"
+            onClick={() => setAdjusting(m)}
+            title={t("supply.inventory")}
+          >
+            <Icon name="clipboard" size={14} /> {t("warehouse.fixStock")}
+          </button>
           <button className="secondary row-btn" onClick={() => setEditing(m)}>
             <Icon name="pencil" size={14} /> {t("common.edit")}
           </button>
@@ -430,6 +442,14 @@ export default function Catalog({ embedded = false }) {
         <ReceiveStockModal
           material={receiving}
           onClose={() => setReceiving(null)}
+          onDone={load}
+        />
+      )}
+
+      {adjusting && (
+        <AdjustStockModal
+          material={adjusting}
+          onClose={() => setAdjusting(null)}
           onDone={load}
         />
       )}

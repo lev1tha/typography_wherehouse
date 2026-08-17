@@ -173,7 +173,8 @@
     "unitRoll": "roll",
     "stockValueTotal": "Stock value",
     "stockValueCol": "Value",
-    "tabSupplies": "Deliveries"
+    "tabSupplies": "Deliveries",
+    "fixStock": "Stock"
   },
   "unit": {
     "SQM": "sqm",
@@ -378,7 +379,11 @@
     "modeSideHint": "Straight cut: only one side — “Length” — counts as work. Price = material (area) + work (running m × rate).",
     "modeSqmHint": "Material by area only, no cutting work.",
     "sideAuto": "One side goes into the cut — “Length”: {{value}} running m",
-    "perPieceShort": "som/{{unit}}"
+    "perPieceShort": "som/{{unit}}",
+    "hasChange": "Client has change from earlier orders: {{sum}} som",
+    "changeApplied": "{{sum}} som will cover part of this order — {{left}} som left to pay.",
+    "changeKept": "The change stays with the client — hand it out from Receipts.",
+    "changeUsed": "Covered by change"
   },
   "receipts": {
     "title": "Receipts",
@@ -488,6 +493,7 @@
     "sheets": "Sheets count",
     "area": "Area",
     "batchCost": "Batch cost",
+    "unitCost": "Price per {{unit}}, som",
     "receiveRoll": "Receive roll",
     "rollCode": "Batch label",
     "rollArea": "Roll area, sqm",
@@ -503,7 +509,10 @@
     "priceWas": "was {{value}}",
     "priceUnchanged": "Empty — the purchase price stays as it is",
     "costPerSheet": "Cost, som/{{unit}}",
-    "intakeFormHint": "Form taken from the material — you can change it for this lot."
+    "intakeFormHint": "Form taken from the material — you can change it for this lot.",
+    "adjustHint": "Counted the stock and it differs from the system? Enter what is actually there. The difference is logged as an inventory adjustment.",
+    "adjustReasonPh": "e.g. recount, typo on entry (optional)",
+    "diff": "Difference"
   },
   "journal": {
     "title": "Journal",
@@ -664,26 +673,12 @@
     "cuttingByUserHint": "By whoever entered the order. There is no separate 'operator at the machine' field — if you need the actual cutter, it has to be picked at the till on every cut.",
     "cuttingUserPm": "{{pm}} running m of cut",
     "allExpensesTitle": "All spending for the period",
-    "allExpensesHint": "The whole history in one list: when, on what, and which report line it landed in. Entries are added in the blocks above, by clicking a line.",
+    "allExpensesHint": "The whole history in one list: when, what for and which report line it lands in. Manual expenses are added in the blocks above — click a row; material deliveries are counted automatically and are edited in Warehouse → Deliveries.",
     "revenuePaid": "Paid",
     "revenueDebt": "On credit",
     "revenueTitle": "Revenue for the period",
     "dailySubtitle": "Profit for each day of the month: the day's revenue minus that day's purchases and its share of the fixed costs. Green is a day in the black, red in the red.",
-    "companyTitle": "Company details for documents",
-    "coName": "Company name",
-    "coInn": "Tax ID",
-    "coAddress": "Address",
-    "coBank": "Bank",
-    "coAccount": "Account number",
-    "coBik": "BIC",
-    "coDirector": "Director",
-    "coAccountant": "Accountant",
-    "revenueHint": "Revenue is the sum of all orders of the period by order date, except cancelled ones. Whether an order is paid does not change revenue: unpaid orders are shown separately as “on credit”.",
-    "companyHint": "Header and signatures of the printed forms: sales receipt, delivery note and invoice. The invoice prints only when the bank and the account are filled in.",
-    "coNamePh": "LLC “…” or Sole proprietor Surname N.P.",
-    "coSignPh": "Surname N.P. — for the signature line",
-    "coNote": "Note on documents",
-    "coNotePh": "e.g. VAT exempt · invoice valid for 5 days"
+    "revenueHint": "Revenue is the sum of all orders of the period by order date, except cancelled ones. Whether an order is paid does not change revenue: unpaid orders are shown separately as “on credit”."
   },
   "expenses": {
     "amount": "Amount",
@@ -694,7 +689,9 @@
     "note": "Comment",
     "notePh": "optional",
     "subtitle": "Cutter, transport, equipment, workshop upgrades and other variable costs.",
-    "category": "Expense type"
+    "category": "Expense type",
+    "fromSupply": "delivery",
+    "supplyHint": "edited in Warehouse"
   },
   "myOrders": {
     "title": "My orders",
@@ -821,7 +818,6 @@
     "print": "Print",
     "docCheck": "Sales receipt",
     "docWaybill": "Delivery note",
-    "docInvoice": "Invoice",
     "actTitle": "Reconciliation act",
     "docSupply": "Goods received note",
     "acceptedBy": "Received by",
@@ -839,18 +835,11 @@
     "debt": "Debt",
     "supplier": "Supplier",
     "receiver": "Receiver",
-    "receiverShort": "Receiver",
-    "payer": "Payer",
     "basis": "Basis",
-    "bank": "Beneficiary bank",
-    "account": "Account",
-    "bik": "BIC",
     "seller": "Seller",
     "buyer": "Buyer",
     "handedOver": "Released by",
     "received": "Received by",
-    "director": "Director",
-    "accountant": "Accountant",
     "released": "Total released",
     "totalNames": "Total items",
     "forSum": "for the amount of",
@@ -858,9 +847,6 @@
     "nameFew": "items",
     "nameMany": "items",
     "buyerWalkIn": "Walk-in customer",
-    "noName": "Organisation not specified",
-    "noRequisites": "Company details are not filled in — the document prints without a header. Fill them in: Finance → “Details for documents”.",
-    "needBank": "An invoice needs a bank and an account — fill them in under Finance",
     "actHeading": "Reconciliation statement",
     "actPeriod": "for the period",
     "actIntro": "We, the undersigned, have drawn up this statement confirming that the state of mutual settlements according to the accounting records is as follows:",

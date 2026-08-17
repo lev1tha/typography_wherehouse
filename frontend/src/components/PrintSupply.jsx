@@ -1,7 +1,5 @@
-import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import api from "../api/api.js";
 import Icon from "./Icon.jsx";
 import PrintHost from "./PrintHost.jsx";
 import amountInWords, { plural } from "../utils/amountInWords.js";
@@ -21,13 +19,6 @@ const day = (iso) => (iso ? new Date(iso).toLocaleDateString("ru-RU") : "");
 export default function PrintSupply({ supply, onClose }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.resolvedLanguage;
-  const [company, setCompany] = useState(null);
-
-  useEffect(() => {
-    api.get("/finance/company/").then((r) => setCompany(r.data)).catch(() => setCompany({}));
-  }, []);
-
-  if (!company) return null;
 
   const lines = supply.lines || [];
   const total = Number(supply.total_cost || 0);
@@ -55,19 +46,10 @@ export default function PrintSupply({ supply, onClose }) {
           </button>
         </div>
 
+        {/* Шапки с реквизитами цеха здесь больше нет: заказчик убрал реквизиты
+            из системы совсем. Лист остаётся рабочим — поставщик, позиции,
+            сверка с бумагой и подписи, — просто без «шапки организации». */}
         <div className="print-sheet">
-          <div className="doc-org">
-            <strong>{company.name || t("print.noName")}</strong>
-            {[company.inn && `${t("print.inn")} ${company.inn}`, company.address, company.phone && `${t("print.tel")} ${company.phone}`]
-              .filter(Boolean).length > 0 && (
-              <div>
-                {[company.inn && `${t("print.inn")} ${company.inn}`, company.address, company.phone && `${t("print.tel")} ${company.phone}`]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </div>
-            )}
-          </div>
-
           <h2 className="doc-title">
             {t("print.docHead", {
               title: t("print.docSupply"),
@@ -78,9 +60,6 @@ export default function PrintSupply({ supply, onClose }) {
 
           <p className="doc-line">
             <b>{t("print.supplier")}:</b> {supplierLine || "—"}
-          </p>
-          <p className="doc-line">
-            <b>{t("print.receiver")}:</b> {company.name || "—"}
           </p>
           {supply.note && (
             <p className="doc-line"><b>{t("supplies.note")}:</b> {supply.note}</p>

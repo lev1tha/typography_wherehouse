@@ -99,6 +99,12 @@ export default function Checkout() {
   const [orderDate, setOrderDate] = useState(todayStr);
   const [client, setClient] = useState({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" });
   const [clientId, setClientId] = useState(null);
+  // Невыданная сдача выбранного клиента и решение кассира: зачесть её в этот
+  // заказ или нет. Раньше сдача просто лежала на прошлом чеке и в новом заказе
+  // не участвовала никак — её приходилось выдавать на руки и тут же принимать
+  // обратно. По умолчанию зачитываем: это то, чего ждёт и клиент, и касса.
+  const [clientChange, setClientChange] = useState(0);
+  const [useChange, setUseChange] = useState(true);
   const [referredBy, setReferredBy] = useState("");
   const [clientsList, setClientsList] = useState([]);
   const [matches, setMatches] = useState([]);
@@ -121,6 +127,20 @@ export default function Checkout() {
     // работы назывались одинаково, а не «вывеска», «Вывеска», «вывеска2».
     api.get("/sales/receipts/titles/").then((r) => setTitleHints(r.data)).catch(() => {});
   }, []);
+
+  // Сдача выбранного клиента. Спрашиваем сервер, а не берём из списка: клиент
+  // мог получить её на руки в соседнем окне, а список в кассе живёт до
+  // перезагрузки страницы.
+  useEffect(() => {
+    if (!clientId) {
+      setClientChange(0);
+      return;
+    }
+    api
+      .get(`/clients/clients/${clientId}/`)
+      .then((r) => setClientChange(Number(r.data.change_due) || 0))
+      .catch(() => setClientChange(0));
+  }, [clientId]);
 
   useEffect(() => {
     // Живой поиск клиента по ИМЕНИ (ФИО или название компании), не по телефону.
@@ -204,6 +224,11 @@ export default function Checkout() {
   });
 
   const total = useMemo(() => cart.reduce((s, l) => s + lineTotal(l), 0), [cart]);
+  // Сколько сдачи уйдёт в этот заказ и сколько после этого брать деньгами.
+  // Сдача не может закрыть больше, чем стоит заказ: остаток так и лежит
+  // сдачей — «зачли 1 500 из 4 000» это нормальная ситуация, а не ошибка.
+  const appliedChange = useChange && clientChange > 0 ? Math.min(clientChange, total) : 0;
+  const toPay = Math.max(0, total - appliedChange);
 
   // Remaining stock shown on EVERY material card during a sale: quantity in its
   // unit, plus ≈ whole sheets when the material has a sheet area. Null for services.
@@ -434,6 +459,9 @@ export default function Checkout() {
     if (paymentMethod !== "ONLINE") {
       if (payFull) payload.pay_full = true;
       else payload.amount_paid = Math.max(0, Number(prepay) || 0);
+      // Зачесть сдачу решает касса, а СКОЛЬКО зачесть — сервер: сдача могла
+      // измениться, пока чек собирали, и своё число касса бы не угадала.
+      if (useChange && clientChange > 0) payload.use_change = true;
     }
     if (clientId) payload.client_id = clientId;
     else if (client.phone)
@@ -444,6 +472,8 @@ export default function Checkout() {
       setCart([]);
       setClient({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" });
       setClientId(null);
+      setClientChange(0);
+      setUseChange(true);
       setReferredBy("");
       setPrepay("");
       setPayFull(false);
@@ -720,6 +750,37 @@ export default function Checkout() {
             ))}
           </div>
 
+          {/* Сдача клиента с прошлых заказов. Деньги уже у цеха — незачем
+              выдавать их из ящика, чтобы тут же принять обратно: галочка
+              закрывает ими новый заказ, и «к оплате» сразу становится меньше.
+              Снял галочку — сдача остаётся лежать, её выдают в «Чеках». */}
+          {paymentMethod !== "ONLINE" && clientChange > 0 && total > 0 && (
+            <div
+              className="card"
+              style={{ background: "var(--primary-soft)", padding: 10, marginTop: 10 }}
+            >
+              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={useChange}
+                  onChange={(e) => setUseChange(e.target.checked)}
+                  style={{ width: 18, height: 18, marginTop: 2 }}
+                />
+                <span style={{ fontSize: 13 }}>
+                  {t("checkout.hasChange", { sum: clientChange.toLocaleString("ru-RU") })}
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    {useChange
+                      ? t("checkout.changeApplied", {
+                          sum: appliedChange.toLocaleString("ru-RU"),
+                          left: toPay.toLocaleString("ru-RU"),
+                        })
+                      : t("checkout.changeKept")}
+                  </div>
+                </span>
+              </label>
+            </div>
+          )}
+
           {paymentMethod !== "ONLINE" && (
             <div className="field" style={{ marginTop: 10 }}>
               <label>{t("checkout.prepay")}</label>
@@ -727,7 +788,7 @@ export default function Checkout() {
                 <input
                   type="number"
                   min="0"
-                  value={payFull ? String(total.toFixed(0)) : prepay}
+                  value={payFull ? String(toPay.toFixed(0)) : prepay}
                   onChange={(e) => {
                     setPayFull(false);
                     setPrepay(e.target.value);
@@ -752,11 +813,14 @@ export default function Checkout() {
               <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
                 {t("checkout.prepayHint")}
               </p>
-              {!payFull && Number(prepay || 0) < total && (
+              {/* Долг и сдача считаются от суммы ПОСЛЕ зачёта: заказ на 3 000
+                  с зачтённой тысячей и внесёнными 2 000 — это оплаченный
+                  заказ, а не долг в тысячу. */}
+              {!payFull && Number(prepay || 0) < toPay && (
                 <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
                   {t("receipts.debt")}:{" "}
                   <strong style={{ color: "var(--danger)" }}>
-                    {(total - Number(prepay || 0)).toFixed(0)} сом
+                    {(toPay - Number(prepay || 0)).toFixed(0)} сом
                   </strong>
                 </div>
               )}
@@ -764,11 +828,11 @@ export default function Checkout() {
                   клиентом. Отдали на месте — нажать «Выдать» в Чеках, и она
                   спишется; не отдали (в кассе не было мелочи) — останется
                   видна, пока не отдадут. */}
-              {!payFull && Number(prepay || 0) > total && total > 0 && (
+              {!payFull && Number(prepay || 0) > toPay && total > 0 && (
                 <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
                   {t("checkout.change")}:{" "}
                   <strong style={{ color: "var(--accent-strong)" }}>
-                    {(Number(prepay) - total).toFixed(0)} сом
+                    {(Number(prepay) - toPay).toFixed(0)} сом
                   </strong>
                   <div style={{ fontSize: 12 }}>{t("checkout.changeHint")}</div>
                 </div>
@@ -1057,6 +1121,14 @@ export default function Checkout() {
           </div>
           {Number(receipt.amount_paid) > 0 && (
             <div className="crow"><span className="k">{t("print.paid")}</span><span>{somFmt(receipt.amount_paid)}</span></div>
+          )}
+          {/* Отдельной строкой: иначе «оплачено 3 000» по заказу, за который
+              принесли 2 000, выглядит как ошибка кассы. */}
+          {Number(receipt.change_applied) > 0 && (
+            <div className="crow">
+              <span className="k">{t("checkout.changeUsed")}</span>
+              <span>{somFmt(receipt.change_applied)}</span>
+            </div>
           )}
           {Number(receipt.change_due) > 0 && (
             <div className="crow">

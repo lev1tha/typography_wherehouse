@@ -6,11 +6,16 @@ import Icon from "./Icon.jsx";
 import PrintHost from "./PrintHost.jsx";
 import amountInWords, { plural } from "../utils/amountInWords.js";
 
-// Печатные формы заказа: товарный чек, накладная, счёт на оплату.
+// Печатные формы заказа: товарный чек и накладная.
 //
 // Заказчик пришёл из 1С, где печатная форма есть у каждого документа. Здесь её
-// не было вообще — ни одной, — и юрлицу нечего было отдать: без счёта оно не
-// заплатит, без накладной не примет товар.
+// не было вообще — ни одной, — и юрлицу нечего было отдать: без накладной оно
+// не примет товар.
+//
+// СЧЁТА НА ОПЛАТУ здесь больше нет: он состоял из реквизитов организации
+// (банк, расчётный счёт, БИК, подписи), а реквизиты заказчик из системы убрал.
+// Счёт без банка — лист, по которому некуда платить, поэтому вкладка убрана
+// целиком, а не оставлена пустой.
 //
 // Печатаем БРАУЗЕРОМ (`window.print`), без серверной генерации PDF: то же окно
 // печати умеет «Сохранить как PDF», а нам не нужны ни шрифты на сервере, ни
@@ -21,7 +26,7 @@ const money = (n) => Number(n || 0).toLocaleString("ru-RU", { minimumFractionDig
 const qty = (n) => Number(n || 0).toLocaleString("ru-RU", { maximumFractionDigits: 3 });
 const day = (iso) => (iso ? new Date(iso).toLocaleDateString("ru-RU") : "");
 
-const DOCS = ["CHECK", "WAYBILL", "INVOICE"];
+const DOCS = ["CHECK", "WAYBILL"];
 
 /** Строка «Покупатель» — как её пишут в документе. */
 function buyerLine(client, t) {
@@ -30,17 +35,6 @@ function buyerLine(client, t) {
   if (client.inn) parts.push(`${t("print.inn")} ${client.inn}`);
   if (client.phone) parts.push(`${t("print.tel")} ${client.phone}`);
   return parts.filter(Boolean).join(", ");
-}
-
-/** Реквизиты цеха одной строкой под названием. */
-function companyLine(company, t) {
-  return [
-    company.inn && `${t("print.inn")} ${company.inn}`,
-    company.address,
-    company.phone && `${t("print.tel")} ${company.phone}`,
-  ]
-    .filter(Boolean)
-    .join(" · ");
 }
 
 function ItemsTable({ items, t }) {
@@ -111,11 +105,9 @@ export default function PrintDocs({ receipt, onClose }) {
   // прописью на одном языке, а не «SALES RECEIPT № 2 ОТ 16.08.2026».
   const lang = i18n.resolvedLanguage;
   const [kind, setKind] = useState("CHECK");
-  const [company, setCompany] = useState(null);
   const [client, setClient] = useState(null);
 
   useEffect(() => {
-    api.get("/finance/company/").then((r) => setCompany(r.data)).catch(() => setCompany({}));
     if (receipt.client) {
       api
         .get(`/clients/clients/${receipt.client}/`)
@@ -137,22 +129,10 @@ export default function PrintDocs({ receipt, onClose }) {
     t("print.nameOne"), t("print.nameFew"), t("print.nameMany"),
   ]);
 
-  if (!company) return null;
-
-  const hasRequisites = !!(company.name || company.inn || company.address);
-  // Счёт без банка бесполезен: платить по нему некуда.
-  const invoiceReady = company.has_bank;
-
   const head = (title) => (
-    <>
-      <div className="doc-org">
-        <strong>{company.name || t("print.noName")}</strong>
-        {companyLine(company, t) && <div>{companyLine(company, t)}</div>}
-      </div>
-      <h2 className="doc-title">
-        {t("print.docHead", { title, number, date })}
-      </h2>
-    </>
+    <h2 className="doc-title">
+      {t("print.docHead", { title, number, date })}
+    </h2>
   );
 
   return (
@@ -171,26 +151,12 @@ export default function PrintDocs({ receipt, onClose }) {
               <button
                 key={d}
                 className={kind === d ? "active" : ""}
-                disabled={d === "INVOICE" && !invoiceReady}
-                title={d === "INVOICE" && !invoiceReady ? t("print.needBank") : undefined}
                 onClick={() => setKind(d)}
               >
                 {t(`print.doc${d[0]}${d.slice(1).toLowerCase()}`)}
               </button>
             ))}
           </div>
-          {!hasRequisites && (
-            <p className="muted" style={{ fontSize: 13, margin: "10px 0 0" }}>
-              {t("print.noRequisites")}
-            </p>
-          )}
-          {/* Почему счёт выключен — словами под вкладками, а не только во
-              всплывающей подсказке при наведении: её никто не находил. */}
-          {!invoiceReady && (
-            <p className="muted" style={{ fontSize: 13, margin: "6px 0 0", color: "var(--warn-ink)" }}>
-              {t("print.needBank")}
-            </p>
-          )}
         </div>
 
         {/* Лист А4: ровно то, что уйдёт на бумагу. */}
@@ -223,7 +189,6 @@ export default function PrintDocs({ receipt, onClose }) {
           {kind === "WAYBILL" && (
             <>
               {head(t("print.docWaybill"))}
-              <p className="doc-line"><b>{t("print.supplier")}:</b> {company.name || "—"}{companyLine(company, t) ? `, ${companyLine(company, t)}` : ""}</p>
               <p className="doc-line"><b>{t("print.receiver")}:</b> {buyerLine(client, t)}</p>
               {receipt.title && <p className="doc-line"><b>{t("print.basis")}:</b> {receipt.title}</p>}
               <ItemsTable items={items} t={t} />
@@ -236,51 +201,6 @@ export default function PrintDocs({ receipt, onClose }) {
               <SignRow
                 left={t("print.handedOver")}
                 right={t("print.received")}
-                leftName={company.director}
-              />
-            </>
-          )}
-
-          {kind === "INVOICE" && (
-            <>
-              {head(t("print.docInvoice"))}
-              <table className="doc-bank">
-                <tbody>
-                  <tr>
-                    <td>{t("print.bank")}</td>
-                    <td>{company.bank_name}</td>
-                  </tr>
-                  <tr>
-                    <td>{t("print.account")}</td>
-                    <td>{company.bank_account}</td>
-                  </tr>
-                  {company.bik && (
-                    <tr>
-                      <td>{t("print.bik")}</td>
-                      <td>{company.bik}</td>
-                    </tr>
-                  )}
-                  <tr>
-                    <td>{t("print.receiverShort")}</td>
-                    <td>{company.name}{company.inn ? `, ${t("print.inn")} ${company.inn}` : ""}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <p className="doc-line"><b>{t("print.payer")}:</b> {buyerLine(client, t)}</p>
-              {receipt.title && <p className="doc-line"><b>{t("print.basis")}:</b> {receipt.title}</p>}
-              <ItemsTable items={items} t={t} />
-              <TotalBlock
-                total={total}
-                t={t}
-                lang={lang}
-                summary={`${t("print.totalNames")}: ${items.length}, ${t("print.forSum")} ${money(total)} ${t("print.currency")}`}
-              />
-              {company.note && <p className="doc-note">{company.note}</p>}
-              <SignRow
-                left={t("print.director")}
-                right={t("print.accountant")}
-                leftName={company.director}
-                rightName={company.accountant}
               />
             </>
           )}

@@ -319,6 +319,15 @@ export default function StoreReceipts() {
               <span>{som(open.amount_paid)}</span>
             </div>
           )}
+          {/* Часть заказа, закрытая сдачей с прошлых: без этой строки
+              «оплачено 3 000» по заказу, за который принесли 2 000, выглядит
+              как ошибка кассы. */}
+          {Number(open.change_applied) > 0 && (
+            <div className="crow">
+              <span className="k">{t("checkout.changeUsed")}</span>
+              <span>{som(open.change_applied)}</span>
+            </div>
+          )}
           {Number(open.change_due) > 0 && (
             <div className="crow">
               <span className="k">{t("receipts.change")}</span>

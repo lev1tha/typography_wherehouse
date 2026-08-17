@@ -390,6 +390,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 items_data=data["items"],
                 amount_paid=data.get("amount_paid"),
                 pay_full=bool(data.get("pay_full")),
+                use_change=bool(data.get("use_change")),
                 title=data.get("title", ""),
                 created_at=day_to_moment(order_date),
             )

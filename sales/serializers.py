@@ -132,6 +132,8 @@ class ReceiptSerializer(serializers.ModelSerializer):
             "debt",
             # Сдача, которую клиенту ещё не отдали — долг цеха перед ним.
             "change_due",
+            # Часть заказа, закрытая сдачей с прошлых заказов этого клиента.
+            "change_applied",
             "payment_reference",
             "payment_url",
             "payment_qr",
@@ -234,6 +236,10 @@ class SaleCreateSerializer(serializers.Serializer):
     # 978 там, где сервер насчитал 979, и полностью оплаченный заказ повисал с
     # долгом в сом. Флаг важнее `amount_paid`.
     pay_full = serializers.BooleanField(required=False, default=False)
+    # «Зачесть сдачу»: остаток заказа закрывается сдачей с прошлых заказов этого
+    # же клиента. Деньги за неё уже в кассе, поэтому она и не входит в
+    # `amount_paid`, который присылает касса.
+    use_change = serializers.BooleanField(required=False, default=False)
     # Дата заказа задним числом. Не указана — «сейчас». Право проверяет вьюха:
     # по этой дате считается вся отчётность, ставить её в прошлое может админ.
     order_date = serializers.DateField(required=False, allow_null=True)

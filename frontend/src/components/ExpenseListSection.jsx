@@ -30,28 +30,33 @@ function Stat({ label, value }) {
 // ДОБАВЛЕНИЯ здесь тоже нет: форма «вид расхода · за что · дата · сумма»
 // повторяла диалог строки отчёта, только хуже — вид приходилось выбирать
 // руками, и не было видно, куда трата попадёт. Правка и удаление остались.
+//
+// Лента идёт с `/expense-entries/feed/`, а не из голых записей трат: закуп
+// материала система считает сама по приходам на склад, записью траты он не
+// становится никогда. Пока список читал только записи, у заказчика он был пуст
+// ВСЕГДА — все его траты это приходы материала, — а в отчёте сверху при этом
+// стояло «Расходы 25 000». Приход в ленте справочный: правят его на Складе.
 export default function ExpenseListSection({ title, subtitle, kinds, period, onChanged }) {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
   const [rows, setRows] = useState([]);
+  const [total, setTotal] = useState(0);
   const [editing, setEditing] = useState(null);
 
-  const kindIds = kinds.map((k) => k.id);
   const kindById = Object.fromEntries(kinds.map((k) => [k.id, k]));
   const isSalary = (kindId) => kindById[kindId]?.code === "SALARY";
 
   function load() {
-    if (!kindIds.length) return setRows([]);
     api
-      .get("/finance/expense-entries/", { params: period || {} })
+      .get("/finance/expense-entries/feed/", { params: period || {} })
       .then((r) => {
-        const all = r.data.results || r.data;
-        setRows(all.filter((x) => kindIds.includes(x.kind)));
+        setRows(r.data.results || []);
+        setTotal(Number(r.data.total) || 0);
       })
       .catch(() => toast(t("common.error"), "error"));
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(load, [period?.date_from, period?.date_to, kindIds.join(",")]);
+  useEffect(load, [period?.date_from, period?.date_to]);
 
   function saveEdit() {
     if (!editing.amount) return toast(t("expenses.needAmount"), "error");
@@ -80,35 +85,44 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, onC
       .catch(() => toast(t("common.error"), "error"));
   }
 
-  const total = rows.reduce((s, r) => s + Number(r.amount || 0), 0);
-
   const columns = [
     { key: "spent_at", label: t("expenses.date") },
     { key: "kind", label: t("expenses.category"), render: (r) => r.kind_name },
     {
       key: "name",
       label: t("fixed.forWhat"),
-      render: (r) => r.name || "—",
+      render: (r) => (
+        <>
+          {r.name || "—"}
+          {/* Откуда строка взялась: приход посчитан системой, и правится он
+              не здесь, а на складе. Без пометки две одинаковые с виду строки
+              вели бы себя по-разному без объяснения. */}
+          {r.source === "SUPPLY" && (
+            <span className="chip" style={{ marginLeft: 6 }}>{t("expenses.fromSupply")}</span>
+          )}
+        </>
+      ),
     },
     { key: "note", label: t("expenses.note"), render: (r) => (r.note ? <span className="muted">{r.note}</span> : "—") },
     { key: "amount", label: t("expenses.amount"), render: (r) => som(r.amount) },
     {
       key: "actions",
       label: "",
-      render: (r) => (
-        <div className="row" style={{ gap: 4, margin: 0 }}>
-          <button className="ghost" onClick={() => setEditing({ ...r })} aria-label={t("common.edit")}>
-            <Icon name="pencil" size={16} />
-          </button>
-          <button className="ghost" onClick={() => del(r.id)} aria-label={t("common.delete")}>
-            <Icon name="trash" size={16} />
-          </button>
-        </div>
-      ),
+      render: (r) =>
+        r.source === "SUPPLY" ? (
+          <span className="muted" style={{ fontSize: 12 }}>{t("expenses.supplyHint")}</span>
+        ) : (
+          <div className="row" style={{ gap: 4, margin: 0 }}>
+            <button className="ghost" onClick={() => setEditing({ ...r })} aria-label={t("common.edit")}>
+              <Icon name="pencil" size={16} />
+            </button>
+            <button className="ghost" onClick={() => del(r.id)} aria-label={t("common.delete")}>
+              <Icon name="trash" size={16} />
+            </button>
+          </div>
+        ),
     },
   ];
-
-  if (!kinds.length) return null;
 
   const kindSelect = (value, onChange) => (
     <select value={value} onChange={(e) => onChange(Number(e.target.value))}>
@@ -131,7 +145,9 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, onC
           <strong>{som(total)}</strong>
         </div>
       )}
-      <DataTable columns={columns} rows={rows} />
+      {/* Ключ строки — `key` из ленты, а не id: у ручной траты и у накладной
+          свои нумерации, и id=1 в ленте встречается дважды. */}
+      <DataTable columns={columns} rows={rows} rowKey="key" />
 
       {editing && (
         <Modal
