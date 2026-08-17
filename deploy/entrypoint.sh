@@ -42,6 +42,12 @@ done
 echo "→ Миграции…"
 python manage.py migrate --noinput
 
+# Таблица кеша: в ней живут счётчики попыток входа. Кеш общий на все три
+# воркера gunicorn — в памяти процесса счётчик был бы у каждого свой, и предел
+# попыток по факту утроился бы. Команда идемпотентна.
+echo "→ Таблица кеша…"
+python manage.py createcachetable
+
 echo "→ Статика Django (admin и т.п.)…"
 python manage.py collectstatic --noinput
 

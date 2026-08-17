@@ -73,15 +73,29 @@ export default function Cash() {
     });
   }
 
-  async function saveEntry() {
+  async function saveEntry(confirmNegative = false) {
     if (!(Number(entry.amount) > 0)) return toast(t("cash.needAmount"), "error");
     setBusy(true);
     try {
-      await api.post("/finance/cash/", { ...entry, amount: Number(entry.amount) });
+      await api.post("/finance/cash/", {
+        ...entry,
+        amount: Number(entry.amount),
+        ...(confirmNegative ? { confirm_negative: true } : {}),
+      });
       setEntry(null);
       load();
       toast(t("common.saved"));
     } catch (e) {
+      // Выдача больше остатка — почти всегда лишний ноль или не тот счёт,
+      // поэтому сервер сперва переспрашивает. Но кассу вносят и не по порядку
+      // (расходы за неделю сегодня, приходы завтра), так что это вопрос, а не
+      // запрет: подтвердил — записали как есть.
+      const short = e.response?.data?.confirm_negative;
+      if (short && !confirmNegative) {
+        setBusy(false);
+        if (await confirm(String(short))) return saveEntry(true);
+        return;
+      }
       toast(apiError(e, t("common.error")), "error");
     } finally {
       setBusy(false);
@@ -234,7 +248,7 @@ export default function Cash() {
           footer={
             <>
               <button className="secondary" onClick={() => setEntry(null)}>{t("common.cancel")}</button>
-              <button onClick={saveEntry} disabled={busy}>{t("common.save")}</button>
+              <button onClick={() => saveEntry()} disabled={busy}>{t("common.save")}</button>
             </>
           }
         >

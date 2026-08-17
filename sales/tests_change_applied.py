@@ -20,6 +20,8 @@ from sales.sale_service import (
     create_sale,
     delete_receipt,
     give_change,
+    refund_receipt,
+    update_receipt_items,
 )
 from warehouse.models import Material
 
@@ -172,6 +174,40 @@ class ChangeAppliedTests(APITestCase):
         second = self._sale(qty=30, use_change=True)
         self.assertEqual(second.change_applied, Decimal("0"))
         self.assertEqual(second.debt, Decimal("3000"))
+
+    def test_refund_of_an_offset_order_returns_the_money_once(self):
+        """Заказ закрыт зачётом и возвращён: клиенту отдают ровно его сумму.
+
+        Деньгами он за этот заказ не платил, но его сдача на него ушла — значит
+        цех снова должен ему ровно столько же, и отдаёт это из кассы один раз.
+        """
+        first = self._sale(qty=90, paid=Decimal("10000"))    # сдачи 1000
+        second = self._sale(qty=10, use_change=True)         # 1000 целиком зачётом
+        self.assertEqual(second.change_applied, Decimal("1000"))
+
+        refund_receipt(second, user=self.admin)
+        second.refresh_from_db()
+        self.assertEqual(second.payment_status, Receipt.PaymentStatus.REFUNDED)
+        out = sum(
+            (e.amount for e in CashEntry.objects.filter(article=CashEntry.Article.REFUND)),
+            Decimal("0"),
+        )
+        self.assertEqual(out, Decimal("1000"))
+        # Касса сходится: пришло 10 000, ушло 1 000.
+        self.assertEqual(self._cash_in() - out, Decimal("9000"))
+
+    def test_editing_an_offset_order_down_turns_the_excess_into_change(self):
+        """Заказ уменьшили после зачёта — лишнее снова становится сдачей."""
+        first = self._sale(qty=90, paid=Decimal("10000"))    # сдачи 1000
+        second = self._sale(qty=10, use_change=True)         # 1000 зачётом
+        line = second.items.first()
+        update_receipt_items(second, [{"id": line.id, "quantity": "4"}], user=self.admin)
+        second.refresh_from_db()
+        self.assertEqual(second.total_price, Decimal("400"))
+        self.assertEqual(second.amount_paid, Decimal("400"))
+        self.assertEqual(second.change_due, Decimal("600"))
+        # Сдача никуда не пропала: 600 вернулись клиенту тем же долгом цеха.
+        self.assertEqual(client_change_available(self.client_obj), Decimal("600"))
 
     def test_walk_in_client_has_nothing_to_offset(self):
         """Заказ без клиента: чужую сдачу зачесть нельзя, падать тоже нельзя."""

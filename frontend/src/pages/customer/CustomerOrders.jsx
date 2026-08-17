@@ -24,6 +24,10 @@ export default function CustomerOrders() {
   if (orders === null) return <p className="muted">{t("common.loading")}</p>;
 
   const totalDebt = orders.reduce((s, o) => s + Number(o.debt), 0);
+  // Сдача, которую цех клиенту ещё не отдал. Кабинет показывал только его долг
+  // перед цехом — а обратной стороны не было вовсе, хотя эта сдача идёт в
+  // оплату его следующего заказа.
+  const totalChange = orders.reduce((s, o) => s + Number(o.change_due || 0), 0);
 
   return (
     <>
@@ -47,6 +51,15 @@ export default function CustomerOrders() {
             <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{t("myOrders.debtHint")}</div>
           )}
         </div>
+        {/* Плитка появляется, только когда сдача есть: пустая строка «0 сом»
+            рядом с долгом ничего не объясняет и лишь занимает экран. */}
+        {totalChange > 0 && (
+          <div className="stat">
+            <div className="label">{t("myOrders.changeDue")}</div>
+            <div className="value" style={{ color: "var(--accent-strong)" }}>{som(totalChange)}</div>
+            <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{t("myOrders.changeHint")}</div>
+          </div>
+        )}
       </div>
 
       {totalDebt > 0 && (

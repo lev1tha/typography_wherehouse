@@ -280,7 +280,10 @@ export default function Supplies({ embedded = false }) {
           <div className="crow"><span className="k">{t("supplies.paidTo")}</span><span>{som(open.paid_amount)}</span></div>
           <div className="crow"><span className="k">{t("supplies.debt")}</span><strong style={Number(open.debt) > 0 ? { color: "var(--danger)" } : undefined}>{som(open.debt)}</strong></div>
 
-          <table className="table plain-table" style={{ marginTop: 14 }}>
+          {/* Пять колонок на телефон не влезают — прокручиваем таблицу, а не
+              выталкиваем за экран саму модалку. */}
+          <div className="table-scroll" style={{ marginTop: 14 }}>
+          <table className="table plain-table">
             <thead>
               <tr>
                 <th>{t("common.name")}</th>
@@ -302,6 +305,7 @@ export default function Supplies({ embedded = false }) {
               ))}
             </tbody>
           </table>
+          </div>
           <p className="muted" style={{ fontSize: 12, marginTop: 10 }}>
             {t("supplies.editHint")}
           </p>
@@ -368,7 +372,7 @@ export default function Supplies({ embedded = false }) {
                 {draft.lines.map((l, i) => {
                   const m = matById[String(l.material)];
                   const qty = lineQuantity(l, m);
-                  const unit = !m ? "" : !m.is_roll_material || l.form === "QTY" ? t(`unit.${m.unit}`) : "кв.м";
+                  const unit = !m ? "" : !m.is_roll_material || l.form === "QTY" ? t(`unit.${m.unit}`) : t("unit.SQM");
                   return (
                     <tr key={i}>
                       <td>

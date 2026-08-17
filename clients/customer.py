@@ -11,6 +11,8 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.tokens import AccessToken
 
+from accounts.throttling import CustomerLoginThrottle, LoginAccountThrottle
+from accounts.views import throttled_response
 from sales.models import Receipt
 
 from .models import Client
@@ -98,6 +100,10 @@ class CustomerOrderSerializer(serializers.ModelSerializer):
             "total_price",
             "amount_paid",
             "debt",
+            # Сдача, которую цех клиенту ещё не отдал. В кабинете её не было
+            # вовсе: он видел, сколько должен ОН, но не видел, сколько должны
+            # ЕМУ, — при том что эта сдача идёт в оплату его следующего заказа.
+            "change_due",
             "status",
             "items",
         ]
@@ -131,6 +137,14 @@ class CustomerLoginView(APIView):
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    # Пароль кабинета выдаёт админ, он короткий, а портал открыт на публичном
+    # домене — без предела попыток его подбирают перебором. Считаем и по
+    # адресу, и по самому номеру: перебор одного клиента с разных адресов иначе
+    # не ловится вовсе.
+    throttle_classes = [CustomerLoginThrottle, LoginAccountThrottle]
+
+    def throttled(self, request, wait):
+        raise throttled_response(wait)
 
     def post(self, request):
         phone = _digits(request.data.get("phone"))

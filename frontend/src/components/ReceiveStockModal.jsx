@@ -174,7 +174,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
             <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
               {t("supply.currentPrice")}:{" "}
               {perSheet(oldPerSqm) ? `${money(perSheet(oldPerSqm))} ${t("warehouse.perUnitShort", { unit: wholeUnit })} · ` : ""}
-              {money(oldPerSqm)} сом/кв.м
+              {money(oldPerSqm)} {t("warehouse.perUnitShort", { unit: t("unit.SQM") })}
             </p>
           )}
         </div>
@@ -210,13 +210,13 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
         <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
           {roll && (
             <>
-              <div className="crow"><span className="k">{t("supply.area")}</span><strong>{area.toFixed(2)} кв.м</strong></div>
+              <div className="crow"><span className="k">{t("supply.area")}</span><strong>{area.toFixed(2)} {t("unit.SQM")}</strong></div>
               {costPerSqm && (
                 <>
                   <div className="crow">
                     <span className="k">{t("supply.costPerSqm")}</span>
                     <strong>
-                      {costPerSqm} сом/кв.м
+                      {costPerSqm} {t("warehouse.perUnitShort", { unit: t("unit.SQM") })}
                       {/* Насколько подорожал или подешевел этот приход. */}
                       {oldPerSqm > 0 && (
                         <span className="muted" style={{ fontWeight: 400 }}>
@@ -246,7 +246,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           )}
           <div className="crow">
             <span className="k">{t("supply.becomes")}</span>
-            <strong>{cur} → {(cur + added).toFixed(2)} {roll ? "кв.м" : unit}</strong>
+            <strong>{cur} → {(cur + added).toFixed(2)} {roll ? t("unit.SQM") : unit}</strong>
           </div>
         </div>
       )}

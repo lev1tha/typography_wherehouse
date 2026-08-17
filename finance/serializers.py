@@ -1,3 +1,6 @@
+from decimal import Decimal
+
+from django.utils import timezone
 from rest_framework import serializers
 
 from .models import (
@@ -130,6 +133,7 @@ class CashEntrySerializer(serializers.ModelSerializer):
             "article", "article_display", "amount", "happened_on", "note",
             "receipt", "order_number", "supply", "is_auto",
             "created_by", "created_by_name", "created_at",
+            "confirm_negative",
         ]
         read_only_fields = ["is_auto", "created_by", "created_at"]
 
@@ -152,6 +156,44 @@ class CashEntrySerializer(serializers.ModelSerializer):
                 "Эту статью система пишет сама — по оплатам, сдаче и возвратам."
             )
         return value
+
+    def validate_happened_on(self, value):
+        # Деньги будущим числом — всегда опечатка в дате: остаток «на сегодня»
+        # после такой записи показывает то, чего в ящике ещё нет.
+        if value and value > timezone.localdate():
+            raise serializers.ValidationError("Дата операции не может быть в будущем.")
+        return value
+
+    # «Да, я знаю, что остатка не хватает» — осознанное подтверждение из
+    # интерфейса. Не поле модели: в базе хранить нечего, это ответ на вопрос.
+    confirm_negative = serializers.BooleanField(required=False, write_only=True, default=False)
+
+    def validate(self, attrs):
+        # Выдать больше, чем в кассе лежит, обычно означает опечатку — лишний
+        # ноль или не тот счёт, — и заметить её можно было только при сверке
+        # остатка. Но запрещать наглухо нельзя: кассу вносят не по порядку
+        # (расходы за неделю сегодня, приходы завтра), и жёсткий запрет запер бы
+        # работу. Поэтому спрашиваем: интерфейс показывает остаток и повторяет
+        # запрос с подтверждением, если владелец всё равно хочет записать.
+        confirmed = attrs.pop("confirm_negative", False)
+        kind = attrs.get("kind", getattr(self.instance, "kind", None))
+        if confirmed or kind != CashEntry.Kind.OUT:
+            return attrs
+        account = attrs.get("account", getattr(self.instance, "account", None))
+        amount = attrs.get("amount", getattr(self.instance, "amount", Decimal("0")))
+        balance = CashEntry.balance(account)
+        if self.instance is not None and self.instance.kind == CashEntry.Kind.OUT:
+            balance += self.instance.amount   # правка своей же записи
+        if amount > balance:
+            raise serializers.ValidationError({
+                "confirm_negative": (
+                    f"В кассе «{dict(CashEntry.Account.choices)[account]}» сейчас "
+                    f"{balance} сом — выдать {amount} нельзя. Если запись всё же "
+                    f"верная, подтвердите её."
+                ),
+                "balance": str(balance),
+            })
+        return attrs
 
 
 class PeriodLockSerializer(serializers.ModelSerializer):

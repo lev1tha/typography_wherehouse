@@ -174,7 +174,7 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
                   материалов нулевой, и в списке у всех стояло «0.00 сом/кв.м». */}
               {areaMaterials.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.name} ({Number(m.sqm_price ?? m.price_per_sqm ?? m.price_per_unit ?? 0)} сом/кв.м, ост. {m.quantity})
+                  {m.name} ({Number(m.sqm_price ?? m.price_per_sqm ?? m.price_per_unit ?? 0)} {t("warehouse.perUnitShort", { unit: t("unit.SQM") })}, {t("dashboard.remaining").toLowerCase()} {m.quantity})
                 </option>
               ))}
             </select>

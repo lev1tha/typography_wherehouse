@@ -127,10 +127,22 @@ class CashBookTests(APITestCase):
 
     # ---- что вносят руками --------------------------------------------------
     def test_admin_records_a_manual_expense(self):
-        resp = self.client.post(self.URL, {
+        """Выдача больше остатка требует подтверждения, но проходит.
+
+        Кассу вносят не по порядку: расходы за неделю сегодня, приходы завтра.
+        Поэтому «в кассе меньше» — это вопрос, а не запрет: без подтверждения
+        сервер отказывает (чаще всего это лишний ноль), с подтверждением
+        записывает как есть.
+        """
+        body = {
             "account": "CASH", "kind": "OUT", "article": "SALARY",
             "amount": "8000", "happened_on": "2026-08-10", "note": "аванс мастеру",
-        }, format="json")
+        }
+        first = self.client.post(self.URL, body, format="json")
+        self.assertEqual(first.status_code, 400, first.data)
+        self.assertIn("подтвердите", str(first.data).lower())
+
+        resp = self.client.post(self.URL, {**body, "confirm_negative": True}, format="json")
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertFalse(resp.data["is_auto"])
         self.assertEqual(CashEntry.balance(CASH), Decimal("-8000"))

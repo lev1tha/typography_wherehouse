@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router-dom";
 
 import api from "../../api/api.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
@@ -18,6 +19,7 @@ const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом
 function ReceiptsTab() {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
+  const navigate = useNavigate();
   const { isAdmin, isAccountant, seesMoney } = useAuth();
   // Бухгалтер только смотрит: сервер его записи не примет, и показывать кнопки,
   // которые гарантированно ответят 403, — это обещать то, чего нет.
@@ -313,6 +315,18 @@ function ReceiptsTab() {
       label: isAdmin ? t("receipts.actions") : "",
       render: (r) => (
         <div className="row-actions">
+          {/* «Повторить» — половина заказов у типографии повторные: те же
+              визитки, та же вывеска. Состав переносится в кассу, цены берутся
+              сегодняшние; кассиру остаётся нажать «Оформить». */}
+          {!readOnly && (
+            <button
+              className="secondary row-btn"
+              onClick={(e) => { e.stopPropagation(); navigate(`/admin?repeat=${r.id}`); }}
+              title={t("receipts.repeatHint")}
+            >
+              <Icon name="undo" size={14} /> {t("receipts.repeat")}
+            </button>
+          )}
           <button
             className="secondary row-btn"
             onClick={(e) => { e.stopPropagation(); setPrinting(r); }}

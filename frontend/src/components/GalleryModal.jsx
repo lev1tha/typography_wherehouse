@@ -2,8 +2,10 @@ import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { apiError } from "../api/errors.js";
 import Icon from "./Icon.jsx";
 import Modal from "./Modal.jsx";
+import { useUI } from "./UIProvider.jsx";
 
 /**
  * Material photo gallery. Swipe-friendly horizontal strip (touch scroll-snap).
@@ -11,6 +13,7 @@ import Modal from "./Modal.jsx";
  */
 export default function GalleryModal({ material, onClose, onChanged, manage = false }) {
   const { t } = useTranslation();
+  const { toast } = useUI();
   const [images, setImages] = useState(material.images || []);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef();
@@ -21,6 +24,9 @@ export default function GalleryModal({ material, onClose, onChanged, manage = fa
     onChanged?.();
   }
 
+  // Все три действия говорят, если сервер отказал. Без этого негодный файл
+  // (не картинка, слишком большой) заканчивался тем, что спиннер погас, а фото
+  // не появилось — и понять, что именно не так, было нечем.
   async function upload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -34,6 +40,8 @@ export default function GalleryModal({ material, onClose, onChanged, manage = fa
         headers: { "Content-Type": "multipart/form-data" },
       });
       await refresh();
+    } catch (err) {
+      toast(apiError(err, t("common.error")), "error");
     } finally {
       setBusy(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -41,13 +49,21 @@ export default function GalleryModal({ material, onClose, onChanged, manage = fa
   }
 
   async function setPrimary(id) {
-    await api.patch(`/warehouse/material-images/${id}/`, { is_primary: true });
-    await refresh();
+    try {
+      await api.patch(`/warehouse/material-images/${id}/`, { is_primary: true });
+      await refresh();
+    } catch (err) {
+      toast(apiError(err, t("common.error")), "error");
+    }
   }
 
   async function remove(id) {
-    await api.delete(`/warehouse/material-images/${id}/`);
-    await refresh();
+    try {
+      await api.delete(`/warehouse/material-images/${id}/`);
+      await refresh();
+    } catch (err) {
+      toast(apiError(err, t("common.error")), "error");
+    }
   }
 
   return (

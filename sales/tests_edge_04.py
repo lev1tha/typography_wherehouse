@@ -123,8 +123,9 @@ class EdgeRefundTests(APITestCase):
         self.bolt.refresh_from_db()
         self.assertEqual(self.bolt.quantity, Decimal("50.00"))
 
-        # Refund the SAME (already-returned) line again.
-        self.assertEqual(self._refund(receipt.id, item_ids=[bolt_item.id]).status_code, 200)
+        # Refund the SAME (already-returned) line again — теперь это отказ,
+        # а не тихое «ок»: возвращать нечего.
+        self.assertEqual(self._refund(receipt.id, item_ids=[bolt_item.id]).status_code, 400)
         receipt.refresh_from_db()
         self.assertEqual(receipt.refunded_amount, Decimal("200.00"))
         self.bolt.refresh_from_db()
@@ -230,7 +231,9 @@ class EdgeRefundTests(APITestCase):
     def test_refund_with_unknown_item_ids_changes_nothing(self):
         receipt = self._paid_cash_receipt()
         r = self._refund(receipt.id, item_ids=[999999])
-        self.assertEqual(r.status_code, 200, r.data)
+        # Раньше отвечало «успешно», не сделав ничего. Молчаливое «ок» на
+        # пустой операции опаснее отказа: кассир уверен, что деньги ушли.
+        self.assertEqual(r.status_code, 400, r.data)
 
         receipt.refresh_from_db()
         self.assertEqual(receipt.refunded_amount, Decimal("0"))

@@ -45,8 +45,14 @@ export default function Login() {
     try {
       const user = await login(username.trim(), password);
       navigate(user.role === "ADMIN" ? "/admin" : "/app", { replace: true });
-    } catch {
-      setError(t("login.error"));
+    } catch (err) {
+      // 429 — предел попыток входа. Показать «неверный логин или пароль» здесь
+      // было бы враньём: пароль может быть и верным, просто ждём.
+      setError(
+        err?.response?.status === 429
+          ? err.response.data?.detail || t("login.error")
+          : t("login.error")
+      );
     } finally {
       setBusy(false);
     }

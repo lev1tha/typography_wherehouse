@@ -92,15 +92,19 @@ const NumField = ({ label, value, onChange, grow }) => (
 // цены за кв.м.
 const ceilSom = (v) => Math.max(0, Math.ceil((Number(v) || 0) - 1e-6));
 const PriceCell = ({ m, value, t, pieceValue }) => {
-  const per = m.is_roll_material || m.unit === "SQM" ? "кв.м" : t(`unit.${m.unit}`);
+  // Единицу берём из словаря, а не строкой: в английском интерфейсе рядом
+  // стояло «20,84 кв.м · ≈7 sheets» — половина строки на чужом языке.
+  const bySqm = m.is_roll_material || m.unit === "SQM";
+  const per = bySqm ? t("unit.SQM") : t(`unit.${m.unit}`);
   const area = Number(m.piece_area) || 0;
   const num = Number(value) || 0;
   const explicitPiece = pieceValue !== undefined;
   const sheet = explicitPiece ? ceilSom(pieceValue) : Math.round(num * area);
-  const showSheet = per === "кв.м" && (explicitPiece ? sheet > 0 : area > 0 && num > 0);
+  const showSheet = bySqm && (explicitPiece ? sheet > 0 : area > 0 && num > 0);
   return (
     <>
-      {explicitPiece ? ceilSom(num) : num} <span className="muted">сом/{per}</span>
+      {explicitPiece ? ceilSom(num) : num}{" "}
+      <span className="muted">{t("warehouse.perUnitShort", { unit: per })}</span>
       {showSheet && (
         <div className="muted" style={{ fontSize: 12 }}>
           {sheet} {t("warehouse.perSheetShort")}
@@ -286,7 +290,7 @@ export default function Catalog({ embedded = false }) {
       render: (m) => (
         <span>
           {m.type_name && <span className="chip">{m.type_name}</span>}
-          {m.thickness_mm != null && <span className="muted"> {trim(m.thickness_mm)} мм</span>}
+          {m.thickness_mm != null && <span className="muted"> {trim(m.thickness_mm)} {t("unit.MM")}</span>}
           {m.color && <span className="muted">{m.thickness_mm != null ? " · " : " "}{m.color}</span>}
         </span>
       ),

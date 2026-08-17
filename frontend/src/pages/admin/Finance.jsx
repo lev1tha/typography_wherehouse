@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
 import api from "../../api/api.js";
+import { useAuth } from "../../auth/AuthContext.jsx";
 import DailyProfitChart from "../../components/DailyProfitChart.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import ExpenseKindFormModal from "../../components/ExpenseKindFormModal.jsx";
@@ -39,6 +40,9 @@ function Stat({ label, value, color, sub }) {
 
 export default function Finance() {
   const { t } = useTranslation();
+  // Бухгалтер: сервер не примет от него ни одной записи в финансах, поэтому и
+  // показывать ему кнопки записи нельзя — см. комментарий у `editRow`.
+  const { isAccountant: readOnly } = useAuth();
   const { toast } = useUI();
   const now = new Date();
   // Отчёт заказчика — месячный, поэтому по умолчанию открываем текущий месяц.
@@ -215,19 +219,30 @@ export default function Finance() {
 
   if (!report || !settings || !lock) return <p className="muted">{t("common.loading")}</p>;
 
-  const editRow = (label, field) => (
-    <div className="crow" key={field}>
-      <span className="k">{label}</span>
-      <input
-        type="number"
-        value={settings[field] ?? ""}
-        onChange={(e) => setSettings({ ...settings, [field]: e.target.value })}
-        onBlur={(e) => saveField(field, e.target.value)}
-        placeholder="0"
-        style={{ width: 150, height: 34, textAlign: "right" }}
-      />
-    </div>
-  );
+  // Бухгалтер — проверяющий: видит всё, не трогает ничего. Раньше ему
+  // показывали полный админский набор — «Закрыть период», диалог с кнопкой
+  // «Добавить», настройку видов, — и каждое нажатие возвращало 403 или
+  // невнятное «Произошла ошибка». Кнопки, которая гарантированно откажет,
+  // быть не должно: в «Чеках» это уже так, теперь и здесь.
+  const editRow = (label, field) =>
+    readOnly ? (
+      <div className="crow" key={field}>
+        <span className="k">{label}</span>
+        <strong>{som(settings[field] ?? 0)}</strong>
+      </div>
+    ) : (
+      <div className="crow" key={field}>
+        <span className="k">{label}</span>
+        <input
+          type="number"
+          value={settings[field] ?? ""}
+          onChange={(e) => setSettings({ ...settings, [field]: e.target.value })}
+          onBlur={(e) => saveField(field, e.target.value)}
+          placeholder="0"
+          style={{ width: 150, height: 34, textAlign: "right" }}
+        />
+      </div>
+    );
 
   // Заголовок блока и подытог — визуальное разделение как в Excel заказчика.
   const blockHead = (label) => (
@@ -425,25 +440,30 @@ export default function Finance() {
         ) : (
           <p className="muted" style={{ margin: "0 0 12px" }}>{t("period.open")}</p>
         )}
-        <div className="row" style={{ gap: 10, alignItems: "flex-end", margin: 0, flexWrap: "wrap" }}>
-          <div className="field" style={{ margin: 0, width: 190 }}>
-            <label>{t("period.closeThrough")}</label>
-            <input
-              type="date"
-              value={lockDraft}
-              max={new Date().toLocaleDateString("sv-SE")}
-              onChange={(e) => setLockDraft(e.target.value)}
-            />
-          </div>
-          <button onClick={() => saveLock(lockDraft)} disabled={!lockDraft}>
-            {t("period.close")}
-          </button>
-          {lock.closed_through && (
-            <button className="secondary" onClick={() => saveLock(null)}>
-              {t("period.open_")}
+        {/* Замок ставит и снимает только админ — бухгалтеру показываем
+            состояние периода, но не форму: сервер его PATCH всё равно
+            отклоняет, а кнопка обещала обратное. */}
+        {!readOnly && (
+          <div className="row" style={{ gap: 10, alignItems: "flex-end", margin: 0, flexWrap: "wrap" }}>
+            <div className="field" style={{ margin: 0, width: 190 }}>
+              <label>{t("period.closeThrough")}</label>
+              <input
+                type="date"
+                value={lockDraft}
+                max={new Date().toLocaleDateString("sv-SE")}
+                onChange={(e) => setLockDraft(e.target.value)}
+              />
+            </div>
+            <button onClick={() => saveLock(lockDraft)} disabled={!lockDraft}>
+              {t("period.close")}
             </button>
-          )}
-        </div>
+            {lock.closed_through && (
+              <button className="secondary" onClick={() => saveLock(null)}>
+                {t("period.open_")}
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
@@ -582,11 +602,15 @@ export default function Finance() {
           Диалог по клику на строку отчёта показывает один вид, а этот список —
           весь месяц сразу, поэтому он и остался, но уже один. */}
       <div className="card" style={{ marginTop: 16 }}>
+        {/* reloadKey — тот же счётчик правок, что у графика по дням: трату
+            заводят в блоке отчёта выше, и без него список внизу продолжал
+            показывать старое, пока страницу не перезагрузят. */}
         <ExpenseListSection
           title={t("finance.allExpensesTitle")}
           subtitle={t("finance.allExpensesHint")}
           kinds={[...fixedKinds, ...salaryKinds, ...purchaseKinds]}
           period={params}
+          reloadKey={revision}
           onChanged={reloadAll}
         />
       </div>

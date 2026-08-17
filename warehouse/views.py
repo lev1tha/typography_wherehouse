@@ -297,6 +297,10 @@ class MaterialViewSet(viewsets.ModelViewSet):
             material = apply_stock_change(
                 material,
                 delta,
+                # Инвентаризация не «списывает», а ПРИРАВНИВАЕТ остаток к
+                # пересчитанному: 0 ≤ counted проверил сериализатор, и защита
+                # от ухода в минус здесь только мешала бы.
+                allow_negative=True,
                 log_type=InventoryLog.Type.ADJUSTMENT,
                 reason=reason,
                 user=request.user,

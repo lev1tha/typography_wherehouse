@@ -173,6 +173,27 @@ REST_FRAMEWORK = {
     # 25 строк молча обрезала каталог, и материала №26 в выборе просто не было.
     "DEFAULT_PAGINATION_CLASS": "config.pagination.SizedPageNumberPagination",
     "PAGE_SIZE": 25,
+    # Пределы попыток входа. Ограничения нет только у логинов — остальные
+    # запросы идут с токеном, и перебирать там нечего.
+    #
+    # `login` / `customer-login` считают по АДРЕСУ, `login-account` — по самому
+    # логину (телефону): иначе пароль клиентского кабинета, который выдаёт
+    # админ, перебирается с разных адресов без единой помехи.
+    "DEFAULT_THROTTLE_RATES": {
+        "login": "10/min",
+        "login-account": "20/hour",
+        "customer-login": "10/min",
+    },
+}
+
+# Кеш держит счётчики попыток входа. В БД, а не в памяти процесса: воркеров
+# gunicorn три, и у каждого был бы свой счётчик — предел утроился бы.
+# Таблицу создаёт `manage.py createcachetable` (вызывается в entrypoint).
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+        "LOCATION": "django_cache",
+    }
 }
 
 SIMPLE_JWT = {

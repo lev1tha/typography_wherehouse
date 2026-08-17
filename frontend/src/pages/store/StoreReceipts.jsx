@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router-dom";
 
 import api from "../../api/api.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
@@ -19,6 +20,7 @@ import { useUI } from "../../components/UIProvider.jsx";
 export default function StoreReceipts() {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
+  const navigate = useNavigate();
   const [rows, setRows] = useState([]);
   const [stats, setStats] = useState(null);
   const [search, setSearch] = useState("");
@@ -195,6 +197,15 @@ export default function StoreReceipts() {
       label: t("common.actions"),
       render: (r) => (
         <div className="row" style={{ gap: 6, alignItems: "center", margin: 0, flexWrap: "nowrap" }}>
+          {/* Повторный заказ складовщик оформляет чаще админа — он и стоит за
+              кассой. Состав переносится, цены берутся сегодняшние. */}
+          <button
+            className="secondary row-btn"
+            onClick={(e) => { e.stopPropagation(); navigate(`/app/checkout?repeat=${r.id}`); }}
+            title={t("receipts.repeatHint")}
+          >
+            <Icon name="undo" size={14} /> {t("receipts.repeat")}
+          </button>
           {/* Накладную и товарный чек выдаёт складовщик — печать нужна ему
               не меньше, чем админу. */}
           <button

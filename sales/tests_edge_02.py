@@ -74,10 +74,11 @@ class EdgeWholesaleTests(APITestCase):
         self.acrylic.wholesale_price = Decimal("3000")
         self.acrylic.wholesale_min_qty = Decimal("3")
         self.acrylic.save()
-        # 2.5 < 3 → розница.
+        # 2 < 3 → розница. (Дробных листов не бывает — с тех пор как штучные
+        # позиции требуют целого количества, «2.5 листа» отклоняется на входе.)
         r = self._checkout([
             {"type": "MATERIAL", "material": self.acrylic.id,
-             "quantity": "2.5", "mode": "PIECE"}
+             "quantity": "2", "mode": "PIECE"}
         ])
         self.assertEqual(self._item_price(r), Decimal("3700"))
         # 3.0 ровно → опт.

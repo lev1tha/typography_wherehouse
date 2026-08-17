@@ -176,32 +176,30 @@ class EdgeCuttingTests(APITestCase):
         material = next(i for i in self._items(receipt) if i.type == TransactionItem.Type.MATERIAL)
         self.assertEqual(material.quantity, Decimal("0.250"))
 
-    def test_zero_dimensions_yields_only_work_line(self):
+    def test_zero_dimensions_are_refused_instead_of_an_empty_receipt(self):
+        """Ни размеров, ни количества — это промах по кнопке, а не заказ.
+
+        Раньше такой запрос создавал чек «на 0 сом»: пустышка оседала в списке
+        чеков и в статистике. Проверка теперь на входе — важно, что ответ
+        внятный 400, а не 500 и не молчаливый пустой чек.
+        """
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id,
         }])
-        # Должно безопасно создаться (без 500). Площадь 0 → материал по площади
-        # НЕ добавляется (нечего биллить), остаётся только work-линия с нулём.
-        self.assertEqual(r.status_code, 201, r.data)
-        receipt = Receipt.objects.get(pk=r.data["id"])
-        items = self._items(receipt)
-        self.assertEqual(len(items), 1)
-        work = items[0]
-        self.assertEqual(work.type, TransactionItem.Type.SERVICE)
-        self.assertEqual(work.quantity, Decimal("0.000"))
-        self.assertEqual(receipt.total_price, Decimal("0.00"))
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertIn("количеством или размером", str(r.data))
+        self.assertFalse(Receipt.objects.exists())
 
     def test_explicit_zero_width_treated_as_blank(self):
-        # width='0' falsy → 'width and length' ложно → area=quantity(0), а не 0*1.
+        # width='0' falsy → 'width and length' ложно → площади нет. Куска без
+        # ширины не бывает, поэтому заказ отклоняется на входе, а не заводит
+        # чек на ноль. Длина реза при этом не указана — работы тоже нет.
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "0", "length": "1",
         }])
-        self.assertEqual(r.status_code, 201, r.data)
-        receipt = Receipt.objects.get(pk=r.data["id"])
-        work = receipt.items.get(type=TransactionItem.Type.SERVICE)
-        self.assertEqual(work.quantity, Decimal("0.000"))
+        self.assertEqual(r.status_code, 400, r.data)
 
     # ---- Точность площади (3 знака) --------------------------------------
 

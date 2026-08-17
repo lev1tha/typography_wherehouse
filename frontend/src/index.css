@@ -563,6 +563,36 @@ label {
   flex: 1;
 }
 
+/* Шапка на телефоне не должна распирать страницу.
+   Название роли, селектор языка, логин и «Выйти» в сумме шире 375px, и вся
+   страница ехала вбок на каждом экране — у админа, у складовщика, у бухгалтера
+   и в кабинете клиента. Здесь чиним причину: роль ужимается многоточием, логин
+   прячется (он же виден в самом кабинете), а элементы перестают требовать
+   свою «неснимаемую» ширину. */
+@media (max-width: 600px) {
+  .topbar {
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .topbar strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .topbar > .muted {
+    display: none;
+  }
+
+  .topbar select,
+  .topbar button.secondary {
+    flex: 0 0 auto;
+    min-width: 0;
+  }
+}
+
 .burger {
   display: none;
   background: transparent;
@@ -807,6 +837,24 @@ label {
   color: var(--ink-muted);
   font-size: 13px;
   white-space: nowrap;
+}
+
+/* Пара «С … По …» держится в одной строке намеренно (иначе «По» уезжало вниз
+   и читалось как отдельный фильтр), но на узком экране эта пара шире телефона
+   и утаскивала за собой всю страницу. Сжимаем саму пару, а не ломаем её. */
+@media (max-width: 600px) {
+  .filter-date {
+    padding: 0 8px;
+    gap: 4px;
+    min-width: 0;
+    flex: 1 1 0;
+  }
+
+  .filter-date input {
+    min-width: 0;
+    width: 100%;
+    font-size: 13px;
+  }
 }
 
 .filter-date input {
@@ -1978,10 +2026,18 @@ label {
   }
   /* То же и для простых таблиц «Обзора» (материалы на исходе, покупки по
      клиентам): они не через DataTable, карточек у них нет, и на телефоне от
-     блока оставался один заголовок. */
+     блока оставался один заголовок.
+     Прокручиваться вбок должна САМА таблица, а не страница: пока она этого не
+     делала, «Обзор» на телефоне уезжал вправо на 113px вместе с шапкой и
+     всеми плитками. Обёртку даёт `.table-scroll` в разметке. */
   .plain-table {
     display: table;
     font-size: 13px;
+    min-width: max-content;
+  }
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
   .plain-table th,
   .plain-table td {

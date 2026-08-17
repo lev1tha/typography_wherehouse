@@ -115,7 +115,7 @@ export default function Warehouse() {
                   поле, удалённое при разборе номенклатуры на поля, то есть
                   пустая строка. Показываем то же, что в каталоге админа. */}
               <div className="muted">
-                {[m.type_name, m.thickness_mm != null ? `${trim(m.thickness_mm)} мм` : "", m.color]
+                {[m.type_name, m.thickness_mm != null ? `${trim(m.thickness_mm)} ${t("unit.MM")}` : "", m.color]
                   .filter(Boolean)
                   .join(" · ")}
               </div>
@@ -137,7 +137,7 @@ export default function Warehouse() {
                     на всей номенклатуре. */}
                 <span>
                   {m.is_roll_material
-                    ? `${m.sqm_price} сом/кв.м`
+                    ? `${m.sqm_price} ${t("warehouse.perUnitShort", { unit: t("unit.SQM") })}`
                     : `${m.price_per_unit} сом`}
                 </span>
               </div>

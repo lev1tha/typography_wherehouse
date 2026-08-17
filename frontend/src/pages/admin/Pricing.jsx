@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
+import { apiError } from "../../api/errors.js";
+import { useUI } from "../../components/UIProvider.jsx";
 
 // Which price fields drive each service kind's billing (mirrors the backend):
 // area services (cutting / interior install) → master work rate per кв.м;
@@ -17,6 +19,7 @@ function rateFields(service, t) {
 
 function ServiceCard({ service, onSaved }) {
   const { t } = useTranslation();
+  const { toast } = useUI();
   const fields = rateFields(service, t);
   const [form, setForm] = useState(Object.fromEntries(fields.map(([key]) => [key, service[key]])));
   const [busy, setBusy] = useState(false);
@@ -26,6 +29,12 @@ function ServiceCard({ service, onSaved }) {
     try {
       await api.patch(`/services/services/${service.id}/`, form);
       onSaved?.();
+      toast(t("common.saved"));
+    } catch (e) {
+      // Без этого стёртая ставка («сотру и впишу заново») уходила на сервер
+      // пустой строкой, тот отвечал 400 «Требуется численное значение», а в
+      // окне не появлялось НИЧЕГО: кнопка отжалась, цена осталась прежней.
+      toast(apiError(e, t("common.error")), "error");
     } finally {
       setBusy(false);
     }
@@ -83,6 +92,7 @@ function ServiceCard({ service, onSaved }) {
 // дублирования: материал и его цена редактируются в одном месте.
 export default function Pricing() {
   const { t } = useTranslation();
+  const { toast } = useUI();
   const [services, setServices] = useState([]);
   const [commission, setCommission] = useState("");
   const [savingC, setSavingC] = useState(false);
@@ -103,6 +113,9 @@ export default function Pricing() {
     setSavingC(true);
     try {
       await api.patch("/services/settings/", { master_commission_percent: commission });
+      toast(t("common.saved"));
+    } catch (e) {
+      toast(apiError(e, t("common.error")), "error");
     } finally {
       setSavingC(false);
     }

@@ -11,6 +11,7 @@ from decimal import Decimal
 from django.db import transaction
 
 from .models import InventoryLog, Material
+from .rolls import InsufficientStock
 
 
 @transaction.atomic
@@ -18,6 +19,7 @@ def apply_stock_change(
     material: Material,
     delta: Decimal,
     *,
+    allow_negative: bool = False,
     log_type: str | None = None,
     actual_price: Decimal | None = None,
     reason: str | None = None,
@@ -34,11 +36,27 @@ def apply_stock_change(
 
     ``happened_at`` — дата самой операции: приход часто вносят задним числом.
     Не передана — берётся текущий момент.
+
+    Расход НИЖЕ НУЛЯ не пропускаем: у площадных материалов это давно ловит
+    FIFO по партиям (``consume_area``), а штучные (крепёж, клей, бумага) уходили
+    в минус молча — продажа 10 000 штук при остатке 484 создавала чек на
+    550 000 сом и остаток −9 519. Отрицательный остаток ломает и стоимость
+    склада, и себестоимость, и метку «нет в наличии».
+
+    ``allow_negative=True`` — только для инвентаризации: там остаток не
+    «уменьшается на», а ПРИРАВНИВАЕТСЯ к пересчитанному, и промежуточная
+    проверка там не при чём (само значение уже проверено сериализатором).
     """
     locked = Material.objects.select_for_update().get(pk=material.pk)
     was_above = locked.quantity > locked.critical_balance
 
-    locked.quantity = (locked.quantity or Decimal("0")) + Decimal(delta)
+    new_quantity = (locked.quantity or Decimal("0")) + Decimal(delta)
+    if new_quantity < 0 and not allow_negative:
+        raise InsufficientStock(
+            f"Недостаточно «{locked.name}»: нужно {abs(Decimal(delta))}, "
+            f"в наличии {locked.quantity}."
+        )
+    locked.quantity = new_quantity
     if actual_price is not None:
         locked.purchase_price = actual_price
     locked.save(update_fields=["quantity", "purchase_price", "updated_at"])

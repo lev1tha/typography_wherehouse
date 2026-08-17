@@ -459,6 +459,12 @@ def add_items_to_receipt(receipt: Receipt, items_data, *, user=None):
     """
     if receipt.status == Receipt.Status.CANCELLED or receipt.payment_status == Receipt.PaymentStatus.REFUNDED:
         raise OrderClosed("Чек закрыт или возвращён — добавление невозможно.")
+    # ВЫДАННЫЙ заказ дозаказу не подлежит: товар уже у клиента, он ушёл. Раньше
+    # проверялся только статус оплаты, и в отданный заказ спокойно дописывались
+    # позиции — сумма росла со 110 до 165, склад списывался, а у клиента на
+    # руках оставался чек на старую сумму. Нужен ещё товар — это новый заказ.
+    if receipt.fulfillment_status == Receipt.FulfillmentStatus.ISSUED:
+        raise OrderClosed("Заказ уже выдан клиенту — оформите новый.")
 
     settled = receipt.payment_status in (
         Receipt.PaymentStatus.PAID,
@@ -894,6 +900,11 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None) -> Receipt:
     items = receipt.items.filter(is_returned=False)
     if item_ids:
         items = items.filter(id__in=item_ids)
+    # Возврат по уже возвращённому заказу раньше отвечал «успешно», хотя не
+    # делал ничего: цикл проходил по пустому списку. Молчаливое «ок» на пустой
+    # операции — худший ответ: кассир уверен, что деньги ушли второй раз.
+    if not items.exists():
+        raise ItemEditRejected("Возвращать нечего: эти позиции уже возвращены.")
 
     # Stock was only deducted if the receipt was actually settled.
     stock_was_deducted = receipt.stock_deducted or receipt.payment_status in (

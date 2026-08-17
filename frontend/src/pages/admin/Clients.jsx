@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router-dom";
 
 import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
@@ -20,6 +21,7 @@ const PAYMENTS_PREVIEW = 5;
 export default function Clients() {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
+  const navigate = useNavigate();
   const { isAdmin } = useAuth();
   const [clients, setClients] = useState([]);
   const [search, setSearch] = useState("");
@@ -487,7 +489,20 @@ export default function Clients() {
                       №{o.order_number}
                       {o.title ? <span className="muted" style={{ fontWeight: 400 }}> · {o.title}</span> : null}
                     </strong>
-                    <span className="muted">{new Date(o.created_at).toLocaleDateString("ru-RU")}</span>
+                    <span className="muted" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      {new Date(o.created_at).toLocaleDateString("ru-RU")}
+                      {/* «Ещё раз то же самое» — самый частый разговор у стойки.
+                          Отсюда до кассы один клик, состав уже собран. */}
+                      <button
+                        type="button"
+                        className="ghost"
+                        style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-strong)" }}
+                        onClick={() => navigate(`${isAdmin ? "/admin" : "/app/checkout"}?repeat=${o.id}`)}
+                        title={t("receipts.repeatHint")}
+                      >
+                        {t("receipts.repeat")}
+                      </button>
+                    </span>
                   </div>
                   {/* Возвращённые строки остаются в истории — зачёркнутыми и с
                       пометкой; раньше они просто исчезали, и у возвращённого

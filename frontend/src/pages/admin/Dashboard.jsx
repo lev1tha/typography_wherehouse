@@ -354,6 +354,7 @@ export default function Dashboard() {
       {data.low_stock_items?.length > 0 && (
         <div className="card" style={{ marginTop: 16 }}>
           <h3>{t("dashboard.lowStockTitle")}</h3>
+          <div className="table-scroll">
           <table className="table plain-table">
             <thead>
               <tr>
@@ -383,6 +384,7 @@ export default function Dashboard() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
@@ -391,6 +393,7 @@ export default function Dashboard() {
         <h3>{t("dashboard.clientMaterials")}</h3>
         <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("dashboard.clientMaterialsHint")}</p>
         {clientBuys.length ? (
+          <div className="table-scroll">
           <table className="table plain-table">
             <thead>
               <tr>
@@ -413,6 +416,7 @@ export default function Dashboard() {
               ))}
             </tbody>
           </table>
+          </div>
         ) : (
           <p className="muted">{t("common.empty")}</p>
         )}

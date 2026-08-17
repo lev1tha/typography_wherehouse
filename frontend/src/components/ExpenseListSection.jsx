@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { useAuth } from "../auth/AuthContext.jsx";
 import DataTable from "./DataTable.jsx";
 import Icon from "./Icon.jsx";
 import Modal from "./Modal.jsx";
@@ -36,9 +37,10 @@ function Stat({ label, value }) {
 // становится никогда. Пока список читал только записи, у заказчика он был пуст
 // ВСЕГДА — все его траты это приходы материала, — а в отчёте сверху при этом
 // стояло «Расходы 25 000». Приход в ленте справочный: правят его на Складе.
-export default function ExpenseListSection({ title, subtitle, kinds, period, onChanged }) {
+export default function ExpenseListSection({ title, subtitle, kinds, period, reloadKey, onChanged }) {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
+  const { isAccountant: readOnly } = useAuth();
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [editing, setEditing] = useState(null);
@@ -56,7 +58,7 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, onC
       .catch(() => toast(t("common.error"), "error"));
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(load, [period?.date_from, period?.date_to]);
+  useEffect(load, [period?.date_from, period?.date_to, reloadKey]);
 
   function saveEdit() {
     if (!editing.amount) return toast(t("expenses.needAmount"), "error");
@@ -109,7 +111,9 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, onC
       key: "actions",
       label: "",
       render: (r) =>
-        r.source === "SUPPLY" ? (
+        // Бухгалтеру правка и удаление трат запрещены сервером — кнопок,
+        // которые ответят 403, у него быть не должно.
+        readOnly ? null : r.source === "SUPPLY" ? (
           <span className="muted" style={{ fontSize: 12 }}>{t("expenses.supplyHint")}</span>
         ) : (
           <div className="row" style={{ gap: 4, margin: 0 }}>

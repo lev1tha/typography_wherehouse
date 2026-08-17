@@ -543,7 +543,11 @@ class FinanceReportView(APIView):
             receipt_pm = sum((i.quantity for i in cut_lines), Decimal("0"))
             for idx, line in enumerate(cut_lines):
                 machine = line.service.machine or ""
-                rev = line.quantity * line.price_per_item
+                # ТА ЖЕ сумма, что стоит в чеке: строка округляется вверх до
+                # целого сома. Через `quantity × price` отчёт расходился с
+                # чеками на копейки, и сверка «по бумаге» переставала сходиться
+                # ровно там, где заказчик её и делает.
+                rev = line.line_total
                 cut_by_machine[machine] += rev
                 pm_by_machine[machine] += line.quantity
                 cutting_total += rev
@@ -764,11 +768,20 @@ class DailyReportView(APIView):
                 "profit": None if future else revenue - variable - fixed_share,
             })
 
+        # ИТОГ под графиком — за МЕСЯЦ ЦЕЛИКОМ, той же формулой, что плитки
+        # сверху: выручка − переменные − постоянные. Суммой дневных прибылей
+        # его считать нельзя: у будущих дней прибыли нет (столбик не рисуем,
+        # чтобы 20-е число не краснело за неотработанную аренду), и их доля
+        # аренды выпадала из итога. 17 августа это давало на одном экране
+        # −49 497 в плитке и −35 949 под графиком — расходились ровно на
+        # аренду оставшихся 14 дней.
+        month_revenue = sum((r["revenue"] for r in rows), Decimal("0"))
+        month_variable = sum((r["variable"] for r in rows), Decimal("0"))
         totals = {
-            "revenue": sum((r["revenue"] for r in rows), Decimal("0")),
-            "variable": sum((r["variable"] for r in rows), Decimal("0")),
+            "revenue": month_revenue,
+            "variable": month_variable,
             "fixed": fixed_total,
-            "profit": sum((r["profit"] for r in rows if r["profit"] is not None), Decimal("0")),
+            "profit": month_revenue - month_variable - fixed_total,
         }
 
         return Response({
@@ -847,7 +860,7 @@ class MaterialReportView(APIView):
             items = list(r.items.all())
             cut_rev = sum(
                 (
-                    i.quantity * i.price_per_item
+                    i.line_total
                     for i in items
                     if i.type == TransactionItem.Type.SERVICE
                     and not i.is_returned
@@ -891,7 +904,7 @@ class MaterialReportView(APIView):
                 a["area"] += q
                 if m.piece_area:
                     a["sheets"] += q / m.piece_area
-            a["mat_rev"] += q * it.price_per_item
+            a["mat_rev"] += it.line_total   # как в чеке: округление вверх
             a["orders"].add(it.receipt_id)
 
         # Поступление за период: приход по складским логам (и партии рулонов,

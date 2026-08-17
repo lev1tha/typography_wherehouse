@@ -39,7 +39,7 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
   const [busy, setBusy] = useState(false);
 
   const cur = Number(material.quantity) || 0;
-  const enteredUnit = roll ? (inSheets ? wholeUnit : "кв.м") : unit;
+  const enteredUnit = roll ? (inSheets ? wholeUnit : t("unit.SQM")) : unit;
   // Введённое число → количество в единицах хранения (кв.м у рулонного).
   const target =
     counted === "" ? null : inSheets ? Number(counted) * sheetArea : Number(counted);
@@ -85,7 +85,7 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
       <div className="crow">
         <span className="k">{t("supply.currentStock")}</span>
         <strong>
-          {q2(cur)} {roll ? "кв.м" : unit}
+          {q2(cur)} {roll ? t("unit.SQM") : unit}
           {roll && sheetArea > 0 && (
             <span className="muted" style={{ fontWeight: 400 }}>
               {" "}· ≈{q2(cur / sheetArea)} {t("warehouse.sheetsShort")}
@@ -96,7 +96,7 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
 
       {roll && sheetArea > 0 && (
         <div className="tabs" style={{ marginTop: 12 }}>
-          {[[true, wholeUnit], [false, "кв.м"]].map(([key, label]) => (
+          {[[true, wholeUnit], [false, t("unit.SQM")]].map(([key, label]) => (
             <button
               key={String(key)}
               className={inSheets === key ? "active" : ""}
@@ -134,13 +134,13 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
           <div className="crow">
             <span className="k">{t("supply.becomes")}</span>
             <strong>
-              {q2(cur)} → {q2(target)} {roll ? "кв.м" : unit}
+              {q2(cur)} → {q2(target)} {roll ? t("unit.SQM") : unit}
             </strong>
           </div>
           <div className="crow">
             <span className="k">{t("supply.diff")}</span>
             <strong style={{ color: delta < 0 ? "var(--danger)" : "var(--ok)" }}>
-              {delta > 0 ? "+" : ""}{q2(delta)} {roll ? "кв.м" : unit}
+              {delta > 0 ? "+" : ""}{q2(delta)} {roll ? t("unit.SQM") : unit}
             </strong>
           </div>
         </div>

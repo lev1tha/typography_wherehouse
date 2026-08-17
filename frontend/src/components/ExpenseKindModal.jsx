@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { useAuth } from "../auth/AuthContext.jsx";
 import Icon from "./Icon.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
@@ -27,6 +28,8 @@ function defaultDate(period) {
 export default function ExpenseKindModal({ kind, period, onClose, onChanged, onEditKind }) {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
+  // Бухгалтер сюда заходит смотреть: запись в финансах сервер ему запрещает.
+  const { isAccountant: readOnly } = useAuth();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState({ name: "", amount: "", spent_at: defaultDate(period), note: "" });
@@ -105,9 +108,14 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
       onClose={onClose}
       footer={
         <>
-          <button className="secondary" onClick={() => onEditKind?.(kind)}>
-            {t("kinds.settings")}
-          </button>
+          {/* Настройка вида и ввод трат — админские: бухгалтеру сервер их не
+              даст, и кнопка, которая гарантированно ответит 403, только
+              путает. Он остаётся с тем, зачем и приходит, — со списком. */}
+          {!readOnly && (
+            <button className="secondary" onClick={() => onEditKind?.(kind)}>
+              {t("kinds.settings")}
+            </button>
+          )}
           <button onClick={onClose}>{t("common.close")}</button>
         </>
       }
@@ -119,6 +127,7 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
         {!kind.in_profit && ` · ${t("kinds.notInProfitHint")}`}
       </p>
 
+      {!readOnly && (
       <div className="card" style={{ margin: "10px 0 14px", background: "var(--primary-soft)" }}>
         <div className="row">
           <div className="field grow">
@@ -159,6 +168,7 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
           />
         </div>
       </div>
+      )}
 
       {loading ? (
         <p className="muted">{t("common.loading")}</p>
@@ -219,12 +229,16 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
                 </span>
                 <span className="row" style={{ gap: 4, margin: 0, alignItems: "center" }}>
                   <strong>{som(r.amount)}</strong>
-                  <button className="ghost" onClick={() => setEditing({ ...r })} aria-label={t("common.edit")}>
-                    <Icon name="pencil" size={16} />
-                  </button>
-                  <button className="ghost" onClick={() => del(r)} aria-label={t("common.delete")}>
-                    <Icon name="trash" size={16} />
-                  </button>
+                  {!readOnly && (
+                    <>
+                      <button className="ghost" onClick={() => setEditing({ ...r })} aria-label={t("common.edit")}>
+                        <Icon name="pencil" size={16} />
+                      </button>
+                      <button className="ghost" onClick={() => del(r)} aria-label={t("common.delete")}>
+                        <Icon name="trash" size={16} />
+                      </button>
+                    </>
+                  )}
                 </span>
               </div>
             )

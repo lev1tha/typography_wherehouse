@@ -12,7 +12,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
-from finance.models import ExpenseKind
+from finance.models import ExpenseEntry, ExpenseKind
 from warehouse.models import Material, Supplier
 
 
@@ -69,6 +69,29 @@ class DailyPurchasesTests(APITestCase):
         self.assertEqual(Decimal(str(report["total_expenses"])), Decimal("18000"))
         self.assertEqual(Decimal(str(daily["totals"]["variable"])), Decimal(str(report["total_expenses"])))
         self.assertEqual(Decimal(str(daily["totals"]["profit"])), Decimal(str(report["profit"])))
+
+    def test_fixed_costs_of_the_whole_month_are_in_the_chart_total(self):
+        """Аренда в итоге под графиком — за ВЕСЬ месяц, как в плитке сверху.
+
+        Итог складывался из дневных прибылей, а у будущих дней прибыли нет
+        (столбик не рисуем, чтобы 20-е число не краснело за неотработанную
+        аренду) — и их доля аренды выпадала. 17 августа на одном экране стояло
+        −49 497 в плитке и −35 949 под графиком.
+        """
+        self.assertEqual(self._supply().status_code, 201)
+        rent = ExpenseKind.objects.get(code="RENT")
+        ExpenseEntry.objects.create(
+            kind=rent, name="Аренда цеха", amount=Decimal("30000"), spent_at=self.doc_day
+        )
+        daily = self._daily()
+        report = self._report()
+        self.assertEqual(Decimal(str(daily["totals"]["fixed"])), Decimal("30000"))
+        self.assertEqual(
+            Decimal(str(daily["totals"]["profit"])), Decimal(str(report["profit"]))
+        )
+        # Столбики по-прежнему знают только про прошедшие дни — это не итог.
+        drawn = [r for r in daily["rows"] if r["profit"] is not None]
+        self.assertLessEqual(len(drawn), daily["days_in_month"])
 
     def test_kind_flag_is_respected_like_in_the_tiles(self):
         """Снятый флаг «уменьшает прибыль» у вида «Закуп материала» убирает

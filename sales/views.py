@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from accounts.permissions import IsAdmin, IsNotAccountant
 from audit.models import AuditLog
 from finance import cash
-from finance.periods import ensure_open
+from finance.periods import PeriodClosed, ensure_open
 from clients.models import Client
 from clients.phones import find_client_by_phone
 from clients.serializers import ClientSerializer
@@ -32,6 +32,7 @@ from .sale_service import (
     give_change,
     parse_amount,
     parse_paid_on,
+    pay_client_debt,
     receipt_summary,
     refund_receipt,
     update_receipt_items,
@@ -382,6 +383,20 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         # Закрытый период не пускает даже админа: отчёт за тот месяц уже принят.
         ensure_open(order_date or timezone.localdate(), "Оформить заказ этой датой")
 
+        # Долг гасим ВМЕСТЕ с продажей, но список заказов собираем ДО неё:
+        # иначе под погашение попал бы и сам новый заказ, и с клиента взяли бы
+        # больше, чем он должен. Право то же, что у «Погасить долг» в карточке
+        # клиента, — только админ: складовщик деньги за прошлые заказы не берёт.
+        pay_debt = bool(data.get("pay_debt")) and client is not None
+        if pay_debt and not request.user.is_admin_role:
+            return Response(
+                {"detail": "Погасить долг клиента может только администратор."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        debt_ids = (
+            [r.id for r in client.receipts.all() if r.debt > 0] if pay_debt else []
+        )
+
         try:
             receipt = create_sale(
                 client=client,
@@ -397,15 +412,40 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         except InsufficientStock as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Долги прошлых заказов — от старых к новым, тем же способом оплаты.
+        # Не смогли (закрытый период, гонка с другой кассой) — заказ уже
+        # оформлен и не должен из-за этого падать: говорим об этом в ответе.
+        debt_paid = Decimal("0")
+        debt_error = ""
+        if debt_ids:
+            try:
+                allocations, _ = pay_client_debt(
+                    client, receipt_ids=debt_ids, user=request.user,
+                    method=data["payment_method"],
+                    note=f"С заказом №{receipt.order_number}",
+                )
+                debt_paid = sum((paid for _, paid in allocations), Decimal("0"))
+                AuditLog.record(
+                    request.user,
+                    f"Долг клиента {client.display_name} погашен с заказом "
+                    f"{receipt.order_number}: {debt_paid} сом",
+                )
+            except (PaymentRejected, PeriodClosed) as e:
+                debt_error = str(e)
+
         # Send the electronic receipt to the customer's Telegram (if linked).
         if client:
             send_customer_receipt(client, receipt, _receipt_lines_text(receipt))
 
         AuditLog.record(request.user, f"Оформлен чек {receipt.order_number} на {receipt.total_price} сом")
-        return Response(
-            ReceiptSerializer(receipt, context={"request": request}).data,
-            status=status.HTTP_201_CREATED,
-        )
+        payload = ReceiptSerializer(receipt, context={"request": request}).data
+        # Погашение долга — не часть чека, но кассир должен увидеть, что с ним
+        # стало: сколько ушло на прошлые заказы и не отказал ли сервер.
+        if debt_ids:
+            payload["debt_paid"] = debt_paid
+            if debt_error:
+                payload["debt_error"] = debt_error
+        return Response(payload, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
     def refund(self, request, pk=None):
@@ -414,11 +454,14 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         ensure_open(timezone.localtime(receipt.created_at), "Оформить возврат по заказу закрытого периода")
         serializer = RefundSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        receipt = refund_receipt(
-            receipt,
-            item_ids=serializer.validated_data.get("item_ids") or None,
-            user=request.user,
-        )
+        try:
+            receipt = refund_receipt(
+                receipt,
+                item_ids=serializer.validated_data.get("item_ids") or None,
+                user=request.user,
+            )
+        except ItemEditRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         if receipt.client:
             notify_customer(
                 receipt.client,
@@ -564,9 +607,15 @@ class ReceiptViewSet(viewsets.ModelViewSet):
 
         Пустая сумма — отдать всю. Частично можно: мелочи в кассе может не
         хватить и во второй раз, «отдал тысячу из полутора» — рабочая ситуация.
+
+        ЗАКРЫТЫЙ ПЕРИОД выдаче не мешает — как не мешает и приёму долга по
+        старому заказу. Клиент приходит за своей сдачей когда придёт, деньги
+        уходят из кассы СЕГОДНЯ (`cash.change_given` датируется сегодняшним
+        днём), выручка и прибыль закрытого месяца не двигаются. Проверка тут
+        стояла и запирала чужие деньги: «закрыли июль — сдачу за июль не
+        отдать», и единственным выходом было открыть весь месяц.
         """
         receipt = self.get_object()
-        ensure_open(timezone.localtime(receipt.created_at), "Выдать сдачу по заказу закрытого периода")
         try:
             given = give_change(receipt, parse_amount(request.data.get("amount")), user=request.user)
         except PaymentRejected as e:
@@ -588,6 +637,14 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     def add_items(self, request, pk=None):
         """POST /receipts/<id>/add-items/ — дозаказ: add lines to an open order."""
         receipt = self.get_object()
+        # Дозаказ поднимает сумму чека и списывает склад — для закрытого месяца
+        # это такая же правка задним числом, как исправление состава. Замок
+        # держал правку и удаление, а эту дверь не закрывал: заказ 10 августа
+        # спокойно вырастал с 200 до 250 сом уже после закрытия месяца.
+        ensure_open(
+            timezone.localtime(receipt.created_at),
+            "Дозаказать в заказ закрытого периода",
+        )
         serializer = SaleItemInputSerializer(data=request.data.get("items", []), many=True)
         serializer.is_valid(raise_exception=True)
         try:

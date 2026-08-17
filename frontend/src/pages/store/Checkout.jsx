@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useSearchParams } from "react-router-dom";
 
 import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
@@ -7,6 +8,7 @@ import { useAuth } from "../../auth/AuthContext.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
 import { PaymentBadge } from "../../components/StatusBadge.jsx";
+import { useUI } from "../../components/UIProvider.jsx";
 import { areaOf } from "../../utils/area.js";
 
 // Цену округляем ВВЕРХ до целого сома (решение заказчика), как на бэкенде
@@ -79,9 +81,122 @@ function runMetersFor(cut) {
   return 0;
 }
 
+/** Строки прошлого заказа → строки корзины: «сделать как в прошлый раз».
+ *
+ * Состав берём из чека, а ЦЕНЫ — сегодняшние из каталога. Повтор прошлогоднего
+ * заказа по прошлогодним ценам — это продажа в убыток, о которой никто не
+ * узнает; кассир видит итог до оформления и всегда может его поправить.
+ *
+ * Резка лежит в чеке ДВУМЯ строками — работа (в ней и размеры куска) и сразу
+ * за ней материал по площади. Их склеиваем обратно в одну строку кассы: иначе
+ * в корзине окажутся две половинки одной позиции, и убрать её целиком нельзя.
+ */
+function cartFromReceipt(items, materials, services, t) {
+  const matById = Object.fromEntries(materials.map((m) => [String(m.id), m]));
+  const svcById = Object.fromEntries(services.map((s) => [String(s.id), s]));
+  const sqmPrice = (m) => Number(m.sqm_price ?? m.price_per_sqm ?? m.price_per_unit ?? 0);
+  // Цена — сегодняшняя, но НЕ ноль: ставка реза может быть не проставлена в
+  // каталоге (её вводили руками в момент продажи), и «повторить» тихо отдало
+  // бы работу даром. Нет сегодняшней цены — берём ту, по которой продали.
+  const priceOrLast = (current, item) => Number(current) || Number(item.price_per_item) || 0;
+  const lines = [];
+  const used = new Set();
+  let skipped = 0;
+
+  items.forEach((it, i) => {
+    if (used.has(i)) return;
+    const qty = Number(it.quantity) || 0;
+
+    if (it.type === "SERVICE") {
+      const s = it.service ? svcById[String(it.service)] : null;
+      if (!s) return void skipped++;
+      // Парный материал — следующая строка чека: сервер пишет их подряд.
+      const next = items[i + 1];
+      const pair =
+        next && next.type === "MATERIAL" && next.sale_mode !== "PIECE" && next.material
+          ? next
+          : null;
+      const m = pair ? matById[String(pair.material)] : null;
+      if (pair && !m) return void skipped++;
+
+      if (s.uses_area && m) {
+        used.add(i + 1);
+        // Ставка: своя у станка, иначе с материала. Так же её выбирает сервер.
+        const rate = priceOrLast(
+          s.uses_running_meter ? s.rate_per_pm || m.cut_rate_per_pm : s.rate_flat,
+          it
+        );
+        lines.push({
+          key: `C${m.id}-${i}`, kind: "cutting",
+          serviceId: s.id, name: s.name,
+          materialId: m.id, materialName: m.name,
+          materialPrice: priceOrLast(sqmPrice(m), pair),
+          rate,
+          width: Number(it.width) || 0, length: Number(it.length) || 0,
+          area: Number(pair.quantity) || 0, runM: qty, qty: 1,
+        });
+        return;
+      }
+      // Работа реза без материала по площади (режут лист целиком или чужой
+      // материал): только пог.м × ставка.
+      if (s.uses_running_meter) {
+        lines.push({
+          key: `CW${s.id}-${i}`, kind: "cut-work",
+          serviceId: s.id, name: s.name,
+          materialId: it.material || null, materialName: "",
+          rate: priceOrLast(s.rate_per_pm, it), runM: qty, qty: 1,
+        });
+        return;
+      }
+      // Обычная услуга по прейскуранту: цена берётся из каталога.
+      lines.push({
+        key: `S${s.id}`, kind: "service", id: s.id, name: s.name,
+        unit_price: priceOrLast(s.uses_pieces ? s.rate_per_piece : s.base_price, it),
+        qty: qty || 1,
+      });
+      return;
+    }
+
+    // Материала больше нет в каталоге (удалён или скрыт) — не подставляем
+    // молча: кассир должен знать, что позиция выпала.
+    const m = it.material ? matById[String(it.material)] : null;
+    if (!m || qty <= 0) return void skipped++;
+
+    if (it.sale_mode === "PIECE") {
+      lines.push({
+        key: `M${m.id}-PIECE`, kind: "material", id: m.id, name: m.name,
+        price: priceOrLast(m.piece_price || m.price_per_unit, it), mode: "PIECE", qty,
+        unitWord: t((m.intake_form || "SHEET") === "ROLL" ? "warehouse.unitRoll" : "warehouse.unitSheet"),
+        wholesale_price: Number(m.wholesale_price || 0),
+        wholesale_min_qty: Number(m.wholesale_min_qty || 0),
+      });
+      return;
+    }
+    // Штучный материал (крепёж, клей) — обычная строка по количеству.
+    if (!m.is_roll_material) {
+      lines.push({
+        key: `M${m.id}`, kind: "material", id: m.id, name: m.name,
+        price: priceOrLast(m.price_per_unit, it), qty,
+      });
+      return;
+    }
+    lines.push({
+      key: `MA${m.id}-${i}`, kind: "material-area", id: m.id, name: m.name,
+      price: priceOrLast(sqmPrice(m), it),
+      width: Number(it.width) || 0, length: Number(it.length) || 0,
+      area: qty, qty: 1,
+    });
+  });
+
+  return { lines, skipped };
+}
+
 export default function Checkout() {
   const { t } = useTranslation();
   const { isAdmin } = useAuth();
+  const { toast } = useUI();
+  // ?repeat=<id> — «повторить заказ» из «Чеков» или карточки клиента.
+  const [searchParams, setSearchParams] = useSearchParams();
   const [materials, setMaterials] = useState([]);
   const [services, setServices] = useState([]);
   const [cart, setCart] = useState([]);
@@ -105,6 +220,11 @@ export default function Checkout() {
   // обратно. По умолчанию зачитываем: это то, чего ждёт и клиент, и касса.
   const [clientChange, setClientChange] = useState(0);
   const [useChange, setUseChange] = useState(true);
+  // Долг клиента по прошлым заказам и решение кассира: берём ли деньги за него
+  // сейчас. Зеркало сдачи, но галочка ВЫКЛЮЧЕНА по умолчанию: сдача — деньги
+  // цеха, а долг — деньги клиента, и решает он, платить ли сегодня.
+  const [clientDebt, setClientDebt] = useState(0);
+  const [payDebt, setPayDebt] = useState(false);
   const [referredBy, setReferredBy] = useState("");
   const [clientsList, setClientsList] = useState([]);
   const [matches, setMatches] = useState([]);
@@ -128,18 +248,70 @@ export default function Checkout() {
     api.get("/sales/receipts/titles/").then((r) => setTitleHints(r.data)).catch(() => {});
   }, []);
 
+  // Повтор заказа: состав прошлого чека перекладывается в корзину. Ждём, пока
+  // подгрузятся каталог и услуги — по ним берутся сегодняшние цены. Параметр
+  // из адреса убираем сразу, чтобы перезагрузка страницы не задвоила корзину.
+  const repeatId = searchParams.get("repeat");
+  useEffect(() => {
+    if (!repeatId || !materials.length || !services.length) return;
+    api
+      .get(`/sales/receipts/${repeatId}/`)
+      .then((r) => {
+        const src = (r.data.items || []).filter((i) => !i.is_returned);
+        const { lines, skipped } = cartFromReceipt(src, materials, services, t);
+        if (!lines.length) {
+          toast(t("checkout.repeatEmpty"), "error");
+          return;
+        }
+        setCart(lines);
+        if (r.data.title) setOrderTitle(r.data.title);
+        if (r.data.client) {
+          setClientId(r.data.client);
+          api
+            .get(`/clients/clients/${r.data.client}/`)
+            .then((c) =>
+              setClient({
+                type: c.data.type,
+                full_name: c.data.full_name || "",
+                company_name: c.data.company_name || "",
+                phone: c.data.phone || "",
+              })
+            )
+            .catch(() => {});
+        }
+        toast(
+          skipped
+            ? t("checkout.repeatedPartly", { n: lines.length, skipped })
+            : t("checkout.repeated", { n: lines.length })
+        );
+      })
+      .catch(() => toast(t("common.error"), "error"))
+      .finally(() => {
+        const next = new URLSearchParams(searchParams);
+        next.delete("repeat");
+        setSearchParams(next, { replace: true });
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repeatId, materials.length, services.length]);
+
   // Сдача выбранного клиента. Спрашиваем сервер, а не берём из списка: клиент
   // мог получить её на руки в соседнем окне, а список в кассе живёт до
   // перезагрузки страницы.
   useEffect(() => {
     if (!clientId) {
       setClientChange(0);
+      setClientDebt(0);
+      setPayDebt(false);
       return;
     }
     api
       .get(`/clients/clients/${clientId}/`)
-      .then((r) => setClientChange(Number(r.data.change_due) || 0))
-      .catch(() => setClientChange(0));
+      .then((r) => {
+        setClientChange(Number(r.data.change_due) || 0);
+        setClientDebt(Number(r.data.debt) || 0);
+        setPayDebt(false);
+      })
+      .catch(() => { setClientChange(0); setClientDebt(0); });
   }, [clientId]);
 
   useEffect(() => {
@@ -228,7 +400,11 @@ export default function Checkout() {
   // Сдача не может закрыть больше, чем стоит заказ: остаток так и лежит
   // сдачей — «зачли 1 500 из 4 000» это нормальная ситуация, а не ошибка.
   const appliedChange = useChange && clientChange > 0 ? Math.min(clientChange, total) : 0;
+  // Долг НЕ уменьшается сдачей: сдача закрывает этот заказ, а долг — прошлые.
+  const debtNow = payDebt && clientDebt > 0 ? clientDebt : 0;
   const toPay = Math.max(0, total - appliedChange);
+  // Сколько денег кассир берёт с клиента сейчас: заказ после зачёта плюс долг.
+  const cashNow = toPay + debtNow;
 
   // Remaining stock shown on EVERY material card during a sale: quantity in its
   // unit, plus ≈ whole sheets when the material has a sheet area. Null for services.
@@ -462,6 +638,9 @@ export default function Checkout() {
       // Зачесть сдачу решает касса, а СКОЛЬКО зачесть — сервер: сдача могла
       // измениться, пока чек собирали, и своё число касса бы не угадала.
       if (useChange && clientChange > 0) payload.use_change = true;
+      // Сумму долга считает сервер: он же собирает список заказов под погашение
+      // ДО продажи, чтобы новый заказ не попал сам под себя.
+      if (payDebt && clientDebt > 0) payload.pay_debt = true;
     }
     if (clientId) payload.client_id = clientId;
     else if (client.phone)
@@ -474,6 +653,8 @@ export default function Checkout() {
       setClientId(null);
       setClientChange(0);
       setUseChange(true);
+      setClientDebt(0);
+      setPayDebt(false);
       setReferredBy("");
       setPrepay("");
       setPayFull(false);
@@ -781,6 +962,34 @@ export default function Checkout() {
             </div>
           )}
 
+          {/* Старый долг клиента — тут же, а не в другом разделе: он приходит
+              за новым заказом и заодно отдаёт прошлое. Галочка ВЫКЛЮЧЕНА по
+              умолчанию: это его деньги, и решает он. Долг принимает только
+              админ — у складовщика такой галочки нет, как и в «Клиентах». */}
+          {paymentMethod !== "ONLINE" && isAdmin && clientDebt > 0 && (
+            <div
+              className="card"
+              style={{ background: "var(--warn-bg)", padding: 10, marginTop: 10 }}
+            >
+              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={payDebt}
+                  onChange={(e) => setPayDebt(e.target.checked)}
+                  style={{ width: 18, height: 18, marginTop: 2 }}
+                />
+                <span style={{ fontSize: 13 }}>
+                  {t("checkout.hasDebt", { sum: clientDebt.toLocaleString("ru-RU") })}
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    {payDebt
+                      ? t("checkout.debtWithOrder", { sum: cashNow.toLocaleString("ru-RU") })
+                      : t("checkout.debtKept")}
+                  </div>
+                </span>
+              </label>
+            </div>
+          )}
+
           {paymentMethod !== "ONLINE" && (
             <div className="field" style={{ marginTop: 10 }}>
               <label>{t("checkout.prepay")}</label>
@@ -841,9 +1050,18 @@ export default function Checkout() {
           )}
 
           {error && <div className="error">{error}</div>}
+          {/* На кнопке — сумма ЗАКАЗА. Когда гасим ещё и долг, под ней строкой
+              стоит то, что кассир реально берёт из рук: заказ после зачёта
+              сдачи плюс долг. Складывать это в одно число на кнопке нельзя —
+              «Оформить · 3 500» по заказу на 1 000 читается как ошибка. */}
           <button style={{ marginTop: 14, width: "100%", height: 52 }} onClick={submit} disabled={busy || !cart.length}>
             {busy ? t("common.loading") : `${t("checkout.submit")} · ${total.toFixed(0)} сом`}
           </button>
+          {debtNow > 0 && (
+            <p className="muted" style={{ fontSize: 13, margin: "6px 0 0", textAlign: "center" }}>
+              {t("checkout.takeNow")}: <strong>{cashNow.toLocaleString("ru-RU")} сом</strong>
+            </p>
+          )}
         </div>
       </div>
 
@@ -1129,6 +1347,19 @@ export default function Checkout() {
               <span className="k">{t("checkout.changeUsed")}</span>
               <span>{somFmt(receipt.change_applied)}</span>
             </div>
+          )}
+          {/* Долг закрыт вместе с заказом — это отдельные деньги, и кассир
+              должен видеть, что они приняты (или что принять не вышло). */}
+          {Number(receipt.debt_paid) > 0 && (
+            <div className="crow">
+              <span className="k">{t("checkout.debtPaid")}</span>
+              <strong>{somFmt(receipt.debt_paid)}</strong>
+            </div>
+          )}
+          {receipt.debt_error && (
+            <p className="muted" style={{ fontSize: 12, color: "var(--danger)" }}>
+              {receipt.debt_error}
+            </p>
           )}
           {Number(receipt.change_due) > 0 && (
             <div className="crow">

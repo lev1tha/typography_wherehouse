@@ -128,6 +128,53 @@ class PeriodLockTests(APITestCase):
             self.client.delete(f"/api/sales/receipts/{receipt.id}/").status_code, 400
         )
 
+    def test_change_can_still_be_handed_out_after_closing(self):
+        """Сдачу по старому заказу отдать МОЖНО — это деньги клиента.
+
+        Замок держит правки прошлого месяца, а выдача сдачи — движение
+        сегодняшнего дня: из кассы уходит сегодня, выручка и прибыль закрытого
+        месяца не меняются. Пока проверка тут стояла, «закрыли июль» означало
+        «сдачу за июль не отдать», и приходилось открывать весь месяц.
+        """
+        receipt = sale_service.create_sale(
+            client=self.customer, cashier=self.admin,
+            payment_method=Receipt.PaymentMethod.CASH,
+            items_data=[{"type": "MATERIAL", "material": self.material, "quantity": 1, "mode": "SQM"}],
+            amount_paid=Decimal("500"),
+            created_at=timezone.make_aware(
+                timezone.datetime.combine(self.inside, timezone.datetime.min.time())
+            ),
+        )
+        self.assertGreater(receipt.change_due, 0)
+        self._close()
+        resp = self.client.post(
+            f"/api/sales/receipts/{receipt.id}/give-change/", {}, format="json"
+        )
+        self.assertEqual(resp.status_code, 200, resp.data)
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.change_due, Decimal("0"))
+
+    def test_old_order_cannot_be_topped_up_with_more_items(self):
+        """Дозаказ — та же правка задним числом: сумма чека и склад поедут.
+
+        Эта дверь была открыта: замок держал правку состава и удаление, а
+        «+ Дозаказать» пропускал, и заказ закрытого месяца вырастал с 200 до
+        250 сом уже после того, как отчёт приняли.
+        """
+        receipt = self._old_receipt()
+        before = receipt.total_price
+        self._close()
+        resp = self.client.post(
+            f"/api/sales/receipts/{receipt.id}/add-items/",
+            {"items": [{"type": "MATERIAL", "material": self.material.id,
+                        "quantity": 1, "mode": "SQM"}]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn("период закрыт", str(resp.data).lower())
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.total_price, before)
+
     def test_old_order_cannot_be_paid_or_refunded(self):
         receipt = self._old_receipt()
         self._close()

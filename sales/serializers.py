@@ -1,5 +1,6 @@
 import base64
 import io
+from decimal import Decimal
 
 import qrcode
 from rest_framework import serializers
@@ -213,6 +214,21 @@ class SaleItemInputSerializer(serializers.Serializer):
             raise serializers.ValidationError("Для позиции материала укажите material.")
         if attrs["type"] == TransactionItem.Type.SERVICE and not attrs.get("service"):
             raise serializers.ValidationError("Для позиции услуги укажите service.")
+
+        # Штуки — целые. «2,5 листа» или «2,5 крепежа» не бывает, а система их
+        # спокойно продавала и списывала, оставляя на складе дробный хвост.
+        # Килограммы, литры и метры дробными быть могут — их не трогаем.
+        material = attrs.get("material")
+        qty = Decimal(str(attrs.get("quantity") or 0))
+        piecewise = material is not None and (
+            attrs.get("mode") == TransactionItem.SaleMode.PIECE
+            or material.unit == Material.Unit.PIECE
+        )
+        if piecewise and qty != qty.to_integral_value():
+            unit = "листами" if material.is_roll_material else "штуками"
+            raise serializers.ValidationError(
+                f"«{material.name}» продаётся целыми {unit} — {qty} не получится."
+            )
         return attrs
 
 
@@ -240,6 +256,10 @@ class SaleCreateSerializer(serializers.Serializer):
     # же клиента. Деньги за неё уже в кассе, поэтому она и не входит в
     # `amount_paid`, который присылает касса.
     use_change = serializers.BooleanField(required=False, default=False)
+    # «Клиент гасит и старый долг»: одной продажей и заказ оформляется, и долги
+    # прошлых заказов закрываются. Раньше за этим приходилось идти в «Клиенты →
+    # Погасить долг», то есть бросать наполовину собранный чек.
+    pay_debt = serializers.BooleanField(required=False, default=False)
     # Дата заказа задним числом. Не указана — «сейчас». Право проверяет вьюха:
     # по этой дате считается вся отчётность, ставить её в прошлое может админ.
     order_date = serializers.DateField(required=False, allow_null=True)
@@ -248,6 +268,22 @@ class SaleCreateSerializer(serializers.Serializer):
     def validate_items(self, value):
         if not value:
             raise serializers.ValidationError("Добавьте хотя бы одну позицию.")
+        # Позиция «содержательна», если в ней есть количество ИЛИ размеры куска
+        # (у резки количество не передаётся вовсе — там ширина×длина). Заказ, где
+        # везде нули, это промах по кнопке: раньше он молча заводил чек на 0 сом,
+        # и такие пустышки оседали в списке чеков и в статистике.
+        # Нулевая ЦЕНА при этом законна — подарок или бесплатная доработка.
+        def has_content(item):
+            if (item.get("quantity") or 0) > 0:
+                return True
+            if (item.get("width") or 0) > 0 and (item.get("length") or 0) > 0:
+                return True
+            return (item.get("running_meters") or 0) > 0
+
+        if not any(has_content(item) for item in value):
+            raise serializers.ValidationError(
+                "В заказе нет ни одной позиции с количеством или размером."
+            )
         return value
 
     def validate_order_date(self, value):

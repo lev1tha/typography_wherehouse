@@ -128,9 +128,17 @@ class DailyReportTests(APITestCase):
         self.assertEqual(Decimal(str(totals["profit"])), Decimal("700"))  # 1000 - 0 - 300
 
     # ---- future days ---------------------------------------------------
-    def test_future_days_have_null_profit_and_excluded_from_totals(self):
-        # A day that hasn't happened yet must not show as "in the red" just
-        # because it hasn't earned back its (unlived) share of rent yet.
+    def test_future_days_have_null_profit_but_the_total_covers_the_month(self):
+        """Будущий день не краснеет, но ИТОГ считает месяц целиком.
+
+        Столбик ещё не наступившего дня не рисуем: он показал бы убыток на
+        неотработанную аренду. А вот итог под графиком раньше складывался из
+        одних прошедших дней — и доля аренды за остаток месяца из него
+        выпадала. На одном экране стояло −49 497 в плитке сверху и −35 949 под
+        графиком, притом что расходы в обоих местах были подписаны одинаково.
+        Итог обязан отвечать на тот же вопрос, что плитка: выручка − расходы
+        за месяц.
+        """
         now = timezone.localdate()
         self._fixed(day=now.replace(day=1), amount="310")
         data, rows = self._rows(now.year, now.month)
@@ -139,10 +147,9 @@ class DailyReportTests(APITestCase):
                 self.assertIsNone(row["profit"], f"day {day_num} is in the future")
             else:
                 self.assertIsNotNone(row["profit"], f"day {day_num} is past/today")
-        share = Decimal(str(rows[1]["fixed_share"]))
-        expected = -(share * now.day)  # only elapsed days contribute their share
-        actual = Decimal(str(data["totals"]["profit"]))
-        self.assertLess(abs(actual - expected), Decimal("0.05"))
+        totals = data["totals"]
+        self.assertEqual(Decimal(str(totals["fixed"])), Decimal("310"))
+        self.assertEqual(Decimal(str(totals["profit"])), Decimal("-310"))
 
     # ---- month/year boundaries -----------------------------------------
     def test_december_does_not_leak_into_next_january(self):
@@ -710,6 +717,15 @@ class MaterialStockReportTests(APITestCase):
             receipt=receipt, type=TransactionItem.Type.MATERIAL, material=self.material,
             quantity=Decimal(sheets), price_per_item=Decimal("400"),
             sale_mode=TransactionItem.SaleMode.PIECE, is_returned=returned,
+        )
+        # Списание фикстуры идёт мимо продажи, поэтому остатка на складе может
+        # не быть вовсе — а с тех пор, как расход ниже нуля запрещён, такой
+        # «виртуальный» расход не пройдёт. Складскому листу важны ДВИЖЕНИЯ по
+        # месяцам, а не текущий остаток, поэтому просто держим его достаточным.
+        from warehouse.models import Material
+
+        Material.objects.filter(pk=self.material.pk).update(
+            quantity=Decimal("100000")
         )
         apply_stock_change(self.material, Decimal(-2) * sheets)
         if returned:

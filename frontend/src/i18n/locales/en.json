@@ -182,7 +182,8 @@
     "PIECE": "pcs",
     "KG": "kg",
     "LITER": "L",
-    "SHEET": "sheet"
+    "SHEET": "sheet",
+    "MM": "mm"
   },
   "pricing": {
     "title": "Pricing & services",
@@ -383,7 +384,15 @@
     "hasChange": "Client has change from earlier orders: {{sum}} som",
     "changeApplied": "{{sum}} som will cover part of this order — {{left}} som left to pay.",
     "changeKept": "The change stays with the client — hand it out from Receipts.",
-    "changeUsed": "Covered by change"
+    "changeUsed": "Covered by change",
+    "hasDebt": "Client owes for earlier orders: {{sum}} som",
+    "debtWithOrder": "You take {{sum}} som — this order and the debt together.",
+    "debtKept": "The debt stays with the client — collect it from Clients.",
+    "debtPaid": "Debt collected",
+    "takeNow": "To collect now",
+    "repeated": "Lines copied: {{n}}. Prices are today's.",
+    "repeatedPartly": "Lines copied: {{n}}. Skipped (not in catalogue): {{skipped}}.",
+    "repeatEmpty": "Nothing to repeat: none of this order's items are in the catalogue any more."
   },
   "receipts": {
     "title": "Receipts",
@@ -461,7 +470,9 @@
     "refundEmpty": "Nothing to refund — every line was already returned",
     "refundBtn": "Refund",
     "cashierShort": "by",
-    "costShort": "cost"
+    "costShort": "cost",
+    "repeat": "Repeat",
+    "repeatHint": "Build the same order at the till — at today's prices"
   },
   "fulfillment": {
     "PROCESSING": "Processing",
@@ -706,7 +717,9 @@
     "payTitle": "Paying the debt",
     "payStep1": "Wait until your order is ready (status “Ready for pickup”).",
     "payStep2": "Pick up your order at the shop and pay the rest in cash.",
-    "payNote": "Online payment isn't available yet — we settle on pickup."
+    "payNote": "Online payment isn't available yet — we settle on pickup.",
+    "changeDue": "Your change is with us",
+    "changeHint": "Pick it up next time, or we'll put it towards your next order."
   },
   "home": {
     "title": "Home",
