@@ -20,6 +20,9 @@ const expenseRows = (fin, materialsLabel) => [
   ...[...(fin.fixed?.rows || []), ...(fin.variable?.rows || [])].filter((r) => r.in_profit),
 ];
 
+// Количества без хвоста нулей и с разрядами — как в каталоге («2», «0», «14,88»).
+const qtyFmt = (v) => Number(v || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+
 function Stat({ label, value, suffix, color, sub }) {
   return (
     <div className="stat">
@@ -372,10 +375,10 @@ export default function Dashboard() {
                     </span>
                   </td>
                   <td style={{ color: Number(m.quantity) > 0 ? "var(--danger)" : "var(--ink-muted)", fontWeight: 600 }}>
-                    {Number(m.quantity).toFixed(2)} {t(`unit.${m.unit}`)}
+                    {qtyFmt(m.quantity)} {t(`unit.${m.unit}`)}
                     {m.sheets_remaining != null ? ` · ≈${Math.round(Number(m.sheets_remaining))} ${t("warehouse.sheetsShort")}` : ""}
                   </td>
-                  <td className="muted">{Number(m.critical_balance).toFixed(2)}</td>
+                  <td className="muted">{qtyFmt(m.critical_balance)}</td>
                 </tr>
               ))}
             </tbody>

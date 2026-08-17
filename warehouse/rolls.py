@@ -13,6 +13,11 @@ from django.db import transaction
 from .models import InventoryLog, Material, Roll
 
 
+
+def _som(value) -> str:
+    """Сумма целыми сомами с разрядами через пробел: 12000 → «12 000»."""
+    return f"{int(Decimal(str(value or 0)).quantize(Decimal('1'))):,}".replace(",", " ")
+
 def compute_area(form: str, *, width=None, length=None, height=None, sheet_count=None) -> Decimal:
     """Area in кв.м for a lot, from its form and dimensions.
 
@@ -88,7 +93,13 @@ def receive_lot(
         material=locked,
         quantity_changed=Decimal(area),
         actual_price=roll.cost_per_sqm,
-        reason=f"Поступление: {roll.dimensions_label} ({area} кв.м), {purchase_cost} сом",
+        # Площадь до двух знаков и сумма с разрядами: «(14.88 кв.м), 12 000 сом»
+        # читается, «(14.8840 кв.м), 12000.00 сом» — нет.
+        reason=(
+            f"Поступление: {roll.dimensions_label} "
+            f"({Decimal(area).quantize(Decimal('0.01'))} кв.м), "
+            f"{_som(purchase_cost)} сом"
+        ),
         created_by=user,
         # Накладная, если приход пришёл документом, а не одиночной кнопкой.
         supply=supply,

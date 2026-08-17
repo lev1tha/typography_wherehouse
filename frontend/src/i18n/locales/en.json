@@ -301,7 +301,9 @@
     "onlyChange": "With change only",
     "changeDue": "Change owed",
     "inn": "Tax ID",
-    "innPh": "for the invoice"
+    "innPh": "for the invoice",
+    "orderRefunded": "refunded {{sum}} som",
+    "ordersCancelled": "fully returned: {{n}}"
   },
   "checkout": {
     "outOfStock": "Out of stock",
@@ -324,7 +326,7 @@
     "receipt": "Receipt",
     "payOnline": "Pay online",
     "scanQr": "Scan the QR to pay",
-    "tapToAdd": "Tap a product on the left to add it to the receipt",
+    "tapToAdd": "Tap a product to add it to the receipt",
     "letterTypeLabel": "Letter type",
     "cutMaterial": "Material",
     "rateWork": "Cut rate (per r.m)",

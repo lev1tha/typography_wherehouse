@@ -71,6 +71,13 @@ def post_supply(supply: Supply, lines_data: list[dict], *, user=None) -> Supply:
             SupplyLine.Form.SHEET if material.is_roll_material else SupplyLine.Form.QTY
         )
         cost = Decimal(str(data.get("cost") or 0))
+        # Лист без размеров — берём размер листа с материала (форма его так и
+        # подставляет; здесь то же для тех, кто зовёт API напрямую).
+        if form == SupplyLine.Form.SHEET and material.is_roll_material:
+            if not data.get("width") and material.sheet_width:
+                data["width"] = material.sheet_width
+            if not data.get("height") and material.sheet_height:
+                data["height"] = material.sheet_height
         qty = line_quantity(
             material, form,
             width=data.get("width"), height=data.get("height"),

@@ -535,10 +535,14 @@ class Roll(models.Model):
 
     @property
     def dimensions_label(self) -> str:
+        # Числа без хвоста нулей: «Лист 1.22×2.44 ×5», а не «×5.00».
+        def n(v):
+            return "?" if v is None else format(Decimal(v).normalize(), "f")
+
         if self.form == self.Form.SHEET:
-            dims = f"{self.width or '?'}×{self.height or '?'}"
-            return f"Лист {dims}" + (f" ×{self.sheet_count}" if self.sheet_count else "")
-        return f"Рулон {self.width or '?'}×{self.length or '?'}м"
+            dims = f"{n(self.width)}×{n(self.height)}"
+            return f"Лист {dims}" + (f" ×{n(self.sheet_count)}" if self.sheet_count else "")
+        return f"Рулон {n(self.width)}×{n(self.length)}м"
 
     def __str__(self) -> str:
         label = self.code or f"Партия #{self.pk}"

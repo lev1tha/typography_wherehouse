@@ -410,14 +410,18 @@ function ReceiptsTab() {
         </select>
         {/* Даты подписаны прямо в поле: без подписи два одинаковых календаря
             рядом не читаются — непонятно, где «с», а где «по». */}
-        <label className="filter-date">
-          <span>{t("dashboard.from")}</span>
-          <input type="date" value={dateFrom} max={dateTo || undefined} onChange={(e) => setDateFrom(e.target.value)} />
-        </label>
-        <label className="filter-date">
-          <span>{t("dashboard.to")}</span>
-          <input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => setDateTo(e.target.value)} />
-        </label>
+        {/* Оба календаря — одной неразрывной парой: поодиночке «С» оставалось в
+            первой строке, а «По» падало во вторую. */}
+        <div className="row" style={{ gap: 8, margin: 0, flexWrap: "nowrap" }}>
+          <label className="filter-date">
+            <span>{t("dashboard.from")}</span>
+            <input type="date" value={dateFrom} max={dateTo || undefined} onChange={(e) => setDateFrom(e.target.value)} />
+          </label>
+          <label className="filter-date">
+            <span>{t("dashboard.to")}</span>
+            <input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => setDateTo(e.target.value)} />
+          </label>
+        </div>
         <button
           className={onlyChange ? "" : "secondary"}
           onClick={() => setOnlyChange((v) => !v)}

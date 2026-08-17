@@ -5,6 +5,9 @@ import api from "../../api/api.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import AddToOrderModal from "../../components/AddToOrderModal.jsx";
 import RefundModal from "../../components/RefundModal.jsx";
+
+const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const trimQty = (n) => String(+Number(n || 0).toFixed(3));
 import DataTable from "../../components/DataTable.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
@@ -140,7 +143,7 @@ export default function StoreReceipts() {
           <span className="muted">—</span>
         ),
     },
-    { key: "total_price", label: t("common.total"), sortKey: "total_price", render: (r) => `${r.total_price} сом` },
+    { key: "total_price", label: t("common.total"), sortKey: "total_price", render: (r) => som(r.total_price) },
     {
       key: "debt",
       label: t("receipts.debt"),
@@ -157,7 +160,7 @@ export default function StoreReceipts() {
         if (!hasDebt && !canUndo) return <span className="muted">0</span>;
         return (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
-            {hasDebt && <span style={{ color: "var(--danger)", fontWeight: 600 }}>{r.debt} сом</span>}
+            {hasDebt && <span style={{ color: "var(--danger)", fontWeight: 600 }}>{som(r.debt)}</span>}
             {hasDebt && isAdmin && (
               <button
                 className="secondary"
@@ -284,33 +287,48 @@ export default function StoreReceipts() {
             </>
           }
         >
-          {open.items.map((it) => (
-            <div className="crow" key={it.id}>
-              <span>
-                {(it.type === "SERVICE" ? it.service_name : it.material_name)} × {it.quantity}
-                {it.is_returned && (
-                  <span className="badge warn" style={{ marginLeft: 6 }}>
-                    {t("receipts.returned")}
+          {/* Строки с единицей и ценой, суммы целыми сомами — как в печатной
+              форме и в списке чеков. */}
+          {open.items.map((it) => {
+            const unit = it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "";
+            return (
+              <div className="crow" key={it.id}>
+                <span>
+                  {it.type === "SERVICE" ? it.service_name : it.material_name}
+                  <span className="muted">
+                    {" "}× {trimQty(it.quantity)} {unit} · {trimQty(it.price_per_item)}{" "}
+                    {t("checkout.perPieceShort", { unit })}
                   </span>
-                )}
-              </span>
-              <span>{it.line_total} сом</span>
-            </div>
-          ))}
+                  {it.is_returned && (
+                    <span className="badge warn" style={{ marginLeft: 6 }}>
+                      {t("receipts.returned")}
+                    </span>
+                  )}
+                </span>
+                <span>{som(it.line_total)}</span>
+              </div>
+            );
+          })}
           <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 8 }}>
             <strong>{t("common.total")}</strong>
-            <strong>{open.total_price} сом</strong>
+            <strong>{som(open.total_price)}</strong>
           </div>
-          {Number(open.debt) > 0 && (
+          {Number(open.amount_paid) > 0 && (
             <div className="crow">
               <span className="k">{t("receipts.paid")}</span>
-              <span>{open.amount_paid} сом</span>
+              <span>{som(open.amount_paid)}</span>
+            </div>
+          )}
+          {Number(open.change_due) > 0 && (
+            <div className="crow">
+              <span className="k">{t("receipts.change")}</span>
+              <strong style={{ color: "var(--accent-strong)" }}>{som(open.change_due)}</strong>
             </div>
           )}
           {Number(open.debt) > 0 && (
             <div className="crow">
               <span className="k">{t("receipts.debt")}</span>
-              <strong style={{ color: "var(--danger)" }}>{open.debt} сом</strong>
+              <strong style={{ color: "var(--danger)" }}>{som(open.debt)}</strong>
             </div>
           )}
           <div className="crow">

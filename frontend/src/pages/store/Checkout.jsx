@@ -12,6 +12,10 @@ import { areaOf } from "../../utils/area.js";
 // Цену округляем ВВЕРХ до целого сома (решение заказчика), как на бэкенде
 // (TransactionItem.line_total). Эпсилон гасит float-шум, чтобы целое не «прыгало».
 const ceilSom = (v) => Math.max(0, Math.ceil((Number(v) || 0) - 1e-6));
+// Сумма целыми сомами с разрядами — как в чеках и печатных формах.
+const somFmt = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+// Количество без хвоста нулей: 1.230 → 1.23, 2.000 → 2.
+const trimQty = (n) => String(+Number(n || 0).toFixed(3));
 
 // Whole-sheet line where the wholesale price is in effect (qty reached the min).
 function isWholesale(line) {
@@ -649,7 +653,7 @@ export default function Checkout() {
           )}
 
           <div className="row">
-            <div className="field" style={{ width: 120, margin: 0 }}>
+            <div className="field" style={{ minWidth: 120, flex: "0 0 auto", margin: 0 }}>
               <label>{t("clients.type")}</label>
               <select value={client.type} onChange={(e) => { setClient({ ...client, type: e.target.value }); setClientId(null); }}>
                 <option value="PHYSICAL">{t("clients.physical")}</option>
@@ -1032,15 +1036,40 @@ export default function Checkout() {
 
       {receipt && (
         <Modal title={`${t("checkout.receipt")} №${receipt.order_number}`} onClose={() => setReceipt(null)}>
+          {/* Строки — с единицей и ценой, суммы — целыми сомами, как в печатной
+              форме и в списке чеков; «Акрил 3мм × 0.554» и «831.00 сом» ничего
+              не объясняли. Ниже — что приняли, сдача и долг: это то, что
+              кассир должен увидеть сразу после оформления. */}
           {receipt.items.map((it) => (
             <div className="crow" key={it.id}>
-              <span>{(it.type === "SERVICE" ? it.service_name : it.material_name)} × {it.quantity}</span>
-              <span>{it.line_total} сом</span>
+              <span>
+                {it.type === "SERVICE" ? it.service_name : it.material_name}
+                <span className="muted">
+                  {" "}× {trimQty(it.quantity)} {it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || ""}
+                  {" "}· {trimQty(it.price_per_item)} {t("checkout.perPieceShort", { unit: it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "" })}
+                </span>
+              </span>
+              <span>{somFmt(it.line_total)}</span>
             </div>
           ))}
           <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 8 }}>
-            <strong>{t("common.total")}</strong><strong>{receipt.total_price} сом</strong>
+            <strong>{t("common.total")}</strong><strong>{somFmt(receipt.total_price)}</strong>
           </div>
+          {Number(receipt.amount_paid) > 0 && (
+            <div className="crow"><span className="k">{t("print.paid")}</span><span>{somFmt(receipt.amount_paid)}</span></div>
+          )}
+          {Number(receipt.change_due) > 0 && (
+            <div className="crow">
+              <span className="k">{t("checkout.change")}</span>
+              <strong style={{ color: "var(--accent-strong)" }}>{somFmt(receipt.change_due)}</strong>
+            </div>
+          )}
+          {Number(receipt.debt) > 0 && (
+            <div className="crow">
+              <span className="k">{t("receipts.debt")}</span>
+              <strong style={{ color: "var(--danger)" }}>{somFmt(receipt.debt)}</strong>
+            </div>
+          )}
           <div className="crow"><span className="k">{t("receipts.status")}</span><PaymentBadge status={receipt.payment_status} /></div>
           {receipt.payment_status === "PENDING" && receipt.payment_url && (
             <>

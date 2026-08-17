@@ -408,7 +408,12 @@ export default function Clients() {
           </div>
           <div className="crow">
             <span className="k">{t("clients.orders")}</span>
-            <span>{detail.stats?.orders_count}</span>
+            <span>
+              {detail.stats?.orders_count}
+              {detail.stats?.cancelled_count > 0 && (
+                <span className="muted"> · {t("clients.ordersCancelled", { n: detail.stats.cancelled_count })}</span>
+              )}
+            </span>
           </div>
           <div className="crow">
             <span className="k">{t("clients.ltv")}</span>
@@ -484,14 +489,31 @@ export default function Clients() {
                     </strong>
                     <span className="muted">{new Date(o.created_at).toLocaleDateString("ru-RU")}</span>
                   </div>
+                  {/* Возвращённые строки остаются в истории — зачёркнутыми и с
+                      пометкой; раньше они просто исчезали, и у возвращённого
+                      заказа оставался голый итог без объяснений. */}
                   {o.items.map((it, i) => (
                     <div className="crow" key={i} style={{ fontSize: 13 }}>
-                      <span className="k">{it.title} × {Number(it.quantity)}</span>
-                      <span>{Number(it.line_total).toLocaleString("ru-RU")} сом</span>
+                      <span className="k" style={it.is_returned ? { textDecoration: "line-through" } : undefined}>
+                        {it.title} × {Number(it.quantity)}
+                        {it.is_returned && (
+                          <span className="badge warn" style={{ marginLeft: 6, textDecoration: "none" }}>
+                            {t("receipts.returned")}
+                          </span>
+                        )}
+                      </span>
+                      <span style={it.is_returned ? { textDecoration: "line-through", color: "var(--ink-muted)" } : undefined}>
+                        {Number(it.line_total).toLocaleString("ru-RU")} сом
+                      </span>
                     </div>
                   ))}
                   <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 4, paddingTop: 4 }}>
                     <strong>{Number(o.total_price).toLocaleString("ru-RU")} сом</strong>
+                    {Number(o.refunded_amount) > 0 && (
+                      <span className="muted" style={{ fontSize: 13 }}>
+                        {t("clients.orderRefunded", { sum: Number(o.refunded_amount).toLocaleString("ru-RU") })}
+                      </span>
+                    )}
                     {Number(o.debt) > 0 && (
                       <span style={{ color: "var(--danger)", fontSize: 13 }}>
                         {t("receipts.debt")}: {Number(o.debt).toLocaleString("ru-RU")}

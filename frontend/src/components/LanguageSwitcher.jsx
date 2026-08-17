@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
 const LANGS = [
@@ -8,6 +9,13 @@ const LANGS = [
 
 export default function LanguageSwitcher() {
   const { i18n } = useTranslation();
+
+  // Язык документа = язык интерфейса: правильно для читалок экрана и
+  // проверки орфографии. Формат нативного календаря (mm/dd/yyyy в
+  // скриншотах) от этого не зависит — его задаёт язык самого браузера.
+  useEffect(() => {
+    document.documentElement.lang = i18n.resolvedLanguage || "ru";
+  }, [i18n.resolvedLanguage]);
 
   function change(code) {
     i18n.changeLanguage(code);

@@ -184,6 +184,13 @@ export default function PrintDocs({ receipt, onClose }) {
               {t("print.noRequisites")}
             </p>
           )}
+          {/* Почему счёт выключен — словами под вкладками, а не только во
+              всплывающей подсказке при наведении: её никто не находил. */}
+          {!invoiceReady && (
+            <p className="muted" style={{ fontSize: 13, margin: "6px 0 0", color: "var(--warn-ink)" }}>
+              {t("print.needBank")}
+            </p>
+          )}
         </div>
 
         {/* Лист А4: ровно то, что уйдёт на бумагу. */}

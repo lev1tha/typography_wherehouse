@@ -45,6 +45,16 @@ export default function RefSelect({
       setAdding(false);
       return;
     }
+    // Такое название уже есть — просто выбираем его, ничего не создавая.
+    // Раньше сервер отвечал «уже существует», текст оставался в поле, и
+    // документ уезжал без поставщика — человек-то видел имя в поле.
+    const existing = options.find((o) => String(o.name).trim().toLowerCase() === clean.toLowerCase());
+    if (existing) {
+      onChange(String(existing.id));
+      setAdding(false);
+      setName("");
+      return;
+    }
     setBusy(true);
     try {
       const { data } = await api.post(endpoint, { name: clean });
@@ -54,6 +64,9 @@ export default function RefSelect({
       setName("");
     } catch (e) {
       toast(apiError(e, t("common.error")), "error");
+      // Не создалось — возвращаем список: пустая ячейка честнее имени, которого нет.
+      setAdding(false);
+      setName("");
     } finally {
       setBusy(false);
     }

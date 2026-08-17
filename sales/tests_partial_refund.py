@@ -121,3 +121,17 @@ class PartialRefundTests(APITestCase):
         self.assertTrue(returned[glue_line.id])
         self.assertFalse(returned[r.items.get(material=self.bolts).id])
         self.assertEqual(Decimal(str(res.data["refunded_amount"])), Decimal("200"))
+
+    def test_client_card_shows_returned_lines_and_counts_like_the_list(self):
+        """Карточка клиента после возврата целиком: заказ остаётся в истории с
+        зачёркнутыми строками, «Заказов» считает без отменённых — как список."""
+        r = self._sale(paid=Decimal("500"))
+        refund_receipt(r, user=self.admin)
+        card = self.client.get(f"/api/clients/clients/{self.client_obj.id}/").data
+        self.assertEqual(card["stats"]["orders_count"], 0)
+        self.assertEqual(card["stats"]["cancelled_count"], 1)
+        order = next(o for o in card["orders"] if str(o["id"]) == str(r.id))
+        self.assertTrue(all(i["is_returned"] for i in order["items"]))
+        self.assertEqual(Decimal(str(order["refunded_amount"])), Decimal("500"))
+        row = next(x for x in self.client.get("/api/clients/clients/").data["results"] if x["id"] == self.client_obj.id)
+        self.assertEqual(row["orders_count"], card["stats"]["orders_count"])

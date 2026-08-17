@@ -161,7 +161,13 @@ class Command(BaseCommand):
         # or whole sheet (piece_price), cut work billed per пог.м at cut_rate.
         # (тип, name, sqm_price, cut_rate_per_pm, piece_price, piece_area)
         D = Decimal
-        SHEET_AREA = D("2.98")  # лист 1.22×2.44
+        # Стандартный лист 1.22 × 2.44 м. Размер задаём ЯВНО, а не одной
+        # площадью: по размеру касса и приход подставляют ширину/высоту, а
+        # площадь считается из него с четырьмя знаками (2.9768), как везде.
+        # Без размеров накладная на «Лист» отвечала «не из чего посчитать
+        # количество», и приход приходилось вбивать руками.
+        SHEET_W, SHEET_H = D("1.22"), D("2.44")
+        SHEET_AREA = SHEET_W * SHEET_H  # 2.9768
         catalogue = [
             # Акрил (цвет = отдельный товар), резка 20 сом/пог.м
             ("Акрил", "Белый акрил", "1250", "20", "3700", SHEET_AREA),
@@ -192,6 +198,7 @@ class Command(BaseCommand):
                     "purchase_price": D("0"),
                     "price_per_sqm": D(sqm), "cut_rate_per_pm": D(cut),
                     "piece_price": D(piece), "piece_area": area,
+                    "sheet_width": SHEET_W, "sheet_height": SHEET_H,
                 },
             )
             if not created and not m.price_per_sqm:
@@ -201,6 +208,12 @@ class Command(BaseCommand):
                 m.piece_price = D(piece)
                 m.piece_area = area
                 m.save(update_fields=["type", "price_per_sqm", "cut_rate_per_pm", "piece_price", "piece_area"])
+            # Размер листа дописываем и существующим записям, если его нет:
+            # старый seed знал только площадь.
+            if not created and not (m.sheet_width and m.sheet_height):
+                m.sheet_width, m.sheet_height = SHEET_W, SHEET_H
+                # save() пересчитывает площадь из размера — сохраняем и её.
+                m.save(update_fields=["sheet_width", "sheet_height", "piece_area"])
 
         # Shop-wide pricing settings (master's wage % of cutting work).
         PricingSettings.objects.get_or_create(pk=1, defaults={"master_commission_percent": Decimal("4")})

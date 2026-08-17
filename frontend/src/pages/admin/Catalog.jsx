@@ -317,7 +317,8 @@ export default function Catalog({ embedded = false }) {
         </>
       ),
     },
-    { key: "critical_balance", label: t("warehouse.critical") },
+    // Порог — тем же форматом, что остаток: «2», а не «2.00» рядом с «0 кв.м».
+    { key: "critical_balance", label: t("warehouse.critical"), render: (m) => qty(m.critical_balance) },
     // У закупочной цены единицы не было ВООБЩЕ: «980.00 сом» — за лист или за
     // квадрат? Рядом стояла розничная «1470 сом/кв.м», и две цифры выглядели
     // сравнимыми, хотя без единицы сравнивать их нельзя. Теперь единица есть у

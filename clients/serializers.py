@@ -1,6 +1,6 @@
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
-from django.db.models import Count, Sum
+from django.db.models import Count, Q, Sum
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -234,6 +234,9 @@ class ClientDetailSerializer(ClientSerializer):
             created = timezone.localtime(r.created_at).date()
             if (d_from and created < d_from) or (d_to and created > d_to):
                 continue
+            # Возвращённые строки тоже отдаём — с флагом: без них у
+            # возвращённого заказа в карточке оставался голый итог «452 сом»
+            # без единого намёка на возврат.
             items = [
                 {
                     "title": (
@@ -241,10 +244,14 @@ class ClientDetailSerializer(ClientSerializer):
                         else (i.service.name if i.service_id else "—")
                     ),
                     "quantity": i.quantity,
-                    "line_total": i.line_total,
+                    # У возвращённой строки line_total = 0; для истории — что стоила.
+                    "line_total": (
+                        (i.quantity * i.price_per_item).quantize(Decimal("1"), rounding=ROUND_CEILING)
+                        if i.is_returned else i.line_total
+                    ),
+                    "is_returned": i.is_returned,
                 }
                 for i in r.items.all()
-                if not i.is_returned
             ]
             rows.append({
                 "id": r.id,
@@ -273,9 +280,16 @@ class ClientDetailSerializer(ClientSerializer):
         return ReferralChangeRequestSerializer(req).data if req else None
 
     def get_stats(self, obj):
+        from sales.models import Receipt
+
         receipts = obj.receipts.all()
+        # «Заказов» — как в списке клиентов: без отменённых (целиком возвращённых).
+        # Раньше карточка считала все, а список — только живые, и у клиента с
+        # одним возвращённым заказом стояло «1» в карточке и «—» в списке.
+        # Возвращённые показаны отдельно, чтобы история не пропадала.
         agg = receipts.aggregate(
-            orders=Count("id"),
+            orders=Count("id", filter=~Q(status=Receipt.Status.CANCELLED)),
+            cancelled=Count("id", filter=Q(status=Receipt.Status.CANCELLED)),
             gross=Sum("total_price"),
             refunded=Sum("refunded_amount"),
         )
@@ -283,6 +297,7 @@ class ClientDetailSerializer(ClientSerializer):
         refunded = agg["refunded"] or Decimal("0")
         return {
             "orders_count": agg["orders"] or 0,
+            "cancelled_count": agg["cancelled"] or 0,
             "lifetime_value": gross - refunded,
             "gross": gross,
             "refunded": refunded,

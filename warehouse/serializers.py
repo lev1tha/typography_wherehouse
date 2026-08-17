@@ -412,6 +412,25 @@ class SupplierSerializer(serializers.ModelSerializer):
             "id", "name", "phone", "inn", "note", "is_archived",
             "supplies_count", "debt",
         ]
+        # Уникальность проверяем сами (ниже), без регистра и лишних пробелов, с
+        # человеческим текстом: стандартное «поставщик с таким название уже
+        # существует» не склонялось и не ловило «глобал» против «Глобал».
+        extra_kwargs = {"name": {"validators": []}}
+
+    def validate_name(self, value):
+        clean = (value or "").strip()
+        if not clean:
+            raise serializers.ValidationError("Укажите название поставщика.")
+        # Сравниваем в Python: `iexact` в SQLite не видит регистра кириллицы
+        # («Глобал» и «глобал» для него разные), а справочник маленький.
+        qs = Supplier.objects.all()
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        wanted = clean.casefold()
+        for name in qs.values_list("name", flat=True):
+            if name.strip().casefold() == wanted:
+                raise serializers.ValidationError(f"Поставщик «{name}» уже есть в справочнике.")
+        return clean
 
     def get_supplies_count(self, obj) -> int:
         return obj.supplies.count()
