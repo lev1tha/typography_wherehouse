@@ -614,6 +614,20 @@ export default function Checkout() {
           rollName: cutRollPicked ? (cutRollPicked.code || `№${cutRollPicked.id}`) : "",
           usedWidth: cutUsedWidth > 0 && cutUsedWidth < cutFullWidth ? cutUsedWidth : null,
         }]);
+        // Контурная резка по рулону — своей строкой работы, тем же путём, что
+        // и рез целого листа: материал уходит в неё только ради ставки, без
+        // размеров куска (иначе сервер посчитал бы рулон ещё и по площади).
+        const rollRunM = Number(cut.running_meters) || 0;
+        const rollSvc = svcById(cut.cutServiceId);
+        if (cut.rollCut && rollSvc && rollRunM > 0) {
+          setCart((prev) => [...prev, {
+            key: `CW${m.id}-${prev.length}-${rollRunM}`, kind: "cut-work",
+            serviceId: rollSvc.id, name: rollSvc.name || "Резка",
+            materialId: m.id, materialName: m.name,
+            rate: Number(cut.cutRate || 0), rateEdited: !!cut.cutRateEdited,
+            runM: rollRunM, qty: 1,
+          }]);
+        }
         setCut(null);
         return;
       }
@@ -793,6 +807,14 @@ export default function Checkout() {
   const cutRollLen = cutRoll ? Number(cut.length) || 0 : 0;
   const cutRollRate = cutRoll ? Number(cut.matPrice ?? cutRollMat.price_per_pm) || 0 : 0;
   const cutRollTotal = cutRoll ? ceilSom(cutRollLen * cutRollRate) : 0;
+  // Контурная резка по рулону — ОТДЕЛЬНАЯ работа, а не отрез поперёк: тот в
+  // цене метра уже сидит. Поэтому она за галочкой и со своей длиной реза,
+  // которую вводит мастер: из длины отреза её не вывести (метр плёнки можно
+  // изрезать на десять метров контура).
+  const cutRollWorkOn = cutRoll && !!cut?.rollCut;
+  const cutRollRunM = cutRollWorkOn ? Number(cut.running_meters) || 0 : 0;
+  const cutRollWorkRate = cutRollWorkOn ? Number(cut.cutRate) || 0 : 0;
+  const cutRollWork = ceilSom(cutRollRunM * cutRollWorkRate);
   // Списывается вся ширина полотна — это и есть остаток после отреза.
   // Рулоны этого материала — початые первыми, как их и режут.
   const cutRolls = cutRoll
@@ -887,7 +909,7 @@ export default function Checkout() {
   const cutWholeUnit = wholeUnitOf(cutMat);
   // Итог = сумма округлённых вверх строк (как в чеке): лист/материал + работа.
   const cutTotal = cutRoll
-    ? cutRollTotal
+    ? cutRollTotal + cutRollWork
     : cutPiece
     ? ceilSom(cutPieceTotal) + ceilSom(cutPieceWork)
     : ceilSom(cutWork) + ceilSom(cutMaterialSum);
@@ -1322,7 +1344,10 @@ export default function Checkout() {
                     ? !(cutRollLen > 0) ||
                       !(cutRollRate > 0) ||
                       cutRollLeft < 0 ||
-                      cutUsedWidth > cutFullWidth
+                      cutUsedWidth > cutFullWidth ||
+                      // Резку включили, а длину реза не назвали — работа ушла
+                      // бы в чек нулём. Сервер такую строку и не примет.
+                      (cutRollWorkOn && !(cutRollRunM > 0))
                     : cutPiece
                     ? !(Number(cut.qty) > 0) || !(cutPieceUnit > 0) || cutRunMMissing
                     // Фигурный рез без длины кривой не добавляется: иначе работа
@@ -1376,11 +1401,10 @@ export default function Checkout() {
           {/* Станок: ЧПУ или лазер. Показываем, только когда станков правда
               несколько — если он один, спрашивать не о чем, и лишний ряд кнопок
               в кассе только мешает. Смена станка подставляет ЕГО ставку. */}
-          {/* Станок у рулона не спрашиваем: продажа метража — это не резка.
-              Отрезать поперёк рулона ножом занимает секунду и в цене метра уже
-              сидит; контурная резка по этому же материалу — отдельная работа и
-              отдельная строка заказа. */}
-          {isMatModal && !cutRoll && cuttingServices.length > 1 && (CUT_MODES.includes(cut.mode) || cut.pieceCut) && (
+          {/* Сам отрез поперёк рулона в цене метра уже сидит — станок для него
+              не спрашиваем. А контурная резка по рулону это отдельная работа:
+              её включают галочкой ниже, и вот тогда станок нужен. */}
+          {isMatModal && cuttingServices.length > 1 && (cutRoll ? cutRollWorkOn : CUT_MODES.includes(cut.mode) || cut.pieceCut) && (
             <div className="field">
               <label>{t("checkout.cutMachine")}</label>
               <div className="tabs" style={{ marginTop: 0 }}>
@@ -1505,6 +1529,54 @@ export default function Checkout() {
                 <p style={{ color: "var(--danger)", fontSize: 13, margin: "-4px 0 8px" }}>
                   {t("checkout.usedWidthTooWide", { width: cutFullWidth })}
                 </p>
+              )}
+
+              {/* Резка по рулону — как «резать лист» у листового материала:
+                  галочка, длина реза и станок. Отдельной строкой заказа, потому
+                  что это отдельная работа: сам отрез поперёк в цене метра. */}
+              <div className="field" style={{ marginTop: 10 }}>
+                <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={!!cut.rollCut}
+                    onChange={(e) => setCut({ ...cut, rollCut: e.target.checked })}
+                    style={{ width: 18, height: 18 }}
+                  />
+                  {t("checkout.rollCutAdd")}
+                </label>
+              </div>
+              {cutRollWorkOn && (
+                <>
+                  <div className="row">
+                    <div className="field grow" style={{ margin: 0 }}>
+                      <label>{t("checkout.runningMeters")}</label>
+                      <input
+                        type="number"
+                        step="any"
+                        value={cut.running_meters}
+                        onChange={(e) => setCut({ ...cut, running_meters: e.target.value })}
+                      />
+                    </div>
+                    {isAdmin && (
+                      <div className="field grow" style={{ margin: 0 }}>
+                        <label>{t("checkout.cutRateLabel")}</label>
+                        <input
+                          type="number"
+                          step="any"
+                          value={cut.cutRate ?? ""}
+                          onChange={(e) => setCut({ ...cut, cutRate: e.target.value, cutRateEdited: true })}
+                        />
+                      </div>
+                    )}
+                  </div>
+                  {/* Ставка 0 — работа за бесплатно. У листа об этом уже
+                      предупреждают, рулон не исключение. */}
+                  {!(cutRollWorkRate > 0) && (
+                    <p style={{ color: "var(--danger)", fontSize: 13, margin: "4px 0 0" }}>
+                      {isAdmin ? t("checkout.rateMissingAdmin") : t("checkout.rateMissing")}
+                    </p>
+                  )}
+                </>
               )}
               {cutRollLen > 0 && cutRollLeft < 0 && (
                 <p style={{ color: "var(--danger)", fontSize: 13, margin: "4px 0 0" }}>
@@ -1636,9 +1708,16 @@ export default function Checkout() {
                 <span className="k">{t("checkout.rateMaterial")}</span>
                 <span>{cutRollRate} × {cutRollLen} = {cutRollTotal}</span>
               </div>
+              {/* Работа реза — отдельной строкой, как она уйдёт и в чек. */}
+              {cutRollWorkOn && (
+                <div className="crow">
+                  <span className="k">{t("checkout.rateWork")}</span>
+                  <span>{cutRollWorkRate} × {cutRollRunM} = {cutRollWork}</span>
+                </div>
+              )}
               <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
                 <strong>{t("common.total")}</strong>
-                <strong style={{ fontSize: 18 }}>{cutRollTotal} сом</strong>
+                <strong style={{ fontSize: 18 }}>{cutRollTotal + cutRollWork} сом</strong>
               </div>
               {/* Сколько ушло в отход — на виду в момент продажи, а не потом
                   в отчёте: здесь ещё можно передумать и отрезать иначе. */}

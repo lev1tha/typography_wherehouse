@@ -448,7 +448,8 @@
     "rateMissingAdmin": "No cutting rate on the machine or the material. Set it in “Prices & services” or on the material card — or type it here (0 = gift).",
     "priceMissing": "The material has no price in the catalogue — it cannot be sold for 0. Ask an administrator to set the price.",
     "priceMissingAdmin": "The material has no price in the catalogue. Set it on the material card — or type it here (0 = gift).",
-    "priceMissingShort": "no price set"
+    "priceMissingShort": "no price set",
+    "rollCutAdd": "Contour cutting (per running metre)"
   },
   "receipts": {
     "title": "Receipts",
