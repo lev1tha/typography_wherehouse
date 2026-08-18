@@ -32,7 +32,7 @@ const EMPTY = {
   price_per_unit: "0",
 };
 
-const UNITS = ["SQM", "METER", "PIECE", "KG", "LITER"];
+const PIECE_UNITS = ["PIECE", "KG", "LITER"];
 
 // Как назвался бы материал по заполненным полям. Подсказка, а не замена:
 // у заказчика свои привычные подписи вроде «синий бишкек», отнимать их нельзя.
@@ -294,16 +294,29 @@ export default function Catalog({ embedded = false }) {
   // приходит рулоном, отвечает не на тот вопрос.
   const wholeUnit = matForm === "ROLL" ? t("warehouse.unitRoll") : t("warehouse.unitSheet");
   function setMatForm(next) {
+    // Размер листа принадлежит ТОЛЬКО листу. Оставить его при переключении
+    // формы — значит спрятать поле, но не число: у рулона от него считалась бы
+    // площадь листа (та самая, из-за которой «Закупка за рулон» показывала
+    // цену несуществующего листа).
+    // piece_area в базе NOT NULL с нулём по умолчанию — обнуляем, а не занулляем.
+    const noSheet = { sheet_width: "", sheet_height: "", piece_area: 0 };
     if (next === "PIECE") {
       setEditing({
         ...editing,
+        ...noSheet,
         is_roll_material: false,
         // Единица «кв.м» осталась бы от рулонного и врала бы в подписях цен.
         unit: editing.unit === "SQM" ? "PIECE" : editing.unit,
       });
       return;
     }
-    setEditing({ ...editing, is_roll_material: true, intake_form: next, unit: "SQM" });
+    setEditing({
+      ...editing,
+      ...(next === "ROLL" ? noSheet : {}),
+      is_roll_material: true,
+      intake_form: next,
+      unit: "SQM",
+    });
   }
 
   // Считается ли розничная пара «связанной». Сравниваем С ДОПУСКОМ, а не точным
@@ -752,31 +765,33 @@ export default function Catalog({ embedded = false }) {
             <NumField grow label={t("warehouse.thickness")} value={editing.thickness_mm} onChange={setF("thickness_mm")} />
           </div>
 
-          <div className="row">
-            <div className="field grow" style={{ margin: 0 }}>
-              <label>{t("warehouse.color")}</label>
-              <input value={editing.color ?? ""} onChange={(e) => setEditing({ ...editing, color: e.target.value })} />
-            </div>
-            <div className="field grow" style={{ margin: 0 }}>
-              <label>{t("warehouse.article")}</label>
-              <input
-                value={editing.article ?? ""}
-                onChange={(e) => setEditing({ ...editing, article: e.target.value })}
-                placeholder={t("warehouse.articlePh")}
-              />
-            </div>
+          {/* Артикул из карточки убран: заказчик пишет его прямо в названии
+              («ЖЕЛТЫЙ лимон 2,5ММ 237»), и отдельное поле дублировало ту же
+              цифру. В базе, в поиске и в сетке массового ввода он остаётся —
+              заведённые артикулы не теряются. */}
+          <div className="field">
+            <label>{t("warehouse.color")}</label>
+            <input value={editing.color ?? ""} onChange={(e) => setEditing({ ...editing, color: e.target.value })} />
           </div>
 
-          <div className="row">
-            <NumField grow label={t("warehouse.sheetWidth")} value={editing.sheet_width} onChange={setF("sheet_width")} />
-            <NumField grow label={t("warehouse.sheetHeight")} value={editing.sheet_height} onChange={setF("sheet_height")} />
-          </div>
-          {editing.sheet_width && editing.sheet_height && (
-            <p className="muted" style={{ fontSize: 12, margin: "-4px 0 0" }}>
-              {t("warehouse.areaFromSize", {
-                value: (Number(editing.sheet_width) * Number(editing.sheet_height)).toFixed(4),
-              })}
-            </p>
+          {/* Размер листа — только у ЛИСТА. У рулона второй стороны нет: он
+              продаётся длиной, а ширина у него своя, в поле «Ширина рулона».
+              У штучного материала листа нет тем более. Спрашивать высоту у
+              рулона — тот же вопрос без ответа, что и заблокированная единица. */}
+          {matForm === "SHEET" && (
+            <>
+              <div className="row">
+                <NumField grow label={t("warehouse.sheetWidth")} value={editing.sheet_width} onChange={setF("sheet_width")} />
+                <NumField grow label={t("warehouse.sheetHeight")} value={editing.sheet_height} onChange={setF("sheet_height")} />
+              </div>
+              {editing.sheet_width && editing.sheet_height && (
+                <p className="muted" style={{ fontSize: 12, margin: "-4px 0 0" }}>
+                  {t("warehouse.areaFromSize", {
+                    value: (Number(editing.sheet_width) * Number(editing.sheet_height)).toFixed(4),
+                  })}
+                </p>
+              )}
+            </>
           )}
 
           <div className="field">
@@ -793,20 +808,30 @@ export default function Catalog({ embedded = false }) {
             )}
           </div>
 
-          <div className="row">
-            <div className="field grow" style={{ margin: 0 }}>
-              <label>{t("warehouse.unit")}</label>
-              <select
-                value={editing.unit ?? "PIECE"}
-                disabled={!!editing.is_roll_material}
-                onChange={(e) => setEditing({ ...editing, unit: e.target.value })}
-              >
-                {UNITS.map((u) => (
-                  <option key={u} value={u}>{t(`unit.${u}`)}</option>
-                ))}
-              </select>
+          {/* Единицу спрашиваем ТОЛЬКО у штучной формы: там она и правда выбор
+              — штуки, килограммы или литры. У листа и рулона считается в кв.м
+              всегда, и поле стояло заблокированным: вопрос, на который нельзя
+              ответить, читается как поломка. Заодно из списка убраны «кв.м» и
+              «пог.м» — у штучного материала их выбрать нельзя было и раньше,
+              они просто мозолили глаза. */}
+          {matForm === "PIECE" && (
+            <div className="row">
+              <div className="field grow" style={{ margin: 0 }}>
+                <label>{t("warehouse.unit")}</label>
+                <select
+                  value={editing.unit ?? "PIECE"}
+                  onChange={(e) => setEditing({ ...editing, unit: e.target.value })}
+                >
+                  {/* Единица, доставшаяся от старой карточки, из списка не
+                      выпадает: иначе поле показало бы пустоту и молча сменило
+                      её при сохранении. */}
+                  {[...new Set([...PIECE_UNITS, editing.unit || "PIECE"])].map((u) => (
+                    <option key={u} value={u}>{t(`unit.${u}`)}</option>
+                  ))}
+                </select>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Колонка «производство» складской таблицы: откуда возят материал.
               Справочник, а не текст — опечатка иначе заводила бы ещё одно. */}
