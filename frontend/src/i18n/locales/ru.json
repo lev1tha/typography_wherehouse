@@ -189,7 +189,8 @@
     "rollStockByMeasure": "Рулонные материалы сверяют промером каждого рулона — Склад → «Промер». Здесь их нет.",
     "perMetreShort": "сом/пог.м",
     "metresLeft": "Осталось {{n}} пог.м",
-    "rollsBreakdown": "рулонов {{n}}"
+    "rollsBreakdown": "рулонов {{n}}",
+    "allForms": "Все формы"
   },
   "unit": {
     "SQM": "кв.м",

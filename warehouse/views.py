@@ -85,8 +85,18 @@ class MaterialViewSet(viewsets.ModelViewSet):
         # Скрытые материалы не показываем ни в каталоге, ни в кассе.
         # ?archived=1 — чтобы админ мог их увидеть и при желании вернуть.
         if self.request.query_params.get("archived") in ("1", "true", "True"):
-            return qs.filter(is_archived=True)
-        return qs.filter(is_archived=False)
+            qs = qs.filter(is_archived=True)
+        else:
+            qs = qs.filter(is_archived=False)
+        # ?form=PIECE|SHEET|ROLL — форма материала так, как её видит человек:
+        # штучный / лист / рулон. В базе это пара полей (`is_roll_material` +
+        # `intake_form`), фильтровать по ним по отдельности бесполезно.
+        form = self.request.query_params.get("form")
+        if form == "PIECE":
+            qs = qs.filter(is_roll_material=False)
+        elif form in (Material.IntakeForm.SHEET, Material.IntakeForm.ROLL):
+            qs = qs.filter(is_roll_material=True, intake_form=form)
+        return qs
 
     def destroy(self, request, *args, **kwargs):
         """Удаление материала.

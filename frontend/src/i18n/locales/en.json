@@ -189,7 +189,8 @@
     "rollStockByMeasure": "Roll materials are checked by measuring each roll — Stock → “Measure”. They are not listed here.",
     "perMetreShort": "som/run.m",
     "metresLeft": "{{n}} running m left",
-    "rollsBreakdown": "{{n}} rolls"
+    "rollsBreakdown": "{{n}} rolls",
+    "allForms": "All forms"
   },
   "unit": {
     "SQM": "sqm",

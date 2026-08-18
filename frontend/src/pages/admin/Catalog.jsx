@@ -142,6 +142,10 @@ export default function Catalog({ embedded = false }) {
   // толщина и цвет были зашиты в название, и отфильтровать было нечем.
   const [typeId, setTypeId] = useState("");
   const [color, setColor] = useState("");
+  // Форма материала (штучный / лист / рулон) — свой фильтр: у листа и рулона
+  // разная приёмка и разная продажа, и «покажи только рулоны» это первое, что
+  // спрашивают, когда номенклатура перевалила за полсотни строк.
+  const [form, setForm] = useState("");
   const [types, setTypes] = useState([]);
   const [sites, setSites] = useState([]);
   const [gallery, setGallery] = useState(null);
@@ -155,6 +159,7 @@ export default function Catalog({ embedded = false }) {
     if (search) params.search = search;
     if (typeId) params.type = typeId;
     if (color) params.color = color;
+    if (form) params.form = form;
     api.get("/warehouse/materials/", { params }).then((r) => setMaterials(r.data.results));
   }
 
@@ -162,7 +167,7 @@ export default function Catalog({ embedded = false }) {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, ordering, typeId, color]);
+  }, [search, ordering, typeId, color, form]);
 
   // Справочники перечитываются и после того, как завели новое значение прямо
   // в форме материала или в сетке (RefSelect), иначе свежий тип не появился бы
@@ -593,6 +598,12 @@ export default function Catalog({ embedded = false }) {
           {types.map((x) => (
             <option key={x.id} value={x.id}>{x.name}</option>
           ))}
+        </select>
+        <select value={form} onChange={(e) => setForm(e.target.value)}>
+          <option value="">{t("warehouse.allForms")}</option>
+          <option value="PIECE">{t("warehouse.formPiece")}</option>
+          <option value="SHEET">{t("supply.formSheet")}</option>
+          <option value="ROLL">{t("supply.formRoll")}</option>
         </select>
         {colors.length > 1 && (
           <select value={color} onChange={(e) => setColor(e.target.value)}>
