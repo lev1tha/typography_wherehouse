@@ -222,7 +222,17 @@
     "cutRatePm": "Cut rate, som/running m",
     "servicesOnlyHint": "Work rates and master %. Material prices live in the “Склад” (Warehouse) section.",
     "ratePerPm": "Cutting rate, som per running m",
-    "ratePerPmHint": "This machine's rate. 0 — the material's rate is used, as before the CNC/laser split."
+    "ratePerPmHint": "This machine's rate. 0 — the material's rate is used, as before the CNC/laser split.",
+    "newService": "New service",
+    "serviceName": "Name",
+    "serviceNamePh": "e.g. CNC cutting",
+    "serviceKindLabel": "Service kind",
+    "machine": "Machine",
+    "machineHint": "The “Cutting by machine” report in Finance is grouped by this.",
+    "needName": "Enter the service name",
+    "needMachine": "Pick a machine",
+    "created": "Service created",
+    "noServices": "No services yet. Add CNC and laser cutting — without a service there is nothing to cut with at the till."
   },
   "serviceKind": {
     "CUTTING": "Cutting",
@@ -1051,5 +1061,9 @@
     "button": "Measure",
     "acts": "Stocktake acts",
     "noActs": "No measurements yet"
+  },
+  "machine": {
+    "CNC": "CNC",
+    "LASER": "Laser"
   }
 }

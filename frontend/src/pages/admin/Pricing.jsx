@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
+import Icon from "../../components/Icon.jsx";
+import ServiceFormModal from "../../components/ServiceFormModal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
 // Which price fields drive each service kind's billing (mirrors the backend):
@@ -21,7 +23,13 @@ function ServiceCard({ service, onSaved }) {
   const { t } = useTranslation();
   const { toast } = useUI();
   const fields = rateFields(service, t);
-  const [form, setForm] = useState(Object.fromEntries(fields.map(([key]) => [key, service[key]])));
+  // Название правится здесь же: опечатку в свежезаведённой услуге иначе
+  // не исправить — только через Django-админку. Вид и станок не трогаем:
+  // по ним считаются отчёты уже проданных строк.
+  const [form, setForm] = useState({
+    name: service.name,
+    ...Object.fromEntries(fields.map(([key]) => [key, service[key]])),
+  });
   const [busy, setBusy] = useState(false);
 
   async function save() {
@@ -43,7 +51,11 @@ function ServiceCard({ service, onSaved }) {
   return (
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
-        <h3 style={{ margin: 0 }}>{service.name}</h3>
+        <input
+          value={form.name}
+          onChange={(e) => setForm({ ...form, name: e.target.value })}
+          style={{ fontWeight: 600, maxWidth: 360 }}
+        />
         <div className="row" style={{ gap: 6, margin: 0 }}>
           {/* Станок — рядом с видом услуги: по нему группируется отчёт резки. */}
           {service.machine_display && <span className="badge">{service.machine_display}</span>}
@@ -96,6 +108,7 @@ export default function Pricing() {
   const [services, setServices] = useState([]);
   const [commission, setCommission] = useState("");
   const [savingC, setSavingC] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   function loadServices() {
     api.get("/services/services/").then((r) => setServices(r.data.results));
@@ -123,8 +136,13 @@ export default function Pricing() {
 
   return (
     <>
-      <h1>{t("pricing.title")}</h1>
-      <p className="muted" style={{ marginTop: -6 }}>{t("pricing.servicesOnlyHint")}</p>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+        <h1 style={{ margin: 0 }}>{t("pricing.title")}</h1>
+        <button onClick={() => setCreating(true)}>
+          <Icon name="plus" size={16} /> {t("pricing.newService")}
+        </button>
+      </div>
+      <p className="muted" style={{ marginTop: 6 }}>{t("pricing.servicesOnlyHint")}</p>
 
       {/* Master wage % — admin only, hidden from cashiers */}
       <div className="card" style={{ marginBottom: 14 }}>
@@ -143,6 +161,14 @@ export default function Pricing() {
         .map((s) => (
           <ServiceCard key={s.id} service={s} onSaved={loadServices} />
         ))}
+
+      {services.filter((s) => s.is_active !== false).length === 0 && (
+        <div className="card">
+          <p className="muted" style={{ margin: 0 }}>{t("pricing.noServices")}</p>
+        </div>
+      )}
+
+      {creating && <ServiceFormModal onClose={() => setCreating(false)} onSaved={loadServices} />}
     </>
   );
 }
