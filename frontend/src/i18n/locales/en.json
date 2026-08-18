@@ -190,7 +190,8 @@
     "perMetreShort": "som/run.m",
     "metresLeft": "{{n}} running m left",
     "rollsBreakdown": "{{n}} rolls",
-    "allForms": "All forms"
+    "allForms": "All forms",
+    "purchasePerPm": "Purchase, som/running m"
   },
   "unit": {
     "SQM": "sqm",

@@ -76,12 +76,34 @@ function withNumbersFixed(material) {
 }
 
 // Module-level so inputs keep a stable identity (no focus loss on keystroke).
-const NumField = ({ label, value, onChange, grow }) => (
-  <div className={grow ? "field grow" : "field"} style={grow ? { margin: 0 } : undefined}>
-    <label>{label}</label>
-    <input type="number" step="any" value={value ?? ""} onChange={(e) => onChange(e.target.value)} />
-  </div>
-);
+//
+// Пока в поле ПЕЧАТАЮТ, показываем ровно набранное (`draft`), а не то, что
+// вернулось из состояния. Без этого поле, значение которого считается из
+// соседнего — закупка за лист ↔ за кв.м, — подменяло первую же цифру
+// результатом округления: набираешь 3400, поле делит на площадь листа
+// (3 ÷ 2,9768 = 1,01), умножает обратно (3,01) и ставит «3,01» вместо «3».
+// Следующая цифра дописывалась уже к нему, и цену нельзя было выставить
+// вообще — ни закупочную, ни за лист, ни у одного материала.
+// На выходе из поля показываем сохранённое значение: оно может отличаться на
+// копейку, потому что за кв.м в базе лежит с двумя знаками.
+const NumField = ({ label, value, onChange, grow }) => {
+  const [draft, setDraft] = useState(null);
+  return (
+    <div className={grow ? "field grow" : "field"} style={grow ? { margin: 0 } : undefined}>
+      <label>{label}</label>
+      <input
+        type="number"
+        step="any"
+        value={draft ?? value ?? ""}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          onChange(e.target.value);
+        }}
+        onBlur={() => setDraft(null)}
+      />
+    </div>
+  );
+};
 // Цена в таблице всегда с единицей. У материала с известной площадью листа под
 // ценой за кв.м стоит цена листа — заказчик мыслит листами, и делить в уме,
 // чтобы понять «а лист-то почём», он не должен.
@@ -237,6 +259,25 @@ export default function Catalog({ embedded = false }) {
     0;
   const toSheet = (perSqm) => (sheetArea ? round2(Number(perSqm || 0) * sheetArea) : "");
   const toSqm = (perSheet) => (sheetArea ? round2(Number(perSheet || 0) / sheetArea) : "");
+  // Показываем ЦЕЛОЕ число сомов, если оно означает ровно ту же цену за кв.м.
+  //
+  // В базе лежит только цена за квадрат, и с двумя знаками. Введённые «3400 за
+  // лист» превращаются в 1142,17 за кв.м, а обратно — в 3400,01: система
+  // переписывала набранное число на копейку и выглядела так, будто считает
+  // неправильно. Копейки тут нет — есть округление хранения, поэтому из двух
+  // одинаковых по смыслу чисел показываем то, которое человек и набрал.
+  // Если целое НЕ сходится (цена за кв.м мелкая, лист стоит 297,68), точность
+  // настоящая — оставляем как есть.
+  const prettify = (derived, toBase, base) => {
+    if (derived === "" || derived === undefined) return derived;
+    const whole = String(Math.round(Number(derived)));
+    return Number(toBase(whole)) === Number(base || 0) ? whole : derived;
+  };
+
+  // У рулона пересчёт идёт через ШИРИНУ: погонный метр — это ширина × 1 м.
+  const rollWidth = Number(editing?.roll_width) || 0;
+  const toPm = (perSqm) => (rollWidth ? round2(Number(perSqm || 0) * rollWidth) : "");
+  const fromPm = (perPm) => (rollWidth ? round2(Number(perPm || 0) / rollWidth) : "");
 
   // Розничная цена — ДВА разных поля в базе (за кв.м и за лист), и цена листа
   // может быть назначена отдельно (скидка за целый лист). Поэтому пересчитываем
@@ -841,14 +882,29 @@ export default function Catalog({ embedded = false }) {
                   value={editing.purchase_price}
                   onChange={setF("purchase_price")}
                 />
-                {sheetArea > 0 && (
-                  <NumField
-                    grow
-                    label={t("warehouse.purchasePerSheet", { unit: wholeUnit })}
-                    value={toSheet(editing.purchase_price)}
-                    onChange={(v) => setF("purchase_price")(toSqm(v))}
-                  />
-                )}
+                {/* Второе поле пары — в той единице, которой материал ЖИВЁТ.
+                    У листа это лист, у рулона — погонный метр: «за рулон
+                    целиком» закупку никто не помнит, рулоны приходят разной
+                    длины. Раньше у рулона стояло «Закупка, сом/рулон», а
+                    считалось оно по площади ЛИСТА (у плёнки она осталась от
+                    карточки листа) — цифра не значила ничего. */}
+                {matForm === "ROLL"
+                  ? rollWidth > 0 && (
+                      <NumField
+                        grow
+                        label={t("warehouse.purchasePerPm")}
+                        value={prettify(toPm(editing.purchase_price), fromPm, editing.purchase_price)}
+                        onChange={(v) => setF("purchase_price")(fromPm(v))}
+                      />
+                    )
+                  : sheetArea > 0 && (
+                      <NumField
+                        grow
+                        label={t("warehouse.purchasePerSheet", { unit: wholeUnit })}
+                        value={prettify(toSheet(editing.purchase_price), toSqm, editing.purchase_price)}
+                        onChange={(v) => setF("purchase_price")(toSqm(v))}
+                      />
+                    )}
               </div>
               {/* Рулон продаётся ДЛИНОЙ: ширина у него не выбор клиента, а
                   свойство товара (ткань 0.9 м режут поперёк на всю ширину).
@@ -883,7 +939,10 @@ export default function Catalog({ embedded = false }) {
                   <NumField grow label={t("pricing.cutRatePm")} value={editing.cut_rate_per_pm} onChange={setF("cut_rate_per_pm")} />
                 </div>
               )}
-              {sheetArea > 0 && (
+              {/* Подсказка про пересчёт по площади ЛИСТА — только у листа.
+                  У рулона пара считается по ширине, и площадь листа, оставшаяся
+                  в карточке от прежней формы, объясняла бы не ту арифметику. */}
+              {matForm !== "ROLL" && sheetArea > 0 && (
                 <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
                   {t("warehouse.sheetAreaHint", { area: round2(sheetArea) })}
                 </p>

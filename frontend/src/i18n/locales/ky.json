@@ -190,7 +190,8 @@
     "perMetreShort": "сом/п.м",
     "metresLeft": "{{n}} п.м калды",
     "rollsBreakdown": "рулон {{n}}",
-    "allForms": "Бардык формалар"
+    "allForms": "Бардык формалар",
+    "purchasePerPm": "Сатып алуу, сом/пог.м"
   },
   "unit": {
     "SQM": "кв.м",

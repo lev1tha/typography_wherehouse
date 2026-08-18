@@ -190,7 +190,8 @@
     "perMetreShort": "сом/пог.м",
     "metresLeft": "Осталось {{n}} пог.м",
     "rollsBreakdown": "рулонов {{n}}",
-    "allForms": "Все формы"
+    "allForms": "Все формы",
+    "purchasePerPm": "Закупка, сом/пог.м"
   },
   "unit": {
     "SQM": "кв.м",
