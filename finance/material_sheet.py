@@ -26,7 +26,7 @@ from django.db.models.functions import TruncMonth
 from django.utils import timezone
 
 from sales.models import Receipt, TransactionItem
-from warehouse.models import InventoryLog, MaterialMonthOpening, SupplyLine
+from warehouse.models import InventoryLog, MaterialMonthOpening, Roll, SupplyLine
 
 ZERO = Decimal("0")
 _CENT = Decimal("0.01")
@@ -45,13 +45,34 @@ def counting_unit(material):
     """Площадь одной штуки, если материал считают листами, иначе None.
 
     Заказчик ведёт склад листами, а система хранит площадные материалы в кв.м.
+    Рулон листами не считают, даже если у карточки задан размер листа: его
+    меряют метрами (см. `sheet_unit`).
     """
+    if material.sells_by_metre:
+        return None
     area = material.piece_area
     return area if area and area > 0 else None
 
 
-def to_units(material, value):
-    """Перевести кв.м в листы, если материал считают листами."""
+def sheet_unit(material) -> str:
+    """В чём материал стоит в складском листе: `METER` — рулон (погонные
+    метры), `SHEET` — лист (по площади листа), иначе собственная единица.
+
+    Раньше рулон с размером листа в карточке (1.2×2) считался ЛИСТАМИ, а метры
+    проданных METER-строк складывались как кв.м: «продано 1 м» превращалось в
+    «1.000 кв.м / 0.42 листа». Владелец рулон меряет метрами — в них и лист.
+    """
+    if material.sells_by_metre:
+        return "METER"
+    return "SHEET" if counting_unit(material) else material.unit
+
+
+def to_units(material, value, *, width=None):
+    """Перевести кв.м в единицу листа: листы — по площади листа, метры — по
+    ширине полотна (партии, если она известна, иначе карточки)."""
+    if material.sells_by_metre:
+        w = width or material.roll_width
+        return (value / w) if w else value
     per_sheet = counting_unit(material)
     return (value / per_sheet) if per_sheet else value
 
@@ -70,6 +91,7 @@ def collect_flows(materials):
     received = defaultdict(lambda: defaultdict(lambda: ZERO))
     sold = defaultdict(lambda: defaultdict(lambda: ZERO))
 
+    metre_ids = {m.id for m in materials if m.sells_by_metre}
     supply = (
         InventoryLog.objects.filter(type=InventoryLog.Type.SUPPLY, quantity_changed__gt=0)
         .annotate(m=TruncMonth("happened_at"))
@@ -77,26 +99,43 @@ def collect_flows(materials):
     )
     for row in supply:
         material = by_id.get(row["material_id"])
-        if not material:
+        if not material or material.id in metre_ids:
             continue
         key = (row["m"].year, row["m"].month)
         received[material.id][key] += to_units(material, row["quantity_changed"])
+    # Рулон приходит партией: метры считаем от ШИРИНЫ ПАРТИИ (в журнале — только
+    # площадь, а ширина у партий разная), поэтому берём сами партии.
+    for roll in Roll.objects.filter(material_id__in=metre_ids).values(
+        "material_id", "initial_area", "width", "received_at"
+    ):
+        material = by_id[roll["material_id"]]
+        day = timezone.localtime(roll["received_at"])
+        received[material.id][(day.year, day.month)] += to_units(
+            material, roll["initial_area"], width=roll["width"]
+        )
 
     items = (
         TransactionItem.objects.filter(
             type=TransactionItem.Type.MATERIAL, is_returned=False, material__isnull=False
         )
         .exclude(receipt__status=Receipt.Status.CANCELLED)
-        .select_related("material", "receipt")
+        .select_related("material", "receipt", "roll")
     )
     for item in items:
         material = by_id.get(item.material_id)
         if not material:
             continue
         # Продажа листом целиком уже хранится в штуках — это и есть единица
-        # счёта; продажа по площади хранится в кв.м и требует перевода.
+        # счёта; рулон метрами — в метрах; продажа по площади хранится в кв.м
+        # и требует перевода (у рулона — по ширине партии строки).
         qty = item.quantity
-        if item.sale_mode != TransactionItem.SaleMode.PIECE:
+        if item.sale_mode == TransactionItem.SaleMode.PIECE:
+            pass
+        elif item.sale_mode == TransactionItem.SaleMode.METER:
+            pass
+        elif material.sells_by_metre:
+            qty = to_units(material, qty, width=item.roll_width)
+        else:
             qty = to_units(material, qty)
         day = item.receipt.created_at.date()
         sold[material.id][(day.year, day.month)] += qty

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
 import AdjustStockModal from "../../components/AdjustStockModal.jsx";
+import RollStocktakeModal from "../../components/RollStocktakeModal.jsx";
 import CatalogGrid from "../../components/CatalogGrid.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import GalleryModal from "../../components/GalleryModal.jsx";
@@ -26,6 +27,8 @@ const EMPTY = {
   intake_form: "SHEET",
   critical_balance: "0",
   purchase_price: "0",
+  roll_width: "",
+  price_per_pm: "0",
   price_per_unit: "0",
 };
 
@@ -57,6 +60,7 @@ const NULLABLE_NUMS = ["thickness_mm", "sheet_width", "sheet_height"];
 // отправляем, вместо того чтобы молча оставить прежнюю.
 const ZERO_NUMS = [
   "critical_balance", "purchase_price", "price_per_unit", "price_per_sqm",
+  "roll_width", "price_per_pm",
   "piece_price", "cut_rate_per_pm", "wholesale_price", "wholesale_min_qty",
 ];
 
@@ -252,16 +256,118 @@ export default function Catalog({ embedded = false }) {
     setEditing({ ...editing, is_roll_material: true, intake_form: next, unit: "SQM" });
   }
 
+  // Считается ли розничная пара «связанной». Сравниваем С ДОПУСКОМ, а не точным
+  // равенством строк: цену листа заказчик округляет до ровного числа (1250
+  // сом/кв.м при листе 2.9768 кв.м это 3721, а в прайсе стоит 3700), и строгое
+  // сравнение объявляло бы такую пару разорванной почти всегда — пересчёт не
+  // срабатывал бы ни в одну сторону. 2% отделяют округление от НАМЕРЕННОЙ
+  // скидки за целый лист: такие скидки дают на 5–15%, а не на полпроцента.
+  const retailPairLinked = () => {
+    const sheet = Number(editing?.piece_price) || 0;
+    const derived = Number(toSheet(editing?.price_per_sqm)) || 0;
+    // Пустое поле — связи ещё нет, значит связывать можно.
+    if (!sheet || !derived) return true;
+    return Math.abs(sheet - derived) <= Math.max(1, derived * 0.02);
+  };
+
   function setSqmPrice(v) {
-    const wasDerived =
-      !Number(editing.piece_price) ||
-      String(editing.piece_price) === String(toSheet(editing.price_per_sqm));
+    const linked = retailPairLinked();
     setEditing({
       ...editing,
       price_per_sqm: v,
-      ...(wasDerived && sheetArea ? { piece_price: toSheet(v) } : {}),
+      ...(linked && sheetArea ? { piece_price: toSheet(v) } : {}),
     });
   }
+
+  // Обратная сторона той же пары. Её не было вовсе: вбитая цена за лист не
+  // трогала цену за кв.м, при том что у ЗАКУПКИ соседняя пара пересчитывалась в
+  // обе стороны — две одинаковые с виду пары в одной форме вели себя по-разному,
+  // и это читалось как поломка.
+  function setPiecePrice(v) {
+    const linked = retailPairLinked();
+    setEditing({
+      ...editing,
+      piece_price: v,
+      ...(linked && sheetArea ? { price_per_sqm: toSqm(v) } : {}),
+    });
+  }
+
+  // Открытые рулоны — чтобы в строке материала было видно, ИЗ ЧЕГО состоит
+  // остаток. «2.9 пог.м» это не один рулон, а початый на 0.9 и целый на 2.0, и
+  // себестоимость у них разная в десять раз.
+  const [rolls, setRolls] = useState([]);
+  // Список рулонов ДОШЁЛ (а не пустой, потому что ещё грузится или не
+  // загрузился): пока его нет, судить о расхождении остатка с партиями нельзя.
+  const [rollsLoaded, setRollsLoaded] = useState(false);
+  // Рулон, который сейчас промеряют рулеткой.
+  const [measuring, setMeasuring] = useState(null);
+  const loadRolls = () =>
+    api
+      .get("/warehouse/rolls/", { params: { page_size: 500 } })
+      .then((r) => {
+        setRolls((r.data.results ?? r.data).filter((x) => Number(x.remaining_area) > 0));
+        setRollsLoaded(true);
+      })
+      .catch(() => {
+        setRolls([]);
+        setRollsLoaded(false);
+      });
+  useEffect(() => {
+    loadRolls();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [materials.length]);
+
+  // Только НАСТОЯЩИЕ рулоны. У листовой партии ширина тоже задана (1.22 у
+  // листа 1.22×2.44), поэтому `metres_remaining` у неё считается и даёт
+  // «10.92 метров» — число, которого в природе нет: лист меряют штуками, а не
+  // погонными метрами. Фильтр по форме партии, а не по наличию ширины.
+  const rollsOf = (m) =>
+    !m.sells_by_metre
+      ? []
+      : rolls
+          .filter((r) => r.material === m.id && r.form === "ROLL" && r.metres_remaining != null)
+          .sort((a, b) => new Date(a.received_at) - new Date(b.received_at));
+
+  // Сколько кв.м лежит по ВСЕМ партиям материала. У рулонного материала число
+  // в карточке обязано с этим сходиться; разошлось — «хвост сверх партий», его
+  // не списать ни продажей, ни промером, только свести (см. reconcileLots).
+  const lotsAreaOf = (m) =>
+    rolls.filter((r) => r.material === m.id).reduce((s, r) => s + Number(r.remaining_area || 0), 0);
+  const hasLotsTail = (m) =>
+    rollsLoaded && Math.abs(Number(m.quantity || 0) - lotsAreaOf(m)) > 0.0005;
+
+  async function reconcileLots(m) {
+    const ok = await confirm(
+      t("warehouse.reconcileConfirm", {
+        name: m.name,
+        qty: qty(m.quantity),
+        lots: qty(lotsAreaOf(m).toFixed(4)),
+      })
+    );
+    if (!ok) return;
+    try {
+      await api.post("/warehouse/materials/reconcile-lots/", { material: m.id });
+      toast(t("common.saved"));
+      loadRolls();
+      load();
+    } catch (e) {
+      toast(apiError(e, t("common.error")), "error");
+    }
+  }
+
+  // Промер доступен по каждому рулону отдельно: рулеткой меряют конкретный
+  // рулон на полке, а не «материал вообще».
+  const measureButtons = (m) =>
+    rollsOf(m).map((r) => (
+      <button
+        key={r.id}
+        className="secondary row-btn"
+        onClick={() => setMeasuring(r)}
+        title={`${r.code || `№${r.id}`} — ${r.metres_remaining} ${t("unit.METER")}`}
+      >
+        {t("stocktake.button")} {rollsOf(m).length > 1 ? (r.code || `№${r.id}`) : ""}
+      </button>
+    ));
 
   const columns = [
     {
@@ -300,9 +406,33 @@ export default function Catalog({ embedded = false }) {
       label: t("common.quantity"),
       render: (m) => (
         <>
-          {qty(m.quantity)} <span className="muted">{t(`unit.${m.unit}`)}</span>
-          {m.sheets_remaining != null && (
-            <span className="muted"> · ≈{Math.round(Number(m.sheets_remaining))} {t("warehouse.sheetsShort")}</span>
+          {/* Рулон меряют метрами — в них и показываем. «3,48 кв.м · ≈1 лист»
+              для рулона отвечает не на тот вопрос: листа у него нет, а метры
+              владелец иначе считает делением в уме. */}
+          {m.sells_by_metre && m.metres_remaining != null ? (
+            <>
+              {qty(m.metres_remaining)} <span className="muted">{t("unit.METER")}</span>
+              {/* Из каких рулонов он складывается. Початый идёт первым — его и
+                  дожигают, и по нему считается себестоимость следующего реза. */}
+              {rollsOf(m).length > 1 && (
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {t("warehouse.rollsBreakdown", { n: rollsOf(m).length })}:{" "}
+                  {rollsOf(m).map((r, i) => (
+                    <span key={r.id}>
+                      {i > 0 ? " · " : ""}
+                      {r.code || `№${r.id}`} — {r.metres_remaining}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              {qty(m.quantity)} <span className="muted">{t(`unit.${m.unit}`)}</span>
+              {m.sheets_remaining != null && (
+                <span className="muted"> · ≈{Math.round(Number(m.sheets_remaining))} {t("warehouse.sheetsShort")}</span>
+              )}
+            </>
           )}
           {/* Пусто и «на исходе» — разные вещи. Только что заведённый каталог
               весь стоит на нуле, и красным он выглядит как авария, хотя просто
@@ -332,19 +462,48 @@ export default function Catalog({ embedded = false }) {
     {
       key: "purchase_price",
       label: t("warehouse.purchasePrice"),
-      render: (m) => <PriceCell m={m} value={m.purchase_price} t={t} />,
+      // У РУЛОНА закуп тоже в погонных метрах: он и покупается метрами, и
+      // продаётся метрами. Показывать его в кв.м, да ещё с припиской «за лист»,
+      // значило сравнивать несравнимое — рядом стоит розничная в сом/пог.м, и
+      // «166.67 сом/кв.м · 400 сом/лист» против «1000 сом/пог.м» не сводится
+      // никак. Листа у рулона нет вовсе.
+      render: (m) =>
+        m.sells_by_metre ? (
+          <>
+            {/* К БЛИЖАЙШЕМУ, а не вверх: это производная цифра (цена за кв.м
+                × ширина), и округление вверх делало из настоящих 200 сом/пог.м
+                показные 201 — на цифре, которую владелец сверяет с накладной. */}
+            {Math.round(Number(m.purchase_price) * Number(m.roll_width || 0))}{" "}
+            <span className="muted">
+              {t("warehouse.perUnitShort", { unit: t("unit.METER") })}
+            </span>
+          </>
+        ) : (
+          <PriceCell m={m} value={m.purchase_price} t={t} />
+        ),
     },
     {
       key: "price_per_unit",
       label: t("warehouse.retailPrice"),
-      render: (m) => (
-        <PriceCell
-          m={m}
-          value={m.is_roll_material ? m.sqm_price : m.price_per_unit}
-          pieceValue={m.is_roll_material ? m.piece_price : 0}
-          t={t}
-        />
-      ),
+      // У РУЛОНА розничная цена живёт в цене за погонный метр: он продаётся
+      // длиной, и `price_per_sqm` у него законно нулевой. Колонка читала только
+      // его — и показывала «0 сом/кв.м» на материале с настроенным прайсом.
+      render: (m) =>
+        m.sells_by_metre ? (
+          <>
+            {ceilSom(m.price_per_pm)}{" "}
+            <span className="muted">
+              {t("warehouse.perUnitShort", { unit: t("unit.METER") })}
+            </span>
+          </>
+        ) : (
+          <PriceCell
+            m={m}
+            value={m.is_roll_material ? m.sqm_price : m.price_per_unit}
+            pieceValue={m.is_roll_material ? m.piece_price : 0}
+            t={t}
+          />
+        ),
     },
     {
       key: "actions",
@@ -365,13 +524,37 @@ export default function Catalog({ embedded = false }) {
           {/* Поправить остаток — рядом с приходом, а не в карточке материала:
               «внесли 500 вместо 50» случается прямо здесь, и до сих пор
               исправить это в интерфейсе было нечем. */}
-          <button
-            className="secondary row-btn"
-            onClick={() => setAdjusting(m)}
-            title={t("supply.inventory")}
-          >
-            <Icon name="clipboard" size={14} /> {t("warehouse.fixStock")}
-          </button>
+          {/* Промер рулеткой — по каждому рулону. У рулонного материала правка
+              общего остатка отвечает не на тот вопрос: меряют конкретный рулон
+              на полке, и расхождение должно остаться актом с причиной. Поэтому
+              у него кнопки «Остаток» (общее число в кв.м) НЕТ — сервер такую
+              правку и не примет: она списывала бы расхождение FIFO со старейшего
+              рулона, а не с того, который промеряли. Единственный случай, когда
+              число в карточке правится напрямую, — хвост сверх партий, и это
+              отдельная кнопка, видимая только когда хвост есть. */}
+          {measureButtons(m)}
+          {m.sells_by_metre ? (
+            hasLotsTail(m) && (
+              <button
+                className="secondary row-btn"
+                onClick={() => reconcileLots(m)}
+                title={t("warehouse.reconcileTitle", {
+                  qty: qty(m.quantity),
+                  lots: qty(lotsAreaOf(m).toFixed(4)),
+                })}
+              >
+                <Icon name="clipboard" size={14} /> {t("warehouse.reconcileLots")}
+              </button>
+            )
+          ) : (
+            <button
+              className="secondary row-btn"
+              onClick={() => setAdjusting(m)}
+              title={t("supply.inventory")}
+            >
+              <Icon name="clipboard" size={14} /> {t("warehouse.fixStock")}
+            </button>
+          )}
           <button className="secondary row-btn" onClick={() => setEditing(m)}>
             <Icon name="pencil" size={14} /> {t("common.edit")}
           </button>
@@ -442,6 +625,16 @@ export default function Catalog({ embedded = false }) {
         />
       )}
 
+      {measuring && (
+        <RollStocktakeModal
+          roll={measuring}
+          onClose={() => setMeasuring(null)}
+          onDone={() => {
+            loadRolls();
+            load();
+          }}
+        />
+      )}
       {receiving && (
         <ReceiveStockModal
           material={receiving}
@@ -642,10 +835,39 @@ export default function Catalog({ embedded = false }) {
                   />
                 )}
               </div>
-              <div className="row">
-                <NumField grow label={t("warehouse.retailPerSqm")} value={editing.price_per_sqm} onChange={setSqmPrice} />
-                <NumField grow label={t("pricing.cutRatePm")} value={editing.cut_rate_per_pm} onChange={setF("cut_rate_per_pm")} />
-              </div>
+              {/* Рулон продаётся ДЛИНОЙ: ширина у него не выбор клиента, а
+                  свойство товара (ткань 0.9 м режут поперёк на всю ширину).
+                  Поэтому у рулонного материала спрашиваем ширину и цену за
+                  погонный метр, а не цену за квадрат: владелец держит прайс в
+                  метрах, и делить 300 на 0.9 в уме он не станет. */}
+              {matForm === "ROLL" ? (
+                <>
+                  <div className="row">
+                    <NumField grow label={`${t("warehouse.rollWidth")} *`} value={editing.roll_width} onChange={setF("roll_width")} />
+                    <NumField grow label={t("warehouse.retailPerPm")} value={editing.price_per_pm} onChange={setF("price_per_pm")} />
+                  </div>
+                  <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
+                    {t("warehouse.rollWidthHint")}
+                  </p>
+                  {/* Ширина у рулона обязательна — сервер без неё карточку не
+                      сохранит. Раньше пустая ширина проходила, а материал потом
+                      МОЛЧА продавался по площади, как лист. Об этом говорим
+                      здесь, до кнопки, а не тостом после. */}
+                  {!(Number(editing.roll_width) > 0) && (
+                    <p style={{ color: "var(--danger)", fontSize: 12, marginTop: -2 }}>
+                      {t("warehouse.rollWidthRequired")}
+                    </p>
+                  )}
+                  <div className="row">
+                    <NumField grow label={t("pricing.cutRatePm")} value={editing.cut_rate_per_pm} onChange={setF("cut_rate_per_pm")} />
+                  </div>
+                </>
+              ) : (
+                <div className="row">
+                  <NumField grow label={t("warehouse.retailPerSqm")} value={editing.price_per_sqm} onChange={setSqmPrice} />
+                  <NumField grow label={t("pricing.cutRatePm")} value={editing.cut_rate_per_pm} onChange={setF("cut_rate_per_pm")} />
+                </div>
+              )}
               {sheetArea > 0 && (
                 <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
                   {t("warehouse.sheetAreaHint", { area: round2(sheetArea) })}
@@ -653,18 +875,36 @@ export default function Catalog({ embedded = false }) {
               )}
               <NumField label={`${t("warehouse.critical")} (кв.м)`} value={editing.critical_balance} onChange={setF("critical_balance")} />
 
+              {/* «Продажа листом» рулону не нужна: его единица продажи —
+                  погонный метр, отдельной цены «за рулон целиком» не бывает. */}
+              {matForm !== "ROLL" && (
+                <>
               <SectionLabel>{t("warehouse.sheetSale", { unit: wholeUnit })}</SectionLabel>
               <div className="row">
-                <NumField grow label={t("warehouse.retailPerSheet", { unit: wholeUnit })} value={editing.piece_price} onChange={setF("piece_price")} />
+                <NumField grow label={t("warehouse.retailPerSheet", { unit: wholeUnit })} value={editing.piece_price} onChange={setPiecePrice} />
               </div>
               <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
                 {t("warehouse.piecePriceHint", { unit: wholeUnit })}
               </p>
+              {/* Пара разошлась — значит цена листа назначена отдельно (скидка
+                  за целый лист). Показываем, во что она обходится по метражу:
+                  иначе «цена за кв.м не меняется» снова выглядит поломкой, хотя
+                  система намеренно не трогает назначенную вручную цифру. */}
+              {sheetArea > 0 && !retailPairLinked() && (
+                <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
+                  {t("warehouse.piecePriceDiverged", {
+                    perSqm: toSqm(editing.piece_price),
+                    unit: wholeUnit,
+                  })}
+                </p>
+              )}
               <div className="row">
                 <NumField grow label={t("warehouse.wholesalePrice", { unit: wholeUnit })} value={editing.wholesale_price} onChange={setF("wholesale_price")} />
                 <NumField grow label={t("warehouse.wholesaleMin", { unit: wholeUnit })} value={editing.wholesale_min_qty} onChange={setF("wholesale_min_qty")} />
               </div>
               <p className="muted" style={{ fontSize: 12 }}>{t("warehouse.wholesaleHint")}</p>
+                </>
+              )}
             </>
           )}
 

@@ -50,6 +50,10 @@ export default function MaterialStock({ embedded = false }) {
 
   function downloadCsv() {
     const num = (v) => Number(v || 0).toFixed(2);
+    const unitCsv = (r) =>
+      r.counted_in === "METER" ? t("unit.METER")
+      : r.counted_in === "SHEET" ? t("warehouse.sheetsShort")
+      : t(`unit.${r.counted_in}`, { defaultValue: r.counted_in || "" });
     const money = (v) => Math.round(Number(v) || 0);
     const head = [
       t("stockSheet.colName"), t("stockSheet.colReceived"),
@@ -60,8 +64,8 @@ export default function MaterialStock({ embedded = false }) {
     const lines = [head.join(";")];
     for (const r of rows) {
       lines.push([
-        r.name, num(r.received_qty),
-        num(r.sold_qty), r.production || "",
+        r.name, `${num(r.received_qty)} ${unitCsv(r)}`,
+        `${num(r.sold_qty)} ${unitCsv(r)}`, r.production || "",
         money(r.material_revenue), money(r.cut_revenue), money(revTotal(r)),
         ...receiptDays.map((d) => {
           const hit = (r.receipts || []).find((x) => x.date === d);
@@ -84,6 +88,18 @@ export default function MaterialStock({ embedded = false }) {
   }
 
   const num = (v) => <span className="sheet-num">{q2(v)}</span>;
+  // Единица строки — та, в которой лист считает материал: рулон в погонных
+  // метрах, лист листами, штучный своей единицей. Раньше единицы не было, и
+  // рулон, посчитанный листами или квадратами, читался как метры.
+  const unitOf = (r) =>
+    r.counted_in === "METER" ? t("unit.METER")
+    : r.counted_in === "SHEET" ? t("warehouse.sheetsShort")
+    : t(`unit.${r.counted_in}`, { defaultValue: r.counted_in || "" });
+  const numU = (v, r) => (
+    <span className="sheet-num">
+      {q2(v)} <span className="muted" style={{ fontSize: 11 }}>{unitOf(r)}</span>
+    </span>
+  );
 
   return (
     <>
@@ -136,8 +152,8 @@ export default function MaterialStock({ embedded = false }) {
               {rows.map((r) => (
                 <tr key={r.id}>
                   <td><strong>{r.name}</strong></td>
-                  <td>{num(r.received_qty)}</td>
-                  <td>{num(r.sold_qty)}</td>
+                  <td>{numU(r.received_qty, r)}</td>
+                  <td>{numU(r.sold_qty, r)}</td>
                   <td>{r.production || <span className="muted">—</span>}</td>
                   <td><span className="sheet-num">{som(r.material_revenue)}</span></td>
                   <td><span className="sheet-num">{som(r.cut_revenue)}</span></td>

@@ -110,7 +110,11 @@ export default function CustomerOrders() {
               <div className="crow" style={{ marginTop: 6, gap: 8, justifyContent: "flex-start", flexWrap: "wrap" }}>
                 <span className="k">{t("myOrders.payLabel")}</span>
                 <PaymentBadge status={o.payment_status} />
-                {o.status !== "CANCELLED" && (
+                {/* Готовность — только если в заказе есть работа. Купленный
+                    лист бумаги ждать нечего: у цеха в такой строке прочерк, а
+                    кабинет показывал «Готовится» — и навсегда, переключить
+                    статус на таком заказе некому. */}
+                {o.status !== "CANCELLED" && o.has_service && (
                   <>
                     <span className="k" style={{ marginLeft: 6 }}>{t("myOrders.fulfillLabel")}</span>
                     <FulfillmentBadge status={o.fulfillment_status} />

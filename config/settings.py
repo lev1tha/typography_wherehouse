@@ -2,6 +2,7 @@
 Django settings for the Cloude warehouse & sales system.
 """
 
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -26,6 +27,10 @@ env = environ.Env(
     TELEGRAM_STAFF_BOT_TOKEN=(str, ""),
     TELEGRAM_STAFF_CHAT_IDS=(list, []),
     TELEGRAM_CUSTOMER_BOT_TOKEN=(str, ""),
+    # Секрет вебхука Telegram: тот же, что передаётся в setWebhook
+    # (secret_token). Telegram шлёт его заголовком с каждым запросом —
+    # без него в вебхук пишет кто угодно. Пусто = вебхук закрыт.
+    TELEGRAM_WEBHOOK_SECRET=(str, ""),
     PAYMENT_GATEWAY=(str, "mock"),
     PAYMENT_API_KEY=(str, ""),
     PAYMENT_API_SECRET=(str, ""),
@@ -212,6 +217,7 @@ CORS_ALLOW_CREDENTIALS = True
 TELEGRAM_STAFF_BOT_TOKEN = env("TELEGRAM_STAFF_BOT_TOKEN")
 TELEGRAM_STAFF_CHAT_IDS = env("TELEGRAM_STAFF_CHAT_IDS")
 TELEGRAM_CUSTOMER_BOT_TOKEN = env("TELEGRAM_CUSTOMER_BOT_TOKEN")
+TELEGRAM_WEBHOOK_SECRET = env("TELEGRAM_WEBHOOK_SECRET")
 
 PAYMENT_GATEWAY = env("PAYMENT_GATEWAY")  # e.g. "mock", "freedompay", "elsom"
 PAYMENT_API_KEY = env("PAYMENT_API_KEY")
@@ -244,3 +250,12 @@ if not DEBUG:
     SECURE_HSTS_SECONDS = env.int("SECURE_HSTS_SECONDS", default=0)
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
+
+# --- Тесты: быстрый хешер паролей ---
+# Боевой PBKDF2 (1,2 млн итераций, ~0,3 с на пароль) в setUp каждого теста
+# превращал полный прогон в ~10 минут. Под `manage.py test` берём MD5 —
+# тесты проверяют логику, а не стойкость хеша. Проверяем именно имя команды
+# (sys.argv[1]), а не `"test" in sys.argv`, чтобы `createsuperuser --username test`
+# на проде случайно не записал слабый хеш.
+if len(sys.argv) > 1 and sys.argv[1] == "test":
+    PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]

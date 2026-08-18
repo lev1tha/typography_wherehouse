@@ -11,6 +11,8 @@ const qty = (v) => Number(v || 0).toLocaleString("ru-RU", { maximumFractionDigit
 // Толщина без хвостовых нулей и с запятой — «2,5 мм», как её пишет заказчик.
 const trim = (v) => String(v).replace(/\.?0+$/, "").replace(".", ",");
 
+const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+
 export default function Warehouse() {
   const { t } = useTranslation();
   const [materials, setMaterials] = useState([]);
@@ -135,10 +137,13 @@ export default function Warehouse() {
                 {/* У листового материала цена лежит в цене за кв.м, а
                     price_per_unit равен нулю — склад показывал «0.00 сом»
                     на всей номенклатуре. */}
+                {/* Суммы — как везде в системе: «1 500 сом», а не сырые
+                    «1500.00» из API. Один и тот же материал показывался
+                    складовщику с копейками, а в кассе и каталоге — без. */}
                 <span>
                   {m.is_roll_material
-                    ? `${m.sqm_price} ${t("warehouse.perUnitShort", { unit: t("unit.SQM") })}`
-                    : `${m.price_per_unit} сом`}
+                    ? `${som(m.sqm_price)} ${t("warehouse.perUnitShort", { unit: t("unit.SQM") })}`
+                    : som(m.price_per_unit)}
                 </span>
               </div>
             </div>

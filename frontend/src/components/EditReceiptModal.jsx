@@ -56,7 +56,11 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
     (s, l) => (l.remove ? s : s + ceilSom(num(l.quantity) * num(l.price))),
     0,
   );
-  const oldTotal = Math.round(Number(receipt.total_price) || 0);
+  // Сравниваем с тем, что клиенту осталось платить: итог чека держит и
+  // возвращённые строки (возврат уменьшает `refunded_amount`, а не итог), а в
+  // окне их нет — иначе у чека с частичным возвратом старая сумма всегда
+  // стояла бы зачёркнутой.
+  const oldTotal = Math.round((Number(receipt.total_price) || 0) - (Number(receipt.refunded_amount) || 0));
 
   // Что реально изменилось — то и отправляем. Гонять неизменённые строки через
   // склад незачем: каждая правка списывает и возвращает материал заново.

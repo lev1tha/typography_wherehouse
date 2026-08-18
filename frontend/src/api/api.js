@@ -30,6 +30,7 @@ api.interceptors.response.use(
       localStorage.removeItem("userToken");
       localStorage.removeItem("refreshToken");
       localStorage.removeItem("user");
+      localStorage.removeItem("financeUnlockToken");
       if (window.location.pathname !== "/login") {
         window.location.href = "/login";
       }

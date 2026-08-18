@@ -9,6 +9,7 @@ from django.db.models import (
     Exists,
     F,
     OuterRef,
+    ProtectedError,
     Q,
     Sum,
     Value,
@@ -193,6 +194,38 @@ class ClientViewSet(viewsets.ModelViewSet):
             return ClientDetailSerializer
         return ClientSerializer
 
+    def destroy(self, request, *args, **kwargs):
+        """Удалить карточку — только пока по ней ничего не проходило.
+
+        `Receipt.client` стоит на `PROTECT`, и это правильно: заказы клиента
+        нельзя осиротить. Но необработанный `ProtectedError` отдавал пятисотку и
+        страницу отладки — защита данных выглядела поломкой системы. Отвечаем
+        по-человечески и показываем на готовый выход: карточки объединяют, а не
+        удаляют.
+        """
+        client = self.get_object()
+        orders = client.receipts.count()
+        if orders:
+            return Response(
+                {
+                    "detail": (
+                        f"У клиента {orders} заказ(ов) — карточку с историей "
+                        "удалить нельзя. Если это дубль, объедините его с "
+                        "основной карточкой: заказы, оплаты и долг переедут туда."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            # Подстраховка на случай других защищённых ссылок, которые появятся
+            # позже: лучше внятный отказ, чем пятисотка.
+            return Response(
+                {"detail": "По этому клиенту есть записи — карточку удалить нельзя."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
     @action(detail=True, methods=["post"], url_path="set-password", permission_classes=[IsAdmin])
     def set_password(self, request, pk=None):
         """Выдать клиенту пароль от кабинета. Только администратор.
@@ -366,7 +399,12 @@ class ClientViewSet(viewsets.ModelViewSet):
         detail=True,
         methods=["post"],
         url_path="request-referral-change",
-        permission_classes=[IsAuthenticated],
+        # `IsNotAccountant` тут обязателен явно: `permission_classes` на экшене
+        # ЗАМЕЩАЮТ список вьюсета, а не дополняют его. Без него оставался
+        # `IsAuthenticated`, и бухгалтер — роль, которой закрыта любая запись, —
+        # мог завести заявку и оставить в журнале действий запись от своего
+        # имени. Он проверяет чужую работу, а реферальный бонус это деньги.
+        permission_classes=[IsAuthenticated, IsNotAccountant],
     )
     def request_referral_change(self, request, pk=None):
         """File a request to change this client's referrer (admin approves)."""

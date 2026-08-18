@@ -251,7 +251,9 @@ function ReceiptsTab() {
           (r.payment_status === "PAID" || Number(r.amount_paid) > 0) &&
           !["REFUNDED", "PARTIALLY_REFUNDED"].includes(r.payment_status) &&
           r.status !== "CANCELLED";
-        if (!hasDebt && due <= 0 && !canUndo) return <span className="muted">0</span>;
+        // Единственное место, где сумма выводилась без «сом». В денежной
+        // колонке голый «0» читается как незаполненное поле, а не как «долга нет».
+        if (!hasDebt && due <= 0 && !canUndo) return <span className="muted">{som(0)}</span>;
         return (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
             {hasDebt && <span style={{ color: "var(--danger)", fontWeight: 600, whiteSpace: "nowrap" }}>{som(r.debt)}</span>}

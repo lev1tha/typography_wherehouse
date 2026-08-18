@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db.models import DecimalField, F, Sum
+from django.db.models import DecimalField, F, Q, Sum
 from django.db.models.functions import Coalesce
 from rest_framework import viewsets
 from rest_framework.response import Response
@@ -70,12 +70,23 @@ class DashboardView(APIView):
         # (Material.stock_value). Раньше здесь стояло quantity × purchase_price,
         # то есть весь остаток оценивался ценой последнего прихода.
         #
-        # Скрытые материалы не считаем: администратор нажал «Удалить», и товар
-        # для него больше не существует. Оставлять его в стоимости склада —
-        # это «удалил, а он в отчётах», ровно то, на что жаловался заказчик.
+        # ДВА разных набора материалов, и путать их нельзя:
+        #  · `stock_materials` — что лежит на складе и стоит денег. Скрытый
+        #    материал с остатком СЮДА ВХОДИТ: он физически на полке. Раньше он
+        #    выпадал целиком, и нажатие «Удалить» на позиции с товаром мгновенно
+        #    уменьшало активы — 7 201 сом исчезали одним кликом, хотя материал
+        #    никуда не делся. Исходная жалоба («удалил, а он в отчётах») закрыта
+        #    другим: материал БЕЗ продаж удаляется насовсем вместе с приходами,
+        #    а прячется только тот, по которому продажи были, — настоящий товар.
+        #    Опустевший скрытый материал даёт ноль и так.
+        #  · `live_materials` — чем цех торгует. Скрытого тут нет: докупать то,
+        #    что убрали из каталога, не нужно.
+        stock_materials = Material.objects.filter(
+            Q(is_archived=False) | Q(quantity__gt=0)
+        )
         live_materials = Material.objects.filter(is_archived=False)
         stock_value = sum(
-            (m.stock_value for m in live_materials.prefetch_related("rolls")),
+            (m.stock_value for m in stock_materials.prefetch_related("rolls")),
             Decimal("0"),
         )
 
@@ -119,13 +130,17 @@ class DashboardView(APIView):
         )
         services_count = service_items.count()
 
-        # Material consumed by services, via technological cards.
+        # Material consumed by services, via technological cards — той же
+        # формулой, что списывает склад: «на кв.м» от площади куска, «фикс» раз
+        # на строку (у резки `quantity` — погонные метры, не площадь).
+        from sales.sale_service import recipe_consumption
+
         materials_consumed = Decimal("0")
         for item in service_items.select_related("service").prefetch_related(
             "service__recipes"
         ):
             for recipe in item.service.recipes.all():
-                materials_consumed += recipe.consumption_per_unit * item.quantity
+                materials_consumed += recipe_consumption(recipe, item)
 
         refunded_total = by_period(Receipt.objects.all()).aggregate(
             v=Coalesce(Sum("refunded_amount"), Decimal("0"), output_field=DecimalField())

@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import logging
 import uuid
 
@@ -93,6 +94,26 @@ class TelegramCustomerWebhookView(APIView):
     authentication_classes = []
 
     def post(self, request):
+        # Вебхук открыт наружу по определению — его дёргает Telegram, — поэтому
+        # единственная его защита это секрет, который Telegram передаёт в
+        # `setWebhook` и шлёт обратно заголовком. Без проверки достаточно было
+        # знать номер клиента, чтобы привязать его карточку к своему чату: туда
+        # начинали уходить его чеки с суммами и уведомления об оплате.
+        #
+        # Секрет не настроен — вебхук закрыт совсем. Молча пускать «пока не
+        # настроили» значит оставить дверь открытой ровно на том стенде, где о
+        # ней забыли.
+        secret = (getattr(settings, "TELEGRAM_WEBHOOK_SECRET", "") or "")
+        supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        # Сравниваем байты: `compare_digest` на строках с не-ASCII бросает
+        # TypeError, и секрет, набранный кириллицей, ронял бы вебхук пятисоткой
+        # вместо честного отказа.
+        if not secret or not hmac.compare_digest(
+            supplied.encode("utf-8"), secret.encode("utf-8")
+        ):
+            logger.warning("Вебхук Telegram отклонён: секрет не совпал")
+            return Response({"detail": "Forbidden"}, status=status.HTTP_403_FORBIDDEN)
+
         update = request.data or {}
         message = update.get("message", {})
         contact = message.get("contact")

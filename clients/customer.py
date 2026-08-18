@@ -88,6 +88,11 @@ class CustomerItemSerializer(serializers.Serializer):
 class CustomerOrderSerializer(serializers.ModelSerializer):
     debt = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     items = serializers.SerializerMethodField()
+    # Есть ли в заказе работа, которую вообще нужно ждать. Таблица чеков у цеха
+    # прячет колонку выполнения при `has_service=false`, а кабинет показывал
+    # «Готовится» любому заказу — и купленная пачка бумаги висела у клиента
+    # «в работе» вечно: переключить статус там некому, кнопки на такой заказ нет.
+    has_service = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = Receipt
@@ -105,6 +110,7 @@ class CustomerOrderSerializer(serializers.ModelSerializer):
             # ЕМУ, — при том что эта сдача идёт в оплату его следующего заказа.
             "change_due",
             "status",
+            "has_service",
             "items",
         ]
 
@@ -155,23 +161,20 @@ class CustomerLoginView(APIView):
         # в базе он лежит в том написании, в каком его записал кассир. Пароль
         # по-прежнему обязателен — послаблений тут нет, только формат номера.
         client = find_client_by_phone(request.data.get("phone"))
-        if not client:
+
+        # ОТВЕТ ОДИНАКОВЫЙ для любого номера — и для чужого, и для нашего, и для
+        # того, кому пароль ещё не выдали. Раньше портал отвечал по-разному:
+        # неизвестный номер получал «Клиент с таким номером не найден», а
+        # известный — «С возвращением, Бакыт Осмонов!». Портал открыт на
+        # публичном домене, и перебором номеров с него собиралась клиентская
+        # база цеха вместе с именами. Имя показываем только ПОСЛЕ пароля.
+        if not password:
+            return Response({"status": "need_password"})
+        if client is None or not client.check_password(password):
             return Response(
-                {"detail": "Клиент с таким номером не найден"},
+                {"detail": "Неверный номер или пароль."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        if not client.has_password:
-            # Пароль ещё не выдан — вход невозможен, отправляем к администратору.
-            return Response(
-                {"status": "no_password", "name": client.display_name}
-            )
-
-        # Пароль уже задан — просим ввести и проверяем.
-        if not password:
-            return Response({"status": "need_password", "name": client.display_name})
-        if not client.check_password(password):
-            return Response({"detail": "Неверный пароль."}, status=status.HTTP_400_BAD_REQUEST)
         return self._token_response(client)
 
     @staticmethod

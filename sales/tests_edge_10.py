@@ -203,9 +203,12 @@ class EdgeAddItemsCustomerTests(APITestCase):
         ).first()
         self.assertIsNotNone(material_line)
 
-    def test_add_cutting_without_running_meters_charges_no_work(self):
-        """Длина реза не введена — работа 0. Раньше сюда подставлялась площадь и
-        умножалась на ставку за пог.м, то есть кв.м считались как пог.м."""
+    def test_add_cutting_without_running_meters_is_refused(self):
+        """Длина реза не введена — дозаказ отклоняется, а не работа за ноль.
+
+        Раньше сюда подставлялась площадь и умножалась на ставку за пог.м (кв.м
+        считались как пог.м), потом пустота стала нулём — и фигурный рез уезжал
+        в чек бесплатно. Правило одно на кассу и дозаказ: без длины резки нет."""
         cutting = PrintingService.objects.create(
             name="Резка дозаказ 2", kind=PrintingService.Kind.CUTTING
         )
@@ -214,6 +217,7 @@ class EdgeAddItemsCustomerTests(APITestCase):
 
         self.client.force_authenticate(self.storekeeper)
         receipt = self._make_receipt(payment_status=Receipt.PaymentStatus.PAID)
+        before = receipt.items.count()
         r = self.client.post(
             self._add_items_url(receipt),
             {"items": [{
@@ -222,41 +226,49 @@ class EdgeAddItemsCustomerTests(APITestCase):
             }]},
             format="json",
         )
-        self.assertEqual(r.status_code, 200, r.data)
-        work = receipt.items.get(type=TransactionItem.Type.SERVICE, service=cutting)
-        self.assertEqual(work.quantity, Decimal("0.000"))
-        self.assertEqual(work.line_total, Decimal("0"))
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertIn("длину реза", str(r.data))
+        self.assertEqual(receipt.items.count(), before)
+        self.assertFalse(receipt.items.filter(service=cutting).exists())
 
     # ---- логин клиента: нормализация телефона ---------------------------
 
+    def _login_as_client_a(self, phone):
+        """Вход по номеру в произвольном написании. Проверяем именно ВХОДОМ:
+        шаг «только телефон» отвечает одинаково всем и нормализацию не покажет."""
+        self.client_a.set_password("issued99")
+        self.client_a.save()
+        return self.client.post(
+            "/api/customer/login/",
+            {"phone": phone, "password": "issued99"}, format="json",
+        )
+
     def test_customer_login_normalizes_phone(self):
         # Клиент сохранён как '+996555112233'; логин с пробелами/скобками/дефисами.
-        r = self.client.post(
-            "/api/customer/login/",
-            {"phone": "+996 (555) 11-22-33"}, format="json",
-        )
+        r = self._login_as_client_a("+996 (555) 11-22-33")
         self.assertEqual(r.status_code, 200, r.data)
-        # Телефон нормализован и клиент найден; пароль ещё не выдан → no_password.
-        self.assertEqual(r.data.get("status"), "no_password")
-        self.assertEqual(r.data.get("name"), self.client_a.display_name)
+        self.assertEqual(r.data["client"]["id"], self.client_a.id)
 
     def test_customer_login_plain_digits_match(self):
         # Цифры без '+' тоже должны совпасть с сохранённым +996...
-        r = self.client.post(
-            "/api/customer/login/", {"phone": "996555112233"}, format="json",
-        )
+        r = self._login_as_client_a("996555112233")
         self.assertEqual(r.status_code, 200, r.data)
-        self.assertEqual(r.data.get("status"), "no_password")
+        self.assertEqual(r.data["client"]["id"], self.client_a.id)
 
     def test_customer_login_empty_phone_400(self):
         r = self.client.post("/api/customer/login/", {"phone": ""}, format="json")
         self.assertEqual(r.status_code, 400, r.data)
 
-    def test_customer_login_unknown_phone_400(self):
-        r = self.client.post(
+    def test_customer_login_unknown_phone_is_indistinguishable(self):
+        """По ответу нельзя понять, есть такой номер у цеха или нет."""
+        unknown = self.client.post(
             "/api/customer/login/", {"phone": "+996000000000"}, format="json",
         )
-        self.assertEqual(r.status_code, 400, r.data)
+        known = self.client.post(
+            "/api/customer/login/", {"phone": "+996555112233"}, format="json",
+        )
+        self.assertEqual(unknown.status_code, known.status_code)
+        self.assertEqual(dict(unknown.data), dict(known.data))
 
     # ---- изоляция заказов клиента ---------------------------------------
 

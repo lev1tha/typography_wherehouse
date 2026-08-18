@@ -262,3 +262,43 @@ class SupplierTests(APITestCase):
         row = next(s for s in self.client.get(self.URL).data if s["id"] == supplier.id)
         # 1000 + (1000 − 500) = 1500
         self.assertEqual(Decimal(str(row["debt"])), Decimal("1500"))
+
+
+class SupplyLineCostTests(APITestCase):
+    """Сумма строки накладной — обязательна и не отрицательна (аудит п. 9).
+
+    Сетка на фронте раньше МОЛЧА выбрасывала строку без суммы («Оприходовать
+    (7)» при восьми строках) — теперь держит кнопку закрытой и называет строку.
+    Сервер со своей стороны не пропускает строку без суммы или с минусом.
+    """
+
+    def setUp(self):
+        self.admin = User.objects.create_user(username="slc_admin", password="x", role=User.Role.ADMIN)
+        self.client.force_authenticate(self.admin)
+        self.bolts = Material.objects.create(
+            name="Крепёж", unit=Material.Unit.PIECE, quantity=Decimal("0"),
+        )
+
+    def _post(self, line):
+        return self.client.post("/api/warehouse/supplies/", {
+            "number": "C-1", "received_on": "2026-08-18", "stated_total": None,
+            "paid_amount": 0, "note": "",
+            "lines": [{"material": self.bolts.id, "form": "QTY", "quantity": "10", "code": "", **line}],
+        }, format="json")
+
+    def test_line_without_cost_is_refused(self):
+        r = self._post({})
+        self.assertEqual(r.status_code, 400, r.data)
+        self.bolts.refresh_from_db()
+        self.assertEqual(self.bolts.quantity, Decimal("0"))
+
+    def test_negative_cost_is_refused(self):
+        r = self._post({"cost": "-5"})
+        self.assertEqual(r.status_code, 400, r.data)
+
+    def test_explicit_zero_cost_is_allowed(self):
+        """Подарок поставщика — сумма 0, но названная явно."""
+        r = self._post({"cost": "0"})
+        self.assertEqual(r.status_code, 201, r.data)
+        self.bolts.refresh_from_db()
+        self.assertEqual(self.bolts.quantity, Decimal("10"))

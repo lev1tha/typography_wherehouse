@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 
+import LanguageSwitcher from "../components/LanguageSwitcher.jsx";
 import { useAuth } from "../auth/AuthContext.jsx";
 
 export default function Login() {
@@ -16,7 +17,6 @@ export default function Login() {
   const [busy, setBusy] = useState(false);
   // Клиентский вход двухшаговый: сначала телефон, затем пароль (задать/ввести).
   const [custStep, setCustStep] = useState("phone"); // phone | set | enter
-  const [custName, setCustName] = useState("");
   const [custPass, setCustPass] = useState("");
   const [custPass2, setCustPass2] = useState("");
 
@@ -41,6 +41,10 @@ export default function Login() {
   async function onStaff(e) {
     e.preventDefault();
     setError("");
+    // Пустые поля отправлять некуда: сервер ответит «неверный логин или
+    // пароль», хотя ничего не вводили, — и потратит попытку из предела 10/мин
+    // на адрес. Десять таких нажатий запирали вход всей кассе.
+    if (!username.trim() || !password) return setError(t("login.needCredentials"));
     setBusy(true);
     try {
       const user = await login(username.trim(), password);
@@ -61,6 +65,8 @@ export default function Login() {
   async function onCustomer(e) {
     e.preventDefault();
     setError("");
+    if (custStep === "phone" && !phone.trim()) return setError(t("login.needPhone"));
+    if (custStep === "enter" && !custPass) return setError(t("login.needPassword"));
     setBusy(true);
     try {
       const res =
@@ -70,9 +76,10 @@ export default function Login() {
       if (res.loggedIn) {
         navigate("/me", { replace: true });
       } else {
-        setCustName(res.name || "");
-        // Пароль выдаёт админ: сам клиент его больше не заводит.
-        setCustStep(res.status === "no_password" ? "ask_admin" : "enter");
+        // Имени тут больше нет: портал открыт на публичном домене, и раньше по
+        // одному номеру он отвечал «С возвращением, Бакыт Осмонов!» — перебором
+        // номеров с этой страницы собиралась клиентская база цеха.
+        setCustStep("enter");
       }
     } catch (err) {
       setError(err?.response?.data?.detail || t("login.customerError"));
@@ -84,6 +91,11 @@ export default function Login() {
   return (
     <div className="login-wrap">
       <div className="card login-card">
+        {/* Язык переключался только в шапке, доступной вошедшему: для
+            кыргызоязычного сотрудника первый экран системы был на чужом языке. */}
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
+          <LanguageSwitcher />
+        </div>
         <h1 style={{ color: "var(--accent-strong)" }}>{t("app.title")}</h1>
         <p className="muted" style={{ marginTop: -6 }}>{t("login.subtitle")}</p>
 
@@ -154,14 +166,11 @@ export default function Login() {
             ) : (
               <>
                 <p style={{ fontWeight: 600, marginBottom: 2 }}>
-                  {t("login.greetBack", { name: custName })}
+                  {t("login.enterPassTitle")}
                 </p>
                 <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
-                  {custStep === "ask_admin"
-                    ? t("login.askAdminHint")
-                    : t("login.enterPassHint")}
+                  {t("login.enterPassHint")}
                 </p>
-                {/* Пароля ещё нет — вводить нечего, клиент идёт к администратору. */}
                 {custStep !== "ask_admin" && (
                   <div className="field">
                     <label>{t("common.password")}</label>

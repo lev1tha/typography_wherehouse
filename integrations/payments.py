@@ -49,6 +49,25 @@ class MockGateway(BasePaymentGateway):
         return Invoice(reference=ref, payment_url=url)
 
     def verify_webhook(self, request) -> dict:
+        """Подтверждает оплату ТОЛЬКО на разработке.
+
+        Проверять заглушке нечего: ни подписи, ни секрета у неё нет, и «оплата
+        прошла» она отвечает на любой запрос. Вебхук при этом открыт наружу без
+        авторизации — то есть вне разработки этого хватало, чтобы закрыть чужой
+        заказ как оплаченный, зная только его идентификатор. А идентификатор
+        система сама отдаёт клиенту в ссылке на оплату (`MOCK-<id>` и тот же id
+        в `payment_url`).
+
+        На проде шлюз до сих пор `mock` — ключей FreedomPay нет, — так что дыра
+        была открыта именно там. Ровно по этой причине под `DEBUG` уже спрятана
+        заглушка `MockPayView`; здесь та же граница.
+        """
+        if not settings.DEBUG:
+            logger.warning(
+                "Вебхук оплаты пришёл при шлюзе-заглушке вне DEBUG — отклонён. "
+                "Настройте PAYMENT_GATEWAY, прежде чем принимать онлайн-оплату."
+            )
+            return {"reference": "", "paid": False}
         reference = request.data.get("reference", "")
         return {"reference": reference, "paid": True}
 

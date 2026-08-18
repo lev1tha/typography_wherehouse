@@ -104,12 +104,29 @@ class MaterialDeleteTests(APITestCase):
         listing = self.client.get("/api/warehouse/materials/?page_size=200").data
         self.assertNotIn(self.material.id, [m["id"] for m in listing["results"]])
 
-    def test_hidden_material_stops_counting_in_stock_value(self):
-        """Остаток скрытого материала в «Стоимости склада» больше не участвует:
-        админ нажал «Удалить», и товара для него больше нет."""
+    def test_hidden_material_keeps_its_value_while_it_is_on_the_shelf(self):
+        """Скрытый материал с остатком в «Стоимости склада» ОСТАЁТСЯ.
+
+        Прячется только материал, по которому были продажи, — то есть реальный
+        товар. Он лежит на полке и стоит денег; нажатие «Удалить» убирает его из
+        каталога и кассы, но не должно списывать его стоимость из активов.
+        Исходная жалоба «удалил, а он в отчётах» закрыта тем, что материал без
+        продаж удаляется насовсем.
+        """
         self._lot()
         self._sell()
-        self.assertGreater(self._stock_value(), Decimal("0"))
+        before = self._stock_value()
+        self.assertGreater(before, Decimal("0"))
+        self._delete()
+        self.assertEqual(self._stock_value(), before)
+
+    def test_hidden_material_without_stock_counts_as_zero(self):
+        """А опустевший скрытый материал в стоимость склада ничего не приносит."""
+        self._lot()
+        self.material.refresh_from_db()
+        self._sell(qty=str(self.material.quantity))   # продали весь остаток
+        self.material.refresh_from_db()
+        self.assertEqual(self.material.quantity, Decimal("0.0000"))
         self._delete()
         self.assertEqual(self._stock_value(), Decimal("0"))
 

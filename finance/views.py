@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.conf import settings
+from django.core import signing
 from django.db.models import Count, DecimalField, Sum
 from django.db.models.functions import Coalesce, TruncDate
 from django.utils import timezone
@@ -19,7 +20,7 @@ from accounts.permissions import IsAdminOrAccountantRead, SeesMoney
 from audit.models import AuditLog
 from sales.models import Receipt, TransactionItem
 from services.models import PrintingService
-from warehouse.models import InventoryLog, Material, Supply
+from warehouse.models import InventoryLog, Material, Roll, Supply
 
 from .material_sheet import (
     collect_flows,
@@ -29,6 +30,8 @@ from .material_sheet import (
     purchases_from_stock,
     purchases_from_stock_by_day,
     q2,
+    sheet_unit,
+    to_units,
 )
 from .models import (
     CashEntry,
@@ -51,20 +54,52 @@ from .serializers import (
 _SUM = lambda field: Coalesce(Sum(field), Decimal("0"), output_field=DecimalField())
 
 
+# Сколько держится снятый финансовый пароль. Столько же, сколько держал старый
+# признак во фронтенде, — но теперь срок считает сервер, а не браузер.
+FINANCE_UNLOCK_TTL = 30 * 60
+_finance_signer = signing.TimestampSigner(salt="finance-unlock")
+
+
 class FinanceUnlockView(APIView):
     """POST /api/finance/unlock/ — verify the separate password that gates the
     Finance & detailed-analytics screens (on top of the login). Админ и бухгалтер;
     the password itself lives in settings (FINANCE_PASSWORD, configured via .env),
-    so it never ships in the frontend bundle."""
+    so it never ships in the frontend bundle.
+
+    Снятие пароля подтверждается ПОДПИСАННЫМ признаком с сервера, а не отметкой
+    времени в браузере. Раньше фронтенд хранил `financeUnlockedAt` — обычное
+    число, — и строка `localStorage.setItem('financeUnlockedAt', Date.now())`
+    открывала «Финансы» целиком, не зная пароля. Подделать подпись, не зная
+    SECRET_KEY, нельзя, а срок жизни проверяет сервер (`GET`), а не браузер.
+
+    Что API финансов остаётся доступен обычному токену админа и бухгалтера —
+    так и задумано: этот пароль отделяет ЭКРАНЫ, а не роли, и того, кто уже
+    вошёл админом, он от его же данных не защищает.
+    """
 
     permission_classes = [SeesMoney]
 
     def post(self, request):
         supplied = str(request.data.get("password") or "")
         expected = str(getattr(settings, "FINANCE_PASSWORD", "") or "")
-        if expected and secrets.compare_digest(supplied, expected):
-            return Response({"ok": True})
+        # Сравниваем БАЙТЫ, а не строки: `compare_digest` на строках с не-ASCII
+        # бросает TypeError, и кириллический финансовый пароль (а цех тут
+        # русско- и кыргызоязычный) ронял раздел пятисоткой вместо проверки.
+        # Постоянное время сравнения при этом сохраняется.
+        if expected and secrets.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+            return Response({"ok": True, "token": _finance_signer.sign(str(request.user.pk))})
         return Response({"detail": "Неверный пароль."}, status=status.HTTP_403_FORBIDDEN)
+
+    def get(self, request):
+        """Действителен ли ещё признак, выданный этому пользователю."""
+        token = request.headers.get("X-Finance-Unlock") or request.query_params.get("token") or ""
+        try:
+            owner = _finance_signer.unsign(token, max_age=FINANCE_UNLOCK_TTL)
+        except (signing.BadSignature, signing.SignatureExpired):
+            return Response({"ok": False})
+        # Признак именной: разблокировка одного сотрудника не открывает раздел
+        # тому, кто сядет за ту же машину следующим.
+        return Response({"ok": owner == str(request.user.pk)})
 
 
 def _parse_date(value):
@@ -472,7 +507,17 @@ class FinanceReportView(APIView):
             v=_SUM("refunded_amount")
         )["v"]
         # Сколько денег по этим заказам реально приняли — включая предоплаты.
-        revenue_paid = live.aggregate(v=_SUM("amount_paid"))["v"]
+        #
+        # По каждому чеку берём НЕ БОЛЬШЕ его вклада в выручку: возврат уменьшает
+        # выручку, а `amount_paid` остаётся прежним, и «оплачено» вылезало выше
+        # «выручки» — 13 613 против 13 253 при нулевом долге. Плитка сама себе
+        # противоречила, и это первое, что заказчик складывает в уме.
+        # Лишнее сверх стоимости оставшихся строк — это уже не выручка, а сдача
+        # или возвращённые деньги, и они живут в своих полях.
+        revenue_paid = Decimal("0")
+        for r in live.only("total_price", "amount_paid", "refunded_amount"):
+            kept = r.total_price - r.refunded_amount
+            revenue_paid += min(r.amount_paid, kept) if kept > 0 else Decimal("0")
         pending = live.filter(payment_status__in=Receipt.OWING_STATUSES)
 
         # Долг клиентов = Σ (сумма − предоплата − возвраты) по открытым чекам.
@@ -500,7 +545,28 @@ class FinanceReportView(APIView):
         # поэтому и считается в метрах.
         area_by_user = defaultdict(lambda: Decimal("0"))
         pm_by_user = defaultdict(lambda: Decimal("0"))
+        rev_by_user = defaultdict(lambda: Decimal("0"))
         cutting_total = Decimal("0")
+        # ОБРЕЗКИ: сколько материала списали, но клиенту не отдали. Полосу 0.5 м
+        # от рулона 0.9 отрезают на всю ширину, и 0.4 остаётся в цехе — обычно в
+        # мусор. Деньги за полную ширину взяты, и это правильно: материал
+        # потрачен весь. Но цифра «сколько я подарил» не считалась НИГДЕ.
+        #
+        # Это не добавочный расход — он уже сидит в себестоимости проданного.
+        # Здесь только та его часть, которая до клиента не дошла.
+        offcut_area = Decimal("0")
+        offcut_cost = Decimal("0")
+        for item in (
+            by_created(
+                TransactionItem.objects.filter(
+                    is_returned=False, used_width__isnull=False
+                ).exclude(receipt__status=Receipt.Status.CANCELLED),
+                field="receipt__created_at",
+            )
+            .select_related("material", "roll")
+        ):
+            offcut_area += item.offcut_area
+            offcut_cost += item.offcut_cost
         cutting_area = Decimal("0")
         cutting_pm = Decimal("0")
         cut_receipts = (
@@ -513,7 +579,7 @@ class FinanceReportView(APIView):
             )
             .distinct()
             .select_related("cashier")
-            .prefetch_related("items__material__type", "items__service")
+            .prefetch_related("items__material__type", "items__service", "items__roll")
         )
         for r in cut_receipts:
             items = list(r.items.all())
@@ -528,15 +594,29 @@ class FinanceReportView(APIView):
                 and i.service.kind == "CUTTING"
             ]
             # Площадь резаного материала этого чека. Продажа по кв.м даёт её
-            # прямо в количестве; продажа листами — через площадь листа. Штучный
-            # материал (крепёж) площади не имеет и в кв.м не попадает.
+            # прямо в количестве; продажа листами — через площадь листа; рулон —
+            # длина × ширина полотна. Штучный материал (крепёж) площади не имеет
+            # и в кв.м не попадает.
+            #
+            # ВОЗВРАЩЁННЫЕ строки материала СЧИТАЮТСЯ ТОЖЕ. Это метрика работы
+            # станка — «сколько прошло через ЧПУ», — а станок отрезал независимо
+            # от того, вернул клиент материал потом или нет. Раньше возврат
+            # обнулял площадь, а строка работы оставалась живой, и плитка
+            # показывала «Лазер 0 кв.м · 444 сом»: денег насчитали, а работы
+            # будто не было. Деньги здесь берутся со строки РАБОТЫ и на возврат
+            # материала не реагируют — значит и площадь не должна.
             area = Decimal("0")
             for i in items:
-                if i.type != TransactionItem.Type.MATERIAL or i.is_returned or not i.material_id:
+                if i.type != TransactionItem.Type.MATERIAL or not i.material_id:
                     continue
                 if i.sale_mode == TransactionItem.SaleMode.PIECE:
                     if i.material.piece_area:
                         area += i.quantity * i.material.piece_area
+                elif i.sale_mode == TransactionItem.SaleMode.METER:
+                    # Ширина ПАРТИИ, с которой резали (у карточки — лишь
+                    # значение по умолчанию для приёмки).
+                    if i.roll_width:
+                        area += i.quantity * i.roll_width
                 else:
                     area += i.quantity
 
@@ -572,6 +652,7 @@ class FinanceReportView(APIView):
                 if idx == 0:
                     area_by_user[r.cashier_id] += area
                 pm_by_user[r.cashier_id] += line.quantity
+                rev_by_user[r.cashier_id] += rev
             cutting_area += area
 
         # Строки — станки, по которым в периоде что-то резали. «Без станка» —
@@ -579,6 +660,18 @@ class FinanceReportView(APIView):
         # проставлен: молча прятать их сумму нельзя, иначе строки не сойдутся
         # с «Резка, всего».
         machine_names = dict(PrintingService.Machine.choices)
+        # «% ЗП мастера» из настроек цен — доля от стоимости работы резки.
+        # Настройка существовала, но нигде не считалась: владелец ставил 4 % и
+        # ждал цифру, которой не было. Показываем РАСЧЁТНУЮ долю — справочно,
+        # в прибыль она не входит: зарплаты вносятся записями, иначе счёт
+        # двойной. Целыми сомами, как и остальные деньги отчёта.
+        from services.models import PricingSettings
+
+        master_pct = PricingSettings.load().master_commission_percent or Decimal("0")
+
+        def master_share(amount):
+            return (amount * master_pct / Decimal("100")).quantize(Decimal("1"))
+
         # Сортируем строки по ПЛОЩАДИ, а не по сумме: главная величина блока —
         # квадратные метры, и порядок строк должен объяснять именно её.
         machines = set(cut_by_machine) | set(area_by_machine)
@@ -591,6 +684,9 @@ class FinanceReportView(APIView):
             "total": cutting_total,
             "area": q2(cutting_area),
             "running_meters": q2(cutting_pm),
+            # Расчётная ЗП мастера от всей работы резки за период — справочно.
+            "master_commission_percent": master_pct,
+            "master_share": master_share(cutting_total),
             "rows": [
                 {
                     "id": machine or None,
@@ -614,6 +710,9 @@ class FinanceReportView(APIView):
                     "name": user_names.get(uid) or "Без сотрудника",
                     "area": q2(area),
                     "running_meters": q2(pm_by_user.get(uid, Decimal("0"))),
+                    # Стоимость работы реза этого сотрудника и его расчётная доля.
+                    "amount": rev_by_user.get(uid, Decimal("0")),
+                    "master_share": master_share(rev_by_user.get(uid, Decimal("0"))),
                 }
                 for uid, area in sorted(area_by_user.items(), key=lambda kv: -kv[1])
             ],
@@ -634,6 +733,11 @@ class FinanceReportView(APIView):
                 # было видно маржу: выручка − себестоимость = сколько заработали
                 # на материале до накладных расходов.
                 "cogs": cogs,
+                # Обрезки — часть этой же себестоимости, не дошедшая до клиента.
+                "offcuts": {
+                    "area": offcut_area.quantize(Decimal("0.01")),
+                    "cost": offcut_cost.quantize(Decimal("0.01")),
+                },
                 "gross_margin": revenue - cogs,
                 "investments": investments,
                 "total_expenses": total_expenses,
@@ -880,29 +984,41 @@ class MaterialReportView(APIView):
             if mat:
                 cut_by_mat[mat.id] += cut_rev
 
-        # Продажи материалов: площадь, листы, сумма материала, число заказов.
+        # Продажи материалов: площадь, листы, метры, сумма материала, число
+        # заказов. У рулона единица — погонные метры (`metres`), площадь —
+        # справочно, по ширине ПАРТИИ строки; раньше метры METER-строк
+        # складывались как кв.м, а рулон с размером листа в карточке считался
+        # листами («продано 1 м» → «1.000 кв.м / 0.42 листа»).
         agg = defaultdict(
-            lambda: {"area": Decimal("0"), "sheets": Decimal("0"), "mat_rev": Decimal("0"), "orders": set()}
+            lambda: {
+                "area": Decimal("0"), "sheets": Decimal("0"), "metres": Decimal("0"),
+                "mat_rev": Decimal("0"), "orders": set(),
+            }
         )
         mat_items = (
             TransactionItem.objects.filter(
                 type=TransactionItem.Type.MATERIAL, is_returned=False, material__isnull=False
             )
             .exclude(receipt__status=Receipt.Status.CANCELLED)
-            .select_related("material")
+            .select_related("material", "roll")
         )
         mat_items = by_receipt_date(mat_items)
         for it in mat_items:
             m = it.material
             a = agg[m.id]
             q = it.quantity
-            if it.sale_mode == TransactionItem.SaleMode.PIECE:
+            if it.sale_mode == TransactionItem.SaleMode.METER:
+                a["metres"] += q
+                a["area"] += q * it.roll_width
+            elif it.sale_mode == TransactionItem.SaleMode.PIECE:
                 a["sheets"] += q
                 if m.piece_area:
                     a["area"] += q * m.piece_area
             else:
                 a["area"] += q
-                if m.piece_area:
+                if m.sells_by_metre:
+                    a["metres"] += to_units(m, q, width=it.roll_width)
+                elif m.piece_area:
                     a["sheets"] += q / m.piece_area
             a["mat_rev"] += it.line_total   # как в чеке: округление вверх
             a["orders"].add(it.receipt_id)
@@ -910,9 +1026,12 @@ class MaterialReportView(APIView):
         # Поступление за период: приход по складским логам (и партии рулонов,
         # и обычный приход пишут SUPPLY с положительным количеством). Заодно
         # собираем приходы по дням — колонки «поступление товар» в таблице
-        # заказчика («01.июл — 50, 10.июл — 50»).
+        # заказчика («01.июл — 50, 10.июл — 50»). Рулон — по ПАРТИЯМ и в
+        # метрах: у журнала только площадь, а ширина у партий разная.
         received = defaultdict(lambda: Decimal("0"))
         received_days = defaultdict(lambda: defaultdict(lambda: Decimal("0")))
+        received_metres = defaultdict(lambda: Decimal("0"))
+        received_metres_days = defaultdict(lambda: defaultdict(lambda: Decimal("0")))
         supply = InventoryLog.objects.filter(
             type=InventoryLog.Type.SUPPLY, quantity_changed__gt=0
         )
@@ -925,6 +1044,16 @@ class MaterialReportView(APIView):
         ):
             received[log["material_id"]] += log["quantity_changed"]
             received_days[log["material_id"]][log["day"]] += log["quantity_changed"]
+        rolls_in = Roll.objects.filter(material__is_roll_material=True, width__isnull=False)
+        if d_from:
+            rolls_in = rolls_in.filter(received_at__date__gte=d_from)
+        if d_to:
+            rolls_in = rolls_in.filter(received_at__date__lte=d_to)
+        for roll in rolls_in.values("material_id", "initial_area", "width", "received_at"):
+            metres = roll["initial_area"] / roll["width"]
+            received_metres[roll["material_id"]] += metres
+            day = timezone.localtime(roll["received_at"]).date()
+            received_metres_days[roll["material_id"]][day] += metres
 
         # Остаток на начало месяца система переносит с конца прошлого месяца
         # сама — вписать его нужно один раз, в месяце начала учёта. Вписанное
@@ -942,9 +1071,12 @@ class MaterialReportView(APIView):
         for m in materials:
             a = agg.get(m.id)
             # Материал считаем в листах, если у него задана площадь листа, —
-            # заказчик ведёт склад именно листами. Иначе в его единице.
+            # заказчик ведёт склад именно листами; рулон — в погонных метрах;
+            # иначе в его единице.
+            unit_code = sheet_unit(m)
             per_sheet = counting_unit(m)
             in_units = lambda v: (v / per_sheet) if per_sheet else v  # noqa: E731
+            by_metre = unit_code == "METER"
 
             # Формула складского листа заказчика:
             #   остаток на конец = остаток на начало + поступление − проданные.
@@ -957,8 +1089,12 @@ class MaterialReportView(APIView):
                 # Период не совпал с календарным месяцем — переносить неоткуда.
                 opening, has_opening = Decimal("0"), False
             opening = q2(opening)
-            received_in_units = q2(in_units(received.get(m.id, Decimal("0"))))
-            sold_in_units = q2(in_units(a["area"] if a else Decimal("0")))
+            if by_metre:
+                received_in_units = q2(received_metres.get(m.id, Decimal("0")))
+                sold_in_units = q2(a["metres"] if a else Decimal("0"))
+            else:
+                received_in_units = q2(in_units(received.get(m.id, Decimal("0"))))
+                sold_in_units = q2(in_units(a["area"] if a else Decimal("0")))
             closing = opening + received_in_units - sold_in_units
             rows.append(
                 {
@@ -972,11 +1108,12 @@ class MaterialReportView(APIView):
                     "material_revenue": a["mat_rev"] if a else Decimal("0"),
                     "cut_revenue": cut_by_mat.get(m.id, Decimal("0")),
                     "received": received.get(m.id, Decimal("0")),
-                    "stock": m.quantity,
+                    # Остаток — в единице листа: у рулона метры.
+                    "stock": (m.metres_remaining or Decimal("0")) if by_metre else m.quantity,
                     "unit": m.unit,
                     # Колонки складской таблицы заказчика, все в одной единице:
                     # начало + поступление − проданные = конец.
-                    "counted_in": "SHEET" if per_sheet else m.unit,
+                    "counted_in": unit_code,
                     # Остаток на начало посчитан переносом с прошлого месяца;
                     # флаг говорит, что его вписали руками (тогда он победил
                     # расчёт) — интерфейс это помечает.
@@ -985,10 +1122,17 @@ class MaterialReportView(APIView):
                     "stock_end": closing,
                     "received_qty": received_in_units,
                     "sold_qty": sold_in_units,
-                    "receipts": [
-                        {"date": day.isoformat(), "qty": q2(in_units(qty))}
-                        for day, qty in sorted(received_days.get(m.id, {}).items())
-                    ],
+                    "receipts": (
+                        [
+                            {"date": day.isoformat(), "qty": q2(qty)}
+                            for day, qty in sorted(received_metres_days.get(m.id, {}).items())
+                        ]
+                        if by_metre
+                        else [
+                            {"date": day.isoformat(), "qty": q2(in_units(qty))}
+                            for day, qty in sorted(received_days.get(m.id, {}).items())
+                        ]
+                    ),
                 }
             )
 

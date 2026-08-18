@@ -69,12 +69,15 @@
     "clientTab": "I'm a customer",
     "clientHint": "Enter the phone number you gave when ordering",
     "clientBtn": "View my orders",
-    "customerError": "No customer with this number",
+    "customerError": "Wrong number or password",
     "tabsHint": "Ordered from us? Tap “I'm a customer”",
-    "greetBack": "Welcome back, {{name}}!",
-    "enterPassHint": "Enter your password.",
+    "enterPassHint": "Enter the password the administrator gave you. Don't have one? Just ask us.",
     "otherPhone": "Another phone",
-    "askAdminHint": "The administrator issues your password. Please contact us and we'll give it to you."
+    "askAdminHint": "The administrator issues your password. Please contact us and we'll give it to you.",
+    "needCredentials": "Enter your username and password",
+    "needPhone": "Enter your phone number",
+    "needPassword": "Enter your password",
+    "enterPassTitle": "Sign in to your account"
   },
   "dashboard": {
     "title": "Overview",
@@ -174,7 +177,19 @@
     "stockValueTotal": "Stock value",
     "stockValueCol": "Value",
     "tabSupplies": "Deliveries",
-    "fixStock": "Stock"
+    "fixStock": "Stock",
+    "piecePriceDiverged": "The price per {{unit}} is set separately — that's {{perSqm}} som/sq.m. While it differs from the per-sq.m price, it is left as you set it.",
+    "rollWidth": "Roll width, m",
+    "retailPerPm": "Sale price, som/running m",
+    "rollWidthHint": "A roll is cut across its full width, so it is sold by length. At the till the master enters the length only.",
+    "rollWidthRequired": "Required: without a width the roll cannot be saved or received — it is pre-filled at intake",
+    "reconcileLots": "Reconcile with rolls",
+    "reconcileTitle": "Material stock {{qty}} sq m, rolls total {{lots}} sq m — the difference belongs to no roll",
+    "reconcileConfirm": "“{{name}}”: material stock {{qty}} sq m, rolls total {{lots}} sq m. Set the stock to the rolls total? The difference goes to the stock journal as a line.",
+    "rollStockByMeasure": "Roll materials are checked by measuring each roll — Stock → “Measure”. They are not listed here.",
+    "perMetreShort": "som/run.m",
+    "metresLeft": "{{n}} running m left",
+    "rollsBreakdown": "{{n}} rolls"
   },
   "unit": {
     "SQM": "sqm",
@@ -203,7 +218,7 @@
     "piecePrice": "Price per piece (sheet/roll)",
     "pieceArea": "Piece area, sqm",
     "masterCommission": "Master wage, % of work",
-    "masterCommissionHint": "Master's share of the cutting work cost. Admin-only.",
+    "masterCommissionHint": "The master's share of the cutting work value. Admin only; the calculated amount is shown in Finance under “Cutting by machine” (for reference, not part of profit).",
     "cutRatePm": "Cut rate, som/running m",
     "servicesOnlyHint": "Work rates and master %. Material prices live in the “Склад” (Warehouse) section.",
     "ratePerPm": "Cutting rate, som per running m",
@@ -305,7 +320,8 @@
     "inn": "Tax ID",
     "innPh": "for the invoice",
     "orderRefunded": "refunded {{sum}} som",
-    "ordersCancelled": "fully returned: {{n}}"
+    "ordersCancelled": "fully returned: {{n}}",
+    "referralQueueEmpty": "No requests. They appear here when a storekeeper asks to change a client's referrer."
   },
   "checkout": {
     "outOfStock": "Out of stock",
@@ -349,7 +365,10 @@
     "prepayHint": "How much you took now. Empty — the whole order becomes debt.",
     "cutHint": "Turn on if the sheet needs cutting to size",
     "sizeHint": "In metres, e.g. 0.5 × 1.2",
-    "runMetersHint": "Leave empty and no cutting work is charged",
+    "runMetersHint": "Cutting work is priced by it: rate × length",
+    "runMetersRequired": "Enter the curve length — without it the shaped cut goes on the receipt for free",
+    "runMetersRequiredCart": "“{{name}}”: no cut length — remove the line and add it again with the curve length",
+    "runMetersMissingLine": "no cut length",
     "cutInfo": "A piece is cut on the machine: price = material (area) + cutting work (running metre).",
     "wholesale": "Wholesale",
     "wholesaleFrom": "Wholesale from {{n}} pcs — {{price}} som/sheet",
@@ -392,7 +411,32 @@
     "takeNow": "To collect now",
     "repeated": "Lines copied: {{n}}. Prices are today's.",
     "repeatedPartly": "Lines copied: {{n}}. Skipped (not in catalogue): {{skipped}}.",
-    "repeatEmpty": "Nothing to repeat: none of this order's items are in the catalogue any more."
+    "repeatEmpty": "Nothing to repeat: none of this order's items are in the catalogue any more.",
+    "notEnough": "Only {{left}} {{unit}} of «{{name}}» in stock — not enough for {{need}}",
+    "rollWidthFixed": "Roll width {{width}} m — cut across the full width",
+    "rollLength": "Length, m",
+    "rollRate": "Price, som/running m",
+    "rollLeftAfter": "Roll left after the cut: {{n}} running m",
+    "backdatedWarn": "This order will be recorded on {{date}}, not today",
+    "backdatedReset": "Back to today",
+    "rollPick": "Cut from which roll",
+    "rollFirst": "finish this one first",
+    "rollLeftAfterOne": "Roll {{roll}} will have {{n}} running m left",
+    "fromRoll": "roll {{roll}}",
+    "usedWidth": "Product width, m (optional)",
+    "usedWidthHint": "How much width the client gets. Empty — all {{width}} m",
+    "usedWidthTooWide": "Cannot exceed the roll width ({{width}} m)",
+    "offcut": "Offcut: {{w}} × {{len}} = {{area}} sq.m",
+    "rollNoPrice": "No price per running metre set — ask the administrator",
+    "rollNoPriceAdmin": "Set the price per running metre on the material card, or type it here",
+    "payDebtHowTo": "Enter everything the client handed over in “Paying now”: the order is settled first, the rest pays off the debt, oldest orders first.",
+    "prepayWithDebtHint": "Total received — for the order and the debt. Empty — the order goes on credit and the old debt stays.",
+    "payDebtNeedsAmount": "Enter how much the client brought, or press “Full amount”: the debt is paid from that sum.",
+    "rateMissing": "No cutting rate on the machine or the material — the work would go for free. Ask an administrator to set the rate in the catalogue.",
+    "rateMissingAdmin": "No cutting rate on the machine or the material. Set it in “Prices & services” or on the material card — or type it here (0 = gift).",
+    "priceMissing": "The material has no price in the catalogue — it cannot be sold for 0. Ask an administrator to set the price.",
+    "priceMissingAdmin": "The material has no price in the catalogue. Set it on the material card — or type it here (0 = gift).",
+    "priceMissingShort": "no price set"
   },
   "receipts": {
     "title": "Receipts",
@@ -523,7 +567,16 @@
     "intakeFormHint": "Form taken from the material — you can change it for this lot.",
     "adjustHint": "Counted the stock and it differs from the system? Enter what is actually there. The difference is logged as an inventory adjustment.",
     "adjustReasonPh": "e.g. recount, typo on entry (optional)",
-    "diff": "Difference"
+    "diff": "Difference",
+    "widthFromCard": "Width {{width}} m — from the material card, frozen into this lot",
+    "declaredLength": "Declared, m",
+    "acceptedLength": "Actually received, m",
+    "costPerPm": "Purchase price, som/running m",
+    "shortfall": "Short by {{n}} m — supplier under-delivered",
+    "writeoffRoll": "Roll",
+    "writeoffMetres": "Metres to write off",
+    "writeoffRollHint": "Roll stock is written off per roll and in metres — at that roll's width and cost. The roll's remainder after the write-off is shown below.",
+    "writeoffRollNone": "This material has no rolls with stock left."
   },
   "journal": {
     "title": "Journal",
@@ -689,7 +742,11 @@
     "revenueDebt": "On credit",
     "revenueTitle": "Revenue for the period",
     "dailySubtitle": "Profit for each day of the month: the day's revenue minus that day's purchases and its share of the fixed costs. Green is a day in the black, red in the red.",
-    "revenueHint": "Revenue is the sum of all orders of the period by order date, except cancelled ones. Whether an order is paid does not change revenue: unpaid orders are shown separately as “on credit”."
+    "revenueHint": "Revenue is the sum of all orders of the period by order date, except cancelled ones. Whether an order is paid does not change revenue: unpaid orders are shown separately as “on credit”.",
+    "offcuts": "Of that, into offcuts",
+    "masterShare": "Master's pay at {{pct}} % of cutting work: {{sum}}.",
+    "masterShareHint": "For reference — not part of profit; salaries are entered as records.",
+    "cuttingUserShare": "{{pm}} r.m of cut · work {{sum}} · master's share {{share}}"
   },
   "expenses": {
     "amount": "Amount",
@@ -920,7 +977,11 @@
     "editHint": "A note's lines cannot be edited: some of the material may already have gone into orders. Made a mistake in the lines — cancel the note and enter it again.",
     "statDocs": "Notes",
     "statSum": "Received for",
-    "statDebt": "Owed to suppliers"
+    "statDebt": "Owed to suppliers",
+    "lineNeedsMaterial": "pick a material",
+    "lineNeedsCost": "enter the line total",
+    "linesIncomplete": "Rows {{rows}} are incomplete — the document is not posted until every started row has a material and a total (0 if free).",
+    "widthDiffers": "The material card says roll width {{width}} m — check it is not a typo"
   },
   "cash": {
     "title": "Cash and bank",
@@ -970,5 +1031,25 @@
     "open": "Period is open — anything can be edited retroactively.",
     "closed": "Period closed through {{date}}",
     "opened": "Period opened — retroactive edits are allowed again"
+  },
+  "stocktake": {
+    "title": "Measure roll {{roll}}",
+    "expected": "System says",
+    "counted": "Measured, m",
+    "reason": "Reason for the difference",
+    "note": "Note",
+    "submit": "Record the act",
+    "done": "Stocktake recorded",
+    "short": "Short by {{n}} m",
+    "surplus": "Surplus {{n}} m",
+    "noteRequired": "For «Other», write down what happened",
+    "reasonSUPPLIER": "Under-delivered",
+    "reasonCUTTING": "Lost in cutting",
+    "reasonDAMAGE": "Damage",
+    "reasonMISCOUNT": "Bookkeeping error",
+    "reasonOTHER": "Other",
+    "button": "Measure",
+    "acts": "Stocktake acts",
+    "noActs": "No measurements yet"
   }
 }

@@ -9,7 +9,7 @@ from decimal import Decimal
 from rest_framework.test import APITestCase
 
 from accounts.models import User
-from clients.models import Client
+from clients.models import Client, ReferralChangeRequest
 from sales.models import Receipt
 
 
@@ -108,6 +108,37 @@ class AccountantAccessTests(APITestCase):
         self.assertEqual(
             self.client.post("/api/services/services/", {"name": "Х"}).status_code, 403
         )
+
+    def test_cannot_file_a_referral_change_request(self):
+        """Единственная дыра в матрице прав, которую находил аудит.
+
+        `permission_classes` на экшене ЗАМЕЩАЮТ список вьюсета, а не дополняют
+        его: там оставался голый `IsAuthenticated`, и бухгалтер заводил заявку
+        на смену реферера, оставляя в журнале действий запись от своего имени.
+        Реферальный бонус это деньги, а он их проверяет.
+        """
+        other = Client.objects.create(full_name="Другой", phone="+996555999888")
+        self.client.force_authenticate(self.accountant)
+        resp = self.client.post(
+            f"/api/clients/clients/{self.client_obj.id}/request-referral-change/",
+            {"referred_by": other.id, "reason": "проверка"}, format="json",
+        )
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertEqual(
+            ReferralChangeRequest.objects.count(), 0,
+            "бухгалтер оставил в системе запись",
+        )
+
+    def test_storekeeper_can_still_file_a_referral_change_request(self):
+        """Складовщику эта дверь открыта — её и закрывать было не нужно."""
+        other = Client.objects.create(full_name="Ещё один", phone="+996555999777")
+        self.client.force_authenticate(self.keeper)
+        resp = self.client.post(
+            f"/api/clients/clients/{self.client_obj.id}/request-referral-change/",
+            {"referred_by": other.id, "reason": "ошиблись при оформлении"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201, resp.data)
 
     def test_cannot_add_expense_entry(self):
         """Финансы он читает, но траты вносит админ: иначе бухгалтер вписывал бы

@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from datetime import datetime
+from datetime import date, datetime
 
 from django.db import transaction
 from django.db.models import Count, F, ProtectedError
@@ -25,11 +25,12 @@ from .models import (
     MaterialType,
     ProductionSite,
     Roll,
+    RollStocktake,
     Supplier,
     Supply,
 )
-from .rolls import receive_lot
-from .supplies import SupplyError, post_supply, unpost_supply
+from .rolls import InsufficientStock, receive_lot, stocktake_roll, write_off_roll
+from .supplies import SupplyError, move_supply_date, post_supply, supply_summary, unpost_supply
 from .serializers import (
     build_ref_index,
     MaterialBulkRowSerializer,
@@ -44,6 +45,9 @@ from .serializers import (
     RollIntakeSerializer,
     QuickIntakeSerializer,
     RollSerializer,
+    RollStocktakeInputSerializer,
+    RollStocktakeSerializer,
+    RollWriteOffSerializer,
     SupplierSerializer,
     SupplySerializer,
     WriteOffSerializer,
@@ -254,6 +258,26 @@ class MaterialViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         ensure_open(serializer.validated_data.get("happened_on"), "Оформить поступление этой датой")
         data = serializer.validated_data
+        # У площадного материала остаток лежит ДВАЖДЫ: числом в материале и
+        # площадями партий, из которых FIFO берёт себестоимость. Быстрый приход
+        # поднимал только число — партии не создавалось, и дальше себестоимость
+        # начинала врать: продажа сверх площади партий уходила бесплатно, а
+        # возврат такого чека надувал партии. Инвентаризация и списание эту
+        # развилку держат, приход — не держал.
+        #
+        # Интерфейс сюда и не ведёт (модалка прихода зовёт `receive-roll`), но
+        # эндпоинт открыт, и молча разъезжаться склад не должен.
+        if data["material"].is_roll_material:
+            return Response(
+                {
+                    "detail": (
+                        f"«{data['material'].name}» приходит партией: нужны размеры "
+                        "и стоимость закупки, иначе у материала не будет "
+                        "себестоимости. Оформите поступление партией."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         material = apply_stock_change(
             data["material"],
             Decimal(data["quantity"]),
@@ -272,6 +296,27 @@ class MaterialViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         material = data["material"]
+        if material.sells_by_metre:
+            # Рулон меряют рулеткой ПО РУЛОНАМ и в метрах — это акт промера
+            # (`/rolls/<id>/stocktake/`). Общее число в кв.м для него не отвечает
+            # ни на один вопрос, а расхождение эта ручка гнала бы через FIFO —
+            # то есть списала бы полтора метра со СТАРЕЙШЕГО рулона, хотя
+            # промеряли рулон №23. Единственный законный остаток для этой ручки —
+            # «хвост сверх партий», и его сводит отдельное действие ниже.
+            from .rolls import lots_area
+
+            in_lots = lots_area(material)
+            text = (
+                f"«{material.name}» — рулонный материал: остаток сверяют промером "
+                f"каждого рулона (кнопка «Промер» в Складе), а не общим числом в кв.м."
+            )
+            if material.quantity != in_lots:
+                text += (
+                    f" Остаток по материалу ({material.quantity} кв.м) расходится с "
+                    f"суммой рулонов ({in_lots} кв.м) — сведите его кнопкой "
+                    f"«Свести с рулонами»."
+                )
+            return Response({"detail": text}, status=status.HTTP_400_BAD_REQUEST)
         delta = Decimal(data["counted_quantity"]) - material.quantity
         reason = data.get("reason") or "Инвентаризация"
         if material.is_roll_material:
@@ -311,6 +356,34 @@ class MaterialViewSet(viewsets.ModelViewSet):
         )
         return Response(MaterialSerializer(material, context={"request": request}).data)
 
+    @action(detail=False, methods=["post"], url_path="reconcile-lots", permission_classes=[IsAdmin])
+    def reconcile_lots(self, request):
+        """POST /materials/reconcile-lots/ {material} — свести остаток рулонного
+        материала с суммой его партий.
+
+        Только для материала, который продаётся метрами: у него правда лежит в
+        рулонах (режут, промеряют и возвращают по рулонам), а число в карточке —
+        производное. Хвост сверх партий там не списать ни продажей, ни промером,
+        и без этой ручки он висел бы в остатке и стоимости склада вечно.
+        """
+        material = get_object_or_404(Material, pk=request.data.get("material"))
+        if not material.sells_by_metre:
+            return Response(
+                {"detail": f"«{material.name}» не продаётся метрами — остаток правится инвентаризацией."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        from .rolls import NothingToReconcile, reconcile_with_lots
+
+        try:
+            delta = reconcile_with_lots(material, user=request.user)
+        except NothingToReconcile as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        AuditLog.record(
+            request.user,
+            f"Сведение остатка «{material.name}» с рулонами: {delta:+} кв.м → {material.quantity} кв.м",
+        )
+        return Response(MaterialSerializer(material, context={"request": request}).data)
+
     @action(detail=False, methods=["post"], url_path="receive-roll", permission_classes=[IsAdmin])
     def receive_roll(self, request):
         """POST /materials/receive-roll/ — receive a lot (roll: ширина×длина,
@@ -330,12 +403,21 @@ class MaterialViewSet(viewsets.ModelViewSet):
             received_at=_as_moment(data.get("received_on")),
             code=data.get("code", ""),
             user=request.user,
+            declared_length=data.get("declared_length"),
         )
-        AuditLog.record(
-            request.user,
+        note = (
             f"Поступление «{roll.material.name}»: {roll.dimensions_label} = "
-            f"{roll.initial_area} кв.м, {roll.purchase_cost} сом (себест. {roll.cost_per_sqm}/кв.м)",
+            f"{roll.initial_area} кв.м, {roll.purchase_cost} сом "
+            f"(себест. {roll.cost_per_sqm}/кв.м)"
         )
+        # Недолив — в журнал действий сразу: цифра, которую иначе никто не
+        # сведёт, а рулон за рулоном она копится в чистый убыток.
+        if roll.shortfall:
+            note += (
+                f". ЗАЯВЛЕНО {roll.declared_length} м, ПРИНЯТО {roll.length} м — "
+                f"недостача {roll.shortfall} м"
+            )
+        AuditLog.record(request.user, note)
         return Response(
             MaterialSerializer(roll.material, context={"request": request}).data,
             status=status.HTTP_201_CREATED,
@@ -349,6 +431,21 @@ class MaterialViewSet(viewsets.ModelViewSet):
         data = serializer.validated_data
         reason = serializer.reason_text()
         material = data["material"]
+        if material.sells_by_metre:
+            # Брак у рулона — это конкретный рулон и метры рулеткой, а не общее
+            # число в кв.м: то шло FIFO со старейшего рулона, и «порвали 2 м
+            # рулона №8» обнуляло целый №7. Списывают по рулону —
+            # `/rolls/<id>/write-off/`.
+            return Response(
+                {
+                    "detail": (
+                        f"«{material.name}» — рулонный материал: списывают с "
+                        f"конкретного рулона и в метрах (Склад → Движение → "
+                        f"Списание → выберите рулон), а не общим числом в кв.м."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if material.is_roll_material:
             from .rolls import consume_area
             consume_area(
@@ -429,6 +526,90 @@ class RollViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     filterset_fields = ["material"]
     ordering = ["received_at"]
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
+    def stocktake(self, request, pk=None):
+        """POST /rolls/<id>/stocktake/ — промер рулона рулеткой.
+
+        Остаток партии приводится к намеренному, а расхождение остаётся АКТОМ:
+        сколько было по системе, сколько намерили и почему разошлось. Правкой
+        остатка так не выходит — там причина исчезает вместе с расхождением, и
+        через месяц на вопрос «куда делись полтора метра» ответить нечем.
+        """
+        roll = self.get_object()
+        serializer = RollStocktakeInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            act = stocktake_roll(
+                roll,
+                data["counted_metres"],
+                reason_code=data["reason_code"],
+                note=data.get("note", ""),
+                user=request.user,
+            )
+        except InsufficientStock as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        label = act.roll.code or f"№{act.roll_id}"
+        AuditLog.record(
+            request.user,
+            f"Промер рулона {label} «{act.roll.material.name}»: было "
+            f"{act.expected_metres} м, намерено {act.counted_metres} м, "
+            f"расхождение {act.difference} м ({act.get_reason_code_display()})"
+            + (f". {act.note}" if act.note else ""),
+        )
+        return Response(RollStocktakeSerializer(act).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="write-off", permission_classes=[IsAdmin])
+    def write_off(self, request, pk=None):
+        """POST /rolls/<id>/write-off/ — списать метры С ЭТОГО рулона.
+
+        Порча случается с конкретным рулоном на полке и меряется рулеткой —
+        значит, и списывается по рулону, в метрах, его шириной и по его цене.
+        Общее списание рулонного материала в кв.м (`/materials/write-off/`)
+        для него закрыто: оно шло FIFO со старейшего рулона.
+        """
+        roll = self.get_object()
+        serializer = RollWriteOffSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        reason = serializer.reason_text()
+        try:
+            area = write_off_roll(roll, data["metres"], reason=reason, user=request.user)
+        except InsufficientStock as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        label = roll.code or f"№{roll.pk}"
+        # Себестоимость — метрами по цене метра этого рулона: в чём считал
+        # поставщик, в том и списываем (площадь × цена за кв.м даёт копеечный
+        # хвост округления).
+        cost = (Decimal(str(data["metres"])) * roll.cost_per_pm).quantize(Decimal("0.01"))
+        AuditLog.record(
+            request.user,
+            f"{reason} Рулон {label} «{roll.material.name}»: {data['metres']} м "
+            f"({area} кв.м, себестоимость {cost} сом); "
+            f"в рулоне осталось {roll.metres_remaining} м",
+        )
+        return Response(RollSerializer(roll).data)
+
+
+class RollStocktakeViewSet(viewsets.ReadOnlyModelViewSet):
+    """Акты промера рулонов — ТОЛЬКО чтение: акт это документ.
+
+    Правка акта задним числом обессмыслила бы всю затею: расхождение должно
+    остаться таким, каким его зафиксировали у рулона с рулеткой в руках.
+    """
+
+    queryset = RollStocktake.objects.select_related("roll__material", "created_by").all()
+    serializer_class = RollStocktakeSerializer
+    permission_classes = [IsAuthenticated]
+    filterset_fields = ["roll", "reason_code"]
+    ordering = ["-created_at"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        material = self.request.query_params.get("material")
+        return qs.filter(roll__material_id=material) if material else qs
 
 
 class MaterialMonthOpeningViewSet(viewsets.ModelViewSet):
@@ -613,11 +794,36 @@ class SupplyViewSet(viewsets.ModelViewSet):
 
         Переписывать проведённые строки значило бы двигать склад задним числом:
         часть материала уже могла уйти в заказы. Ошиблись в позициях — отмените
-        накладную и заведите заново; номер, дата, сумма по бумаге и оплата
-        правятся спокойно.
+        накладную и заведите заново; номер, сумма по бумаге и оплата правятся
+        спокойно. ДАТА переносится вместе с партиями и движениями склада
+        (`move_supply_date`) и держится замком периода с обеих сторон: раньше
+        уезжал только закуп, а партии и журнал оставались в старом месяце.
         """
         request.data.pop("lines", None)
-        return super().update(request, *args, **kwargs)
+        supply = self.get_object()
+        new_day = None
+        raw = request.data.get("received_on")
+        if raw not in (None, ""):
+            try:
+                new_day = date.fromisoformat(str(raw))
+            except ValueError:
+                return Response({"received_on": ["Некорректная дата."]}, status=status.HTTP_400_BAD_REQUEST)
+        moved = new_day is not None and new_day != supply.received_on
+        if moved:
+            ensure_open(supply.received_on, "Перенести накладную из закрытого периода")
+            ensure_open(new_day, "Перенести накладную в закрытый период")
+        old_day = supply.received_on
+        response = super().update(request, *args, **kwargs)
+        if moved and response.status_code == 200:
+            supply.refresh_from_db()
+            move_supply_date(supply, new_day)
+            AuditLog.record(
+                request.user,
+                f"Дата накладной {supply.number or f'#{supply.pk}'} перенесена: "
+                f"{old_day:%d.%m.%Y} → {new_day:%d.%m.%Y} (партии и движения склада — за ней)",
+            )
+            response.data = self.get_serializer(self.get_queryset().get(pk=supply.pk)).data
+        return response
 
     def destroy(self, request, *args, **kwargs):
         if not request.user.is_admin_role:
@@ -627,10 +833,12 @@ class SupplyViewSet(viewsets.ModelViewSet):
             )
         supply = self.get_object()
         ensure_open(supply.received_on, "Отменить накладную закрытого периода")
-        label = supply.number or f"#{supply.pk}"
+        # Состав — ДО отмены: после неё от документа и его движений не остаётся
+        # ничего, и журнал действий — единственное место, где видно, что сняли.
+        summary = supply_summary(supply)
         try:
             unpost_supply(supply)
         except SupplyError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        AuditLog.record(request.user, f"Отменена приходная накладная {label}")
+        AuditLog.record(request.user, f"Отменена приходная накладная {summary}")
         return Response(status=status.HTTP_204_NO_CONTENT)

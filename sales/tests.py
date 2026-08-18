@@ -164,6 +164,8 @@ class CuttingPricingAPITests(APITestCase):
 
     def test_admin_price_overrides_applied(self):
         # Admin overrides catalogue prices at sale time: material 1400/кв.м, cut 50/кв.м.
+        # Ручные цены — право админа (складовщику API их не принимает, аудит п. 14).
+        self.client.force_authenticate(self.admin)
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "1.2", "length": "0.51",

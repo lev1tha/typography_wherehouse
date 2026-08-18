@@ -7,7 +7,7 @@ from rest_framework import serializers
 
 from clients.models import Client
 from services.models import PrintingService
-from warehouse.models import Material
+from warehouse.models import Material, Roll
 
 from .models import Receipt, TransactionItem
 
@@ -37,6 +37,12 @@ class TransactionItemSerializer(serializers.ModelSerializer):
         max_digits=14, decimal_places=2, read_only=True
     )
     cost_total = serializers.SerializerMethodField()
+    # Из какого рулона резали — чтобы в чеке было видно «списано с рулона №7»,
+    # а не только «списано со склада».
+    roll_label = serializers.SerializerMethodField()
+    # Обрезок: сколько списанного до клиента не дошло и во сколько это обошлось.
+    offcut_area = serializers.DecimalField(max_digits=14, decimal_places=4, read_only=True)
+    offcut_cost = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     # Единица измерения строки — для печатных форм: в накладной и счёте колонка
     # «Ед.» обязательна, а вывести её на фронте не из чего: у резки количество
     # в погонных метрах, у листа — в штуках, у куска — в квадратных.
@@ -59,6 +65,11 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             "price_per_item",
             "line_total",
             "cost_total",
+            "roll",
+            "roll_label",
+            "used_width",
+            "offcut_area",
+            "offcut_cost",
             "unit_label",
             "unit_code",
             "sale_mode",
@@ -70,10 +81,18 @@ class TransactionItemSerializer(serializers.ModelSerializer):
     def get_cost_total(self, obj):
         return obj.cost_total if _is_admin(self.context) else None
 
+    def get_roll_label(self, obj):
+        """Человеческое имя партии: маркировка, если её писали, иначе номер."""
+        if not obj.roll_id:
+            return None
+        return obj.roll.code or f"№{obj.roll_id}"
+
     def get_unit_code(self, obj):
         if obj.type == TransactionItem.Type.MATERIAL:
             if obj.sale_mode == TransactionItem.SaleMode.PIECE:
                 return "PIECE"
+            if obj.sale_mode == TransactionItem.SaleMode.METER:
+                return "METER"
             if obj.material_id and obj.material.is_roll_material:
                 return "SQM"
             return obj.material.unit if obj.material_id else "PIECE"
@@ -85,6 +104,8 @@ class TransactionItemSerializer(serializers.ModelSerializer):
         if obj.type == TransactionItem.Type.MATERIAL:
             if obj.sale_mode == TransactionItem.SaleMode.PIECE:
                 return "шт"
+            if obj.sale_mode == TransactionItem.SaleMode.METER:
+                return "пог.м"
             if obj.material_id and obj.material.is_roll_material:
                 return "кв.м"
             return obj.material.get_unit_display() if obj.material_id else "шт"
@@ -186,9 +207,19 @@ class SaleItemInputSerializer(serializers.Serializer):
     quantity = serializers.DecimalField(
         max_digits=12, decimal_places=3, min_value=0, required=False, default=0
     )
+    # Из какого физического рулона режем. Не указан — берём початый (FIFO).
+    roll = serializers.PrimaryKeyRelatedField(
+        queryset=Roll.objects.all(), required=False, allow_null=True
+    )
+    # Ширина, которая реально уходит клиенту, когда она уже рулона: полосу
+    # 0.5 м от рулона 0.9 отрезают на всю ширину, и 0.4 остаётся обрезком цеха.
+    # Не указана — считаем, что ушло всё.
+    used_width = serializers.DecimalField(
+        max_digits=8, decimal_places=2, min_value=0, required=False, allow_null=True
+    )
     # Material sale mode: PIECE = whole sheet/roll at piece_price; SQM = by area.
     mode = serializers.ChoiceField(
-        choices=["PIECE", "SQM"], required=False, allow_null=True
+        choices=["PIECE", "SQM", "METER"], required=False, allow_null=True
     )
     # Cutting / area-service: dimensions (width × length = area).
     width = serializers.DecimalField(
@@ -215,10 +246,62 @@ class SaleItemInputSerializer(serializers.Serializer):
         if attrs["type"] == TransactionItem.Type.SERVICE and not attrs.get("service"):
             raise serializers.ValidationError("Для позиции услуги укажите service.")
 
+        material = attrs.get("material")
+        mode = attrs.get("mode")
+        # Способ продажи материала по площади (лист / кв.м / рулон) — ЯВНЫЙ.
+        # Раньше отсутствующий `mode` молча становился «кв.м», и дозаказ «1 лист»
+        # уходил в чек как 1 кв.м по цене за квадрат (1 250 вместо 3 700, со
+        # склада 1 кв.м вместо 2.98), а «2 рулона» — как 2 кв.м по цене за кв.м,
+        # которой у рулона нет (0 сом). Штучный материал (крепёж, клей) режимов
+        # не имеет — у него одна цена за единицу, и `mode` ему не нужен.
+        if attrs["type"] == TransactionItem.Type.MATERIAL and material.is_roll_material:
+            if not mode:
+                raise serializers.ValidationError(
+                    f"«{material.name}»: укажите способ продажи — лист (PIECE), "
+                    f"площадь (SQM) или длина (METER)."
+                )
+            # Рулон продаётся ТОЛЬКО метрами: у него нет ни цены за кв.м, ни цены
+            # за штуку, и площадь молча продала бы его за 0 сом (так и было при
+            # «повторить заказ»: 1 пог.м превращался в 1 кв.м по нулевой цене).
+            if material.sells_by_metre and mode != TransactionItem.SaleMode.METER:
+                raise serializers.ValidationError(
+                    f"«{material.name}» продаётся погонными метрами: укажите длину "
+                    f"(режим METER), а не площадь или штуки."
+                )
+            # И наоборот: метров нет ни у листа, ни у штучного материала.
+            if mode == TransactionItem.SaleMode.METER and not material.sells_by_metre:
+                raise serializers.ValidationError(
+                    f"«{material.name}» метрами не продаётся — укажите лист (PIECE) "
+                    f"или площадь (SQM)."
+                )
+        elif mode == TransactionItem.SaleMode.METER:
+            raise serializers.ValidationError(
+                f"«{material.name}» метрами не продаётся."
+            )
+
+        # Резка/монтаж по рулону: материал по площади сюда не идёт — у рулона
+        # нет цены за кв.м, и строка материала ушла бы за 0 сом (дозаказ
+        # предлагал любой материал по кв.м, включая рулоны). Метры продаются
+        # отдельной строкой (METER), а работа реза по ним — строкой работы без
+        # размеров куска: только длина реза и ставка.
+        service = attrs.get("service")
+        if (
+            attrs["type"] == TransactionItem.Type.SERVICE
+            and service is not None
+            and service.uses_material
+            and material is not None
+            and material.sells_by_metre
+            and (attrs.get("width") or attrs.get("length") or attrs.get("quantity"))
+        ):
+            raise serializers.ValidationError(
+                f"«{material.name}» продаётся погонными метрами: оформите метры "
+                f"отдельной строкой, а работу реза — без размеров куска (только "
+                f"длина реза)."
+            )
+
         # Штуки — целые. «2,5 листа» или «2,5 крепежа» не бывает, а система их
         # спокойно продавала и списывала, оставляя на складе дробный хвост.
         # Килограммы, литры и метры дробными быть могут — их не трогаем.
-        material = attrs.get("material")
         qty = Decimal(str(attrs.get("quantity") or 0))
         piecewise = material is not None and (
             attrs.get("mode") == TransactionItem.SaleMode.PIECE
@@ -229,6 +312,88 @@ class SaleItemInputSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 f"«{material.name}» продаётся целыми {unit} — {qty} не получится."
             )
+
+        # Резка без длины реза — это работа за ноль. Длину кривой при фигурном
+        # резе вводит мастер руками, и пустое поле молча уезжало в чек нулём:
+        # материал посчитан, а самая дорогая работа цеха — бесплатно. Пустоту
+        # здесь отклоняем, а не подставляем: площадь вместо длины уже пробовали,
+        # кв.м считались как пог.м, и работа выходила втрое дешевле. Ставка при
+        # этом может быть нулевой (подарок) — это осознанное решение админа,
+        # а не забытое поле.
+        if (
+            attrs["type"] == TransactionItem.Type.SERVICE
+            and service is not None
+            and service.uses_running_meter
+            and Decimal(str(attrs.get("running_meters") or 0)) <= 0
+        ):
+            raise serializers.ValidationError(
+                f"«{service.name}»: укажите длину реза в пог.м — без неё работа "
+                f"уйдёт в чек бесплатно."
+            )
+
+        # НЕЯВНЫЙ ноль цены не проходит. Явный — законный подарок админа
+        # (`material_price=0`, `cut_rate=0`); а вот когда цену никто не
+        # называл и в каталоге её тоже нет, строка молча уходила в чек за 0:
+        # у станков ставка резки 0 («берётся у материала»), у нового материала
+        # ставки нет — и вся резка по нему бесплатна, а касса складовщику даже
+        # строку «Работа» не показывала. Пустой каталог — это ошибка ввода, а не
+        # скидка; сообщаем, чего не хватает, и кому это исправить.
+        if attrs["type"] == TransactionItem.Type.MATERIAL:
+            if qty <= 0:
+                raise serializers.ValidationError(
+                    f"«{material.name}»: укажите количество больше нуля."
+                )
+            if attrs.get("material_price") is None:
+                if mode == TransactionItem.SaleMode.PIECE:
+                    price = material.piece_price_for_qty(qty)
+                    if not price and not material.is_roll_material:
+                        price = material.price_per_unit
+                    what = f"цена за {'лист' if material.is_roll_material else 'штуку'}"
+                elif mode == TransactionItem.SaleMode.METER:
+                    price = material.price_per_pm
+                    what = "цена за пог.м"
+                else:
+                    price = material.sqm_price if material.is_roll_material else material.price_per_unit
+                    what = "цена за кв.м" if material.is_roll_material else "цена за единицу"
+                if not price or price <= 0:
+                    raise serializers.ValidationError(
+                        f"«{material.name}»: в каталоге не задана {what} — задайте "
+                        f"её в карточке материала (или админ укажет цену вручную)."
+                    )
+        elif service is not None and service.uses_area:
+            if attrs.get("cut_rate") is None:
+                if service.uses_running_meter:
+                    rate = service.rate_per_pm or (
+                        material.cut_rate_per_pm if material else Decimal("0")
+                    )
+                    where = (
+                        f"ни у станка «{service.name}», ни у материала «{material.name}»"
+                        if material else f"у станка «{service.name}» (материал не выбран)"
+                    )
+                    if not rate or rate <= 0:
+                        raise serializers.ValidationError(
+                            f"Ставка резки не задана {where} — работа ушла бы в чек "
+                            f"бесплатно. Задайте ставку в «Ценах и услугах» или в "
+                            f"карточке материала (или админ укажет её вручную)."
+                        )
+                elif not service.rate_flat or service.rate_flat <= 0:
+                    raise serializers.ValidationError(
+                        f"«{service.name}»: не задана ставка работы за кв.м — задайте "
+                        f"её в «Ценах и услугах» (или админ укажет вручную)."
+                    )
+            # Материал куска — по площади: без цены за кв.м он тоже ушёл бы за 0.
+            if (
+                service.uses_material
+                and material is not None
+                and attrs.get("width")
+                and attrs.get("length")
+                and attrs.get("material_price") is None
+                and not material.sqm_price
+            ):
+                raise serializers.ValidationError(
+                    f"«{material.name}»: в каталоге не задана цена за кв.м — материал "
+                    f"куска ушёл бы в чек за 0."
+                )
         return attrs
 
 

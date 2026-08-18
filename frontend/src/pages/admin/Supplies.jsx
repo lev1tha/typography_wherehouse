@@ -93,23 +93,56 @@ export default function Supplies({ embedded = false }) {
   }
   // Материал сам подсказывает форму прихода: акрил листами, плёнка рулоном,
   // крепёж количеством. Складовщик её меняет только когда привезли иначе.
+  // Ширина партии — из карточки: у листа размер листа, у рулона ширина рулона.
+  // Раньше рулону ширину не подставляли, и складовщик набирал её руками при
+  // каждой приёмке (1.5 при карточке 1.2 — и обрезок, площадь резки, надпись
+  // в кассе считались по разным ширинам).
+  const presetDims = (m, form) => ({
+    width:
+      form === "SHEET" && m?.sheet_width ? String(m.sheet_width)
+      : form === "ROLL" && m?.roll_width ? String(m.roll_width)
+      : "",
+    height: form === "SHEET" && m?.sheet_height ? String(m.sheet_height) : "",
+  });
   function pickMaterial(i, id) {
     const m = matById[String(id)];
     const form = !m ? "SHEET" : !m.is_roll_material ? "QTY" : m.intake_form || "SHEET";
-    setLine(i, {
-      material: id,
-      form,
-      width: m?.sheet_width && form === "SHEET" ? String(m.sheet_width) : "",
-      height: m?.sheet_height && form === "SHEET" ? String(m.sheet_height) : "",
-    });
+    setLine(i, { material: id, form, ...presetDims(m, form) });
   }
+  function pickForm(i, form) {
+    const m = matById[String(draft.lines[i]?.material)];
+    setLine(i, { form, ...presetDims(m, form) });
+  }
+  // Ширина, отличная от карточки, — законно (под одной карточкой лежат рулоны
+  // разной ширины), но должна бросаться в глаза: чаще это опечатка.
+  const widthDiffers = (l, m) =>
+    l.form === "ROLL" && m?.roll_width && l.width !== "" && Number(l.width) !== Number(m.roll_width);
 
-  const filled = (draft?.lines || []).filter((l) => l.material && Number(l.cost) > 0);
+  // Строка «начата» — в ней что-то вписано; «полная» — есть материал и сумма
+  // (сумма 0 допустима явно — подарок поставщика, но не пустое поле). Раньше
+  // строка без суммы МОЛЧА выпадала из накладной: восемь позиций на бумаге,
+  // у одной забыли сумму — «Оприходовать (7)», и позиция не приходила на
+  // склад. Теперь недозаполненная строка держит кнопку закрытой и называет
+  // себя.
+  const started = (l) =>
+    l.material || l.cost !== "" || l.width !== "" || l.height !== "" || l.length !== "" ||
+    l.sheet_count !== "" || l.quantity !== "" || l.code !== "";
+  const lineProblem = (l) => {
+    if (!started(l)) return null;
+    if (!l.material) return t("supplies.lineNeedsMaterial");
+    if (l.cost === "" || Number.isNaN(Number(l.cost)) || Number(l.cost) < 0) return t("supplies.lineNeedsCost");
+    return null;
+  };
+  const problems = (draft?.lines || [])
+    .map((l, i) => ({ i, text: lineProblem(l) }))
+    .filter((x) => x.text);
+  const filled = (draft?.lines || []).filter((l) => started(l) && !lineProblem(l));
   const draftTotal = filled.reduce((s, l) => s + Number(l.cost || 0), 0);
   const stated = draft?.stated_total === "" ? null : Number(draft?.stated_total);
   const diff = stated == null ? 0 : stated - draftTotal;
 
   async function save() {
+    if (problems.length) return toast(t("supplies.linesIncomplete", { rows: problems.map((x) => x.i + 1).join(", ") }), "error");
     if (!filled.length) return toast(t("supplies.needLines"), "error");
     setBusy(true);
     try {
@@ -323,7 +356,7 @@ export default function Supplies({ embedded = false }) {
           footer={
             <>
               <button className="secondary" onClick={() => setDraft(null)}>{t("common.cancel")}</button>
-              <button onClick={save} disabled={busy || !filled.length}>
+              <button onClick={save} disabled={busy || !filled.length || problems.length > 0}>
                 {busy ? t("common.loading") : t("supplies.post", { n: filled.length })}
               </button>
             </>
@@ -387,7 +420,7 @@ export default function Supplies({ embedded = false }) {
                         <select
                           value={l.form}
                           disabled={!m || !m.is_roll_material}
-                          onChange={(e) => setLine(i, { form: e.target.value })}
+                          onChange={(e) => pickForm(i, e.target.value)}
                         >
                           <option value="SHEET">{t("supply.formSheet")}</option>
                           <option value="ROLL">{t("supply.formRoll")}</option>
@@ -402,10 +435,17 @@ export default function Supplies({ embedded = false }) {
                             onChange={(e) => setLine(i, { quantity: e.target.value })}
                           />
                         ) : l.form === "ROLL" ? (
-                          <div className="size-cell">
-                            <input type="number" step="any" value={l.width} placeholder={t("supply.width")} onChange={(e) => setLine(i, { width: e.target.value })} />
-                            <input type="number" step="any" value={l.length} placeholder={t("supply.length")} onChange={(e) => setLine(i, { length: e.target.value })} />
-                          </div>
+                          <>
+                            <div className="size-cell">
+                              <input type="number" step="any" value={l.width} placeholder={t("supply.width")} onChange={(e) => setLine(i, { width: e.target.value })} />
+                              <input type="number" step="any" value={l.length} placeholder={t("supply.length")} onChange={(e) => setLine(i, { length: e.target.value })} />
+                            </div>
+                            {widthDiffers(l, m) && (
+                              <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 2 }}>
+                                {t("supplies.widthDiffers", { width: m.roll_width })}
+                              </div>
+                            )}
+                          </>
                         ) : (
                           <div className="size-cell three">
                             <input type="number" step="any" value={l.width} placeholder={t("supply.width")} onChange={(e) => setLine(i, { width: e.target.value })} />
@@ -418,7 +458,16 @@ export default function Supplies({ embedded = false }) {
                         {qty > 0 ? `${q2(qty)} ${unit}` : "—"}
                       </td>
                       <td>
-                        <input type="number" step="any" value={l.cost} onChange={(e) => setLine(i, { cost: e.target.value })} />
+                        <input
+                          type="number"
+                          step="any"
+                          value={l.cost}
+                          onChange={(e) => setLine(i, { cost: e.target.value })}
+                          style={lineProblem(l) && l.material ? { borderColor: "var(--danger)" } : undefined}
+                        />
+                        {lineProblem(l) && (
+                          <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 2, whiteSpace: "nowrap" }}>{lineProblem(l)}</div>
+                        )}
                       </td>
                       <td>
                         <input value={l.code} onChange={(e) => setLine(i, { code: e.target.value })} />
@@ -439,6 +488,11 @@ export default function Supplies({ embedded = false }) {
           <button className="ghost" style={{ marginTop: 8, color: "var(--accent-strong)", fontWeight: 600 }} onClick={addLine}>
             + {t("supplies.addLine")}
           </button>
+          {problems.length > 0 && (
+            <p style={{ color: "var(--danger)", fontSize: 13, margin: "8px 0 0" }}>
+              {t("supplies.linesIncomplete", { rows: problems.map((x) => x.i + 1).join(", ") })}
+            </p>
+          )}
 
           {/* Сверка с бумагой — ради неё документ и существует. */}
           <div className="card" style={{ background: "var(--canvas)", padding: 12, marginTop: 14 }}>

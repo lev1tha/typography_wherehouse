@@ -207,6 +207,26 @@ class Material(models.Model):
         default=Decimal("2"),
         help_text=_("С какого количества листов включается оптовая цена"),
     )
+    # --- Рулон: ширина и цена за ПОГОННЫЙ метр --------------------------
+    #
+    # Рулон продаётся длиной, а не площадью: ширина у него не выбор клиента, а
+    # свойство товара. Ткань 0.9 м режут поперёк на всю ширину, и 40 см ширины
+    # купить нельзя — отрежут всё равно всю. Поэтому ширина живёт ЗДЕСЬ, а не
+    # полем ввода в кассе: любое поле, которое можно поменять, рано или поздно
+    # поменяют, и в чек уезжало «1.5 × 1.4 = 2.1 кв.м» вместо 1.4 пог.м.
+    roll_width = models.DecimalField(
+        _("ширина рулона, м"), max_digits=8, decimal_places=3,
+        null=True, blank=True,
+        help_text=_("Подставляется в приёмку. Фактическая ширина замораживается в партии"),
+    )
+    # Цена продажи за погонный метр. Считать её через цену за кв.м нельзя:
+    # владелец держит прайс в метрах («туника 300 сом/м»), и деление 300 ÷ 0.9 =
+    # 333.33 он в уме делать не станет, а округлит до 330 — и подарит по 3 сома
+    # с каждого метра рулона.
+    price_per_pm = models.DecimalField(
+        _("цена продажи, сом/пог.м"), max_digits=12, decimal_places=2,
+        default=Decimal("0"),
+    )
     cut_rate_per_pm = models.DecimalField(
         _("ставка резки, сом/пог.м"),
         max_digits=12,
@@ -297,6 +317,42 @@ class Material(models.Model):
         return None
 
     @property
+    def sells_by_metre(self) -> bool:
+        """Продаётся ли материал погонными метрами.
+
+        Рулон — да, лист — нет. Развилка по СПРАВОЧНИКУ, а не по выбору кассира:
+        способ расчёта определяется товаром, который он уже выбрал.
+
+        Решает ФОРМА, и только она. Раньше сюда входила ещё и ширина из карточки
+        — и рулон с незаполненной шириной молча возвращался к четырём вкладкам и
+        продаже по площади: та самая ошибка «1.5 × 1.4 = 2.1 кв.м вместо 1.4
+        пог.м», от которой уходили, только спрятанная за пустым полем. Ширина
+        обязательна у формы «Рулон» (проверяет сериализатор), а продажа метрами
+        от неё не зависит: метры считаются по ширине КАЖДОЙ партии.
+        """
+        return bool(
+            self.is_roll_material and self.intake_form == self.IntakeForm.ROLL
+        )
+
+    @property
+    def metres_remaining(self):
+        """Остаток в погонных метрах — суммой ПО РУЛОНАМ, у каждого своя ширина.
+
+        Делить общий остаток на ширину из карточки нельзя по двум причинам.
+        Первая: правка опечатки «0.9 → 1.0» в справочнике молча пересчитала бы
+        остатки всех рулонов, включая давно закрытые. Вторая: под одной
+        карточкой законно лежит оракал 1.0, 1.26 и 1.52 — общей ширины у него
+        просто нет.
+
+        Ширина заморожена в партии при приёмке, метры считаются от неё.
+        """
+        rolls = [r for r in self.rolls.all() if r.width and r.remaining_area > 0]
+        if not rolls:
+            return None
+        total = sum((r.remaining_area / r.width for r in rolls), Decimal("0"))
+        return total.quantize(Decimal("0.01"))
+
+    @property
     def stock_value(self) -> Decimal:
         """Стоимость того, что лежит на складе, по ЗАКУПОЧНЫМ ценам.
 
@@ -370,6 +426,64 @@ class MaterialMonthOpening(models.Model):
 
     def __str__(self) -> str:
         return f"{self.material.name} {self.month:02d}.{self.year}: {self.quantity}"
+
+
+class RollStocktake(models.Model):
+    """Акт промера рулона: что показывала система, что намерили рулеткой.
+
+    Инвентаризация правкой остатка не годится: она приводит число к факту и на
+    этом заканчивается — расхождение исчезает вместе с причиной, и через месяц
+    на вопрос «куда делись полтора метра» ответить нечем. Учёт без этого
+    остаётся гипотезой.
+
+    Поэтому расхождение хранится ЧИСЛОМ и отдельной записью: акт не
+    пересчитывается из остатков и не меняется задним числом. Остаток рулона
+    правится в ту же операцию, но объяснение остаётся навсегда.
+    """
+
+    class Reason(models.TextChoices):
+        SUPPLIER = "SUPPLIER", _("Недомер при приёмке")
+        CUTTING = "CUTTING", _("Потери при резке")
+        DAMAGE = "DAMAGE", _("Порча")
+        MISCOUNT = "MISCOUNT", _("Ошибка учёта")
+        OTHER = "OTHER", _("Прочее")
+
+    # Строкой, а не классом: акт объявлен выше самой модели Roll.
+    roll = models.ForeignKey(
+        "Roll", on_delete=models.PROTECT, related_name="stocktakes",
+        verbose_name=_("рулон"),
+    )
+    # Обе цифры — в ПОГОННЫХ метрах: рулон меряют рулеткой, а не в квадратах.
+    expected_metres = models.DecimalField(
+        _("было по системе, м"), max_digits=12, decimal_places=2
+    )
+    counted_metres = models.DecimalField(
+        _("намерено по факту, м"), max_digits=12, decimal_places=2
+    )
+    # Хранится, а не вычисляется: остаток рулона потом изменится продажами, и
+    # разница «намерено − было» перестала бы восстанавливаться.
+    difference = models.DecimalField(
+        _("расхождение, м"), max_digits=12, decimal_places=2,
+        help_text=_("Минус — недостача, плюс — излишек"),
+    )
+    reason_code = models.CharField(
+        _("причина"), max_length=20, choices=Reason.choices, default=Reason.OTHER
+    )
+    note = models.CharField(_("примечание"), max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="roll_stocktakes",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("акт промера рулона")
+        verbose_name_plural = _("акты промера рулонов")
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        sign = "+" if self.difference > 0 else ""
+        return f"Промер {self.roll_id}: {sign}{self.difference} м"
 
 
 class MaterialImage(models.Model):
@@ -509,6 +623,14 @@ class Roll(models.Model):
         _("себестоимость рулона"), max_digits=12, decimal_places=2,
         help_text=_("Полная стоимость закупки рулона"),
     )
+    # Сколько метров ЗАЯВИЛ поставщик. Принятое по факту лежит в `length`.
+    # Без этой пары систематический недолив не виден вообще: рулон за рулоном
+    # приходит на метр короче, цех платит за заявленное, а замечает это через
+    # год по интуиции, а не по цифре.
+    declared_length = models.DecimalField(
+        _("заявлено поставщиком, м"), max_digits=10, decimal_places=2,
+        null=True, blank=True,
+    )
     # Дата поступления партии — редактируемая по той же причине, что и у
     # складской операции. По ней же идёт FIFO, поэтому партия, внесённая задним
     # числом, встаёт в очередь на списание по своей настоящей дате.
@@ -528,6 +650,40 @@ class Roll(models.Model):
         if not self.initial_area:
             return Decimal("0")
         return (self.purchase_cost / self.initial_area).quantize(Decimal("0.01"))
+
+    # --- Рулон в погонных метрах: считаем СВОЕЙ шириной ------------------
+    #
+    # Ширина партии заморожена при приёмке и живёт здесь, а не в карточке
+    # материала. Правка опечатки «0.9 → 1.0» в справочнике не должна задним
+    # числом пересчитывать остатки уже принятых рулонов — включая закрытые.
+    # Она же позволяет держать под одной карточкой оракал 1.0, 1.26 и 1.52:
+    # ширина у каждого рулона своя, а материал один.
+    @property
+    def metres_initial(self):
+        if not self.width:
+            return None
+        return (self.initial_area / self.width).quantize(Decimal("0.01"))
+
+    @property
+    def metres_remaining(self):
+        if not self.width:
+            return None
+        return (self.remaining_area / self.width).quantize(Decimal("0.01"))
+
+    @property
+    def cost_per_pm(self) -> Decimal:
+        """Себестоимость погонного метра — то, в чём считает поставщик."""
+        metres = self.metres_initial
+        if not metres:
+            return Decimal("0")
+        return (self.purchase_cost / metres).quantize(Decimal("0.01"))
+
+    @property
+    def shortfall(self):
+        """Недолив: заявлено минус принято. None — сверять не с чем."""
+        if self.declared_length is None or self.length is None:
+            return None
+        return self.declared_length - self.length
 
     @property
     def is_depleted(self) -> bool:

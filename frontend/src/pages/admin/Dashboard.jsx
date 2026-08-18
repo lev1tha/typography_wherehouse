@@ -204,7 +204,15 @@ export default function Dashboard() {
         <Stat
           label={t("dashboard.lowStock")}
           value={data.low_stock_count}
-          color={data.low_stock_count > 0 ? "danger" : undefined}
+          // «Нет в наличии» — состояние тяжелее, чем «на исходе», и оно тоже
+          // должно светиться. Раньше при 0 на исходе и 14 позициях с нулевым
+          // остатком плитка выглядела спокойной: тревожный цвет включался
+          // только по low_stock_count.
+          color={
+            data.low_stock_count > 0 || data.out_of_stock_count > 0
+              ? "danger"
+              : undefined
+          }
           sub={data.out_of_stock_count > 0 ? t("dashboard.outOfStockSub", { n: data.out_of_stock_count }) : undefined}
         />
       </div>

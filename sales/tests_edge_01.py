@@ -106,7 +106,20 @@ class EdgeCuttingTests(APITestCase):
 
     # ---- Резка без выбранного материала ----------------------------------
 
-    def test_cutting_without_material_makes_only_work_line(self):
+    def test_cutting_without_material_needs_a_rate(self):
+        """Нет материала (ставку взять неоткуда) и нет override → отказ, а не
+        работа за ноль. Раньше строка уходила в чек с ценой 0 (аудит
+        2026-08-18, п. 8: неявный ноль — ошибка каталога, явный — подарок)."""
+        r = self._checkout([{
+            "type": "SERVICE", "service": self.cutting.id,
+            "width": "0.5", "length": "0.5", "running_meters": "0.25",
+        }])
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertIn("Ставка резки не задана", str(r.data))
+        self.assertEqual(Receipt.objects.count(), 0)
+        # Со ставкой станка работа без материала оформляется — одной строкой.
+        self.cutting.rate_per_pm = Decimal("100")
+        self.cutting.save(update_fields=["rate_per_pm"])
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "width": "0.5", "length": "0.5", "running_meters": "0.25",
@@ -114,16 +127,16 @@ class EdgeCuttingTests(APITestCase):
         self.assertEqual(r.status_code, 201, r.data)
         receipt = Receipt.objects.get(pk=r.data["id"])
         items = self._items(receipt)
-        # Нет материала → нет отдельной MATERIAL-линии.
-        self.assertEqual(len(items), 1)
+        self.assertEqual(len(items), 1)   # нет материала → нет MATERIAL-линии
         work = items[0]
         self.assertEqual(work.type, TransactionItem.Type.SERVICE)
         self.assertEqual(work.quantity, Decimal("0.250"))   # длина реза
-        # Нет материала и нет override → ставка резки 0.
-        self.assertEqual(work.price_per_item, Decimal("0"))
-        self.assertEqual(receipt.total_price, Decimal("0.00"))
+        self.assertEqual(work.price_per_item, Decimal("100"))
+        self.assertEqual(receipt.total_price, Decimal("25.00"))
 
     def test_cutting_without_material_uses_cut_rate_override(self):
+        # Ручные цены — право админа (аудит п. 14).
+        self.client.force_authenticate(self.admin)
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "width": "1", "length": "1", "cut_rate": "35", "running_meters": "1",
@@ -159,33 +172,46 @@ class EdgeCuttingTests(APITestCase):
         # Итог = 4×20 + 1×1400 = 80 + 1400 = 1480
         self.assertEqual(receipt.total_price, Decimal("1480.00"))
 
-    def test_running_meters_empty_means_no_work_charged(self):
-        """Пустая длина реза → работа 0, а не «площадь как пог.м».
+    def test_running_meters_empty_is_refused_not_charged_as_zero(self):
+        """Пустая длина реза → 400, а не работа за ноль и не «площадь как пог.м».
 
         Раньше сюда подставлялась площадь и умножалась на ставку за погонный
-        метр — кв.м считались как пог.м, и цена работы выходила неверной."""
+        метр — кв.м считались как пог.м. Потом пустота стала нулём — и фигурный
+        рез (длину кривой вводит мастер) молча уезжал в чек бесплатно. Теперь
+        пустая длина у резки — ошибка ввода (см. sales/tests_cut_requires_length)."""
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "0.5", "length": "0.5",
         }])
-        self.assertEqual(r.status_code, 201, r.data)
-        receipt = Receipt.objects.get(pk=r.data["id"])
-        work = next(i for i in self._items(receipt) if i.type == TransactionItem.Type.SERVICE)
-        self.assertEqual(work.quantity, Decimal("0"))
-        # Материал при этом считается по площади как обычно.
-        material = next(i for i in self._items(receipt) if i.type == TransactionItem.Type.MATERIAL)
-        self.assertEqual(material.quantity, Decimal("0.250"))
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertIn("длину реза", str(r.data))
+        self.assertFalse(Receipt.objects.exists())
+        # Материал не списан: заказ не состоялся целиком.
+        self.acrylic.refresh_from_db()
+        self.assertEqual(self.acrylic.quantity, Decimal("100"))
 
     def test_zero_dimensions_are_refused_instead_of_an_empty_receipt(self):
         """Ни размеров, ни количества — это промах по кнопке, а не заказ.
 
         Раньше такой запрос создавал чек «на 0 сом»: пустышка оседала в списке
         чеков и в статистике. Проверка теперь на входе — важно, что ответ
-        внятный 400, а не 500 и не молчаливый пустой чек.
+        внятный 400, а не 500 и не молчаливый пустой чек. У резки первой
+        срабатывает проверка длины реза (она строже), у прочих услуг —
+        общая «нет ни одной позиции с количеством или размером».
         """
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id,
+        }])
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertIn("длину реза", str(r.data))
+        self.assertFalse(Receipt.objects.exists())
+
+        interior = PrintingService.objects.create(
+            name="Монтаж", kind=PrintingService.Kind.INSTALL_INTERIOR, rate_flat=Decimal("100"),
+        )
+        r = self._checkout([{
+            "type": "SERVICE", "service": interior.id, "material": self.acrylic.id,
         }])
         self.assertEqual(r.status_code, 400, r.data)
         self.assertIn("количеством или размером", str(r.data))
@@ -225,13 +251,15 @@ class EdgeCuttingTests(APITestCase):
     # ---- Админ-override, равный нулю (подозрение на баг) ------------------
 
     def test_zero_cut_rate_override_is_respected(self):
+        # Ручные цены — право админа (аудит п. 14).
+        self.client.force_authenticate(self.admin)
         # Админ явно делает резку бесплатной: cut_rate=0. Ожидаем ставку 0,
         # а не подмену каталожной 20. Падение теста вскрывает falsy-баг
         # (_override('cut_rate') or material.cut_rate_per_pm).
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "1", "length": "1",
-            "cut_rate": "0",
+            "running_meters": "1", "cut_rate": "0",
         }])
         self.assertEqual(r.status_code, 201, r.data)
         receipt = Receipt.objects.get(pk=r.data["id"])
@@ -239,12 +267,14 @@ class EdgeCuttingTests(APITestCase):
         self.assertEqual(work.price_per_item, Decimal("0"))
 
     def test_zero_material_price_override_is_respected(self):
+        # Ручные цены — право админа (аудит п. 14).
+        self.client.force_authenticate(self.admin)
         # Админ явно делает материал бесплатным: material_price=0. Ожидаем 0,
         # а не каталожные 1400. Падение вскрывает тот же falsy-баг.
         r = self._checkout([{
             "type": "SERVICE", "service": self.cutting.id,
             "material": self.acrylic.id, "width": "1", "length": "1",
-            "material_price": "0",
+            "running_meters": "1", "material_price": "0",
         }])
         self.assertEqual(r.status_code, 201, r.data)
         receipt = Receipt.objects.get(pk=r.data["id"])

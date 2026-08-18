@@ -10,10 +10,18 @@ from .models import (
     MaterialType,
     ProductionSite,
     Roll,
+    RollStocktake,
     Supplier,
     Supply,
     SupplyLine,
 )
+
+
+def _sees_money(context) -> bool:
+    """Показывать ли закупочные цифры: владельцу и бухгалтеру — да, складовщику
+    — нет (те же правила, что у себестоимости и маржи в чеках)."""
+    request = context.get("request")
+    return bool(request and getattr(request.user, "sees_money", False))
 
 
 class MaterialImageSerializer(serializers.ModelSerializer):
@@ -31,6 +39,11 @@ class MaterialSerializer(serializers.ModelSerializer):
     sheets_remaining = serializers.DecimalField(
         max_digits=12, decimal_places=2, read_only=True, allow_null=True
     )
+    # Остаток рулона в погонных метрах — владелец меряет рулон метрами.
+    metres_remaining = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, allow_null=True
+    )
+    sells_by_metre = serializers.BooleanField(read_only=True)
     stock_value = serializers.DecimalField(
         max_digits=14, decimal_places=2, read_only=True
     )
@@ -65,6 +78,10 @@ class MaterialSerializer(serializers.ModelSerializer):
             "wholesale_price",
             "wholesale_min_qty",
             "cut_rate_per_pm",
+            "roll_width",
+            "price_per_pm",
+            "metres_remaining",
+            "sells_by_metre",
             "production",
             "production_name",
             "sqm_price",
@@ -79,6 +96,17 @@ class MaterialSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["quantity", "created_at", "updated_at"]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Закупочная цена и стоимость склада — админу и бухгалтеру; складовщику
+        # приходит null: он оформляет и принимает товар, а почём цех купил,
+        # ему знать незачем (те же правила, что у себестоимости в чеках).
+        # Поле остаётся записываемым: карточку с закупкой правит админ.
+        if not _sees_money(self.context):
+            data["purchase_price"] = None
+            data["stock_value"] = None
+        return data
+
     def get_primary_image(self, obj):
         request = self.context.get("request")
         primary = next((img for img in obj.images.all() if img.is_primary), None)
@@ -87,6 +115,30 @@ class MaterialSerializer(serializers.ModelSerializer):
             return None
         url = primary.image.url
         return request.build_absolute_uri(url) if request else url
+
+    def validate(self, attrs):
+        # У формы «Рулон» ширина обязательна. Раньше пустая ширина ничем не
+        # отличалась от заполненной на этапе сохранения — а дальше материал
+        # МОЛЧА возвращался к продаже по площади (четыре вкладки, ширина как
+        # свободное поле в кассе): ровно та ошибка, от которой уходили, только
+        # спрятанная за незаполненным полем. Теперь продажа метрами не зависит
+        # от ширины (решает форма), а незаполненная ширина — ошибка ввода,
+        # которую видно при сохранении карточки, а не через месяц в чеке.
+        # При частичном обновлении недостающие поля берём у самой записи.
+        def current(name):
+            if name in attrs:
+                return attrs[name]
+            return getattr(self.instance, name, None) if self.instance is not None else None
+
+        is_roll = current("is_roll_material")
+        form = current("intake_form")
+        width = current("roll_width")
+        if is_roll and form == Material.IntakeForm.ROLL and not (width and Decimal(width) > 0):
+            raise serializers.ValidationError(
+                {"roll_width": "У рулона укажите ширину, м: она подставляется в "
+                               "приёмку и без неё рулон не принять."}
+            )
+        return attrs
 
 
 def build_ref_index(queryset):
@@ -284,9 +336,32 @@ class WriteOffSerializer(serializers.Serializer):
 
 
 class RollSerializer(serializers.ModelSerializer):
-    cost_per_sqm = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    # Себестоимость партии (за кв.м, за метр, всей) — только тем, кто видит
+    # деньги: список рулонов грузит и касса складовщика, а закупка в подписи
+    # рулона («№8 · 2 м · 200 сом/м») ему ни к чему.
+    cost_per_sqm = serializers.SerializerMethodField()
+    cost_per_pm = serializers.SerializerMethodField()
+    purchase_cost = serializers.SerializerMethodField()
     material_name = serializers.CharField(source="material.name", read_only=True)
     dimensions_label = serializers.CharField(read_only=True)
+    metres_initial = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, allow_null=True
+    )
+    metres_remaining = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, allow_null=True
+    )
+    shortfall = serializers.DecimalField(
+        max_digits=10, decimal_places=2, read_only=True, allow_null=True
+    )
+
+    def get_cost_per_sqm(self, obj):
+        return obj.cost_per_sqm if _sees_money(self.context) else None
+
+    def get_cost_per_pm(self, obj):
+        return obj.cost_per_pm if _sees_money(self.context) else None
+
+    def get_purchase_cost(self, obj):
+        return obj.purchase_cost if _sees_money(self.context) else None
 
     class Meta:
         model = Roll
@@ -303,6 +378,13 @@ class RollSerializer(serializers.ModelSerializer):
             "dimensions_label",
             "initial_area",
             "remaining_area",
+            # Рулон в метрах — в чём его меряет цех. Плюс заявленное поставщиком
+            # и недостача: без пары «заявлено / принято» недолив невидим.
+            "metres_initial",
+            "metres_remaining",
+            "cost_per_pm",
+            "declared_length",
+            "shortfall",
             "purchase_cost",
             "cost_per_sqm",
             "received_at",
@@ -323,12 +405,28 @@ class RollIntakeSerializer(serializers.Serializer):
     length = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False, allow_null=True)
     height = serializers.DecimalField(max_digits=8, decimal_places=2, min_value=0, required=False, allow_null=True)
     sheet_count = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False, allow_null=True)
-    purchase_cost = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=0)
+    # Полная стоимость партии. У рулона её можно не считать в уме: достаточно
+    # цены за метр — поставщик именно так и выставляет счёт.
+    purchase_cost = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=0, required=False, allow_null=True
+    )
+    cost_per_pm = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=0, required=False, allow_null=True
+    )
+    # Сколько метров ЗАЯВИЛ поставщик (в `length` — принятое по факту).
+    declared_length = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=0, required=False, allow_null=True
+    )
     # Дата поступления партии — по ней же идёт FIFO.
     received_on = serializers.DateField(required=False, allow_null=True)
 
     def validate(self, attrs):
         if attrs["form"] == Roll.Form.ROLL:
+            # Ширину можно не вводить: она подставляется из карточки материала и
+            # ЗАМОРАЖИВАЕТСЯ в партии. Правка опечатки в справочнике потом не
+            # должна пересчитывать уже принятые рулоны.
+            if not attrs.get("width"):
+                attrs["width"] = attrs["material"].roll_width
             if not attrs.get("width") or not attrs.get("length"):
                 raise serializers.ValidationError("Для рулона укажите ширину и длину.")
         else:  # SHEET
@@ -336,6 +434,79 @@ class RollIntakeSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     "Для листа укажите ширину, высоту и количество листов."
                 )
+
+        # Стоимость: либо полная сумма, либо цена за метр (только у рулона).
+        # Считать 12 000 ÷ 45 = 266.67 в уме владелец не должен — от этого
+        # деления мы ушли в продаже, и в закупе оно тем более ни к чему:
+        # округлив 266.67 до 266, он врёт себе в себестоимости каждого метра.
+        if attrs.get("purchase_cost") in (None, ""):
+            per_pm = attrs.get("cost_per_pm")
+            if per_pm in (None, "") or attrs["form"] != Roll.Form.ROLL:
+                raise serializers.ValidationError(
+                    {"purchase_cost": "Укажите стоимость закупки или цену за пог.м."}
+                )
+            attrs["purchase_cost"] = (per_pm * attrs["length"]).quantize(Decimal("0.01"))
+        return attrs
+
+
+class RollWriteOffSerializer(serializers.Serializer):
+    """Списание С КОНКРЕТНОГО рулона — в метрах: порвали 2 м рулона №8, а не
+    «2 кв.м материала откуда-нибудь»."""
+
+    metres = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    reason_code = serializers.ChoiceField(choices=list(WriteOffSerializer.REASONS.keys()))
+    note = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_metres(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Укажите, сколько метров списать.")
+        return value
+
+    def reason_text(self) -> str:
+        label = WriteOffSerializer.REASONS[self.validated_data["reason_code"]]
+        note = self.validated_data.get("note")
+        return f"Списание: {label}." + (f" {note}" if note else "")
+
+
+class RollStocktakeSerializer(serializers.ModelSerializer):
+    """Акт промера — только на чтение: он документ, а не запись, которую правят."""
+
+    roll_label = serializers.SerializerMethodField()
+    material_name = serializers.CharField(source="roll.material.name", read_only=True)
+    reason_display = serializers.CharField(source="get_reason_code_display", read_only=True)
+    created_by_name = serializers.CharField(
+        source="created_by.username", read_only=True, default=None
+    )
+
+    class Meta:
+        model = RollStocktake
+        fields = [
+            "id", "roll", "roll_label", "material_name",
+            "expected_metres", "counted_metres", "difference",
+            "reason_code", "reason_display", "note",
+            "created_by", "created_by_name", "created_at",
+        ]
+
+    def get_roll_label(self, obj):
+        return obj.roll.code or f"№{obj.roll_id}"
+
+
+class RollStocktakeInputSerializer(serializers.Serializer):
+    """Промер одного рулона рулеткой."""
+
+    counted_metres = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=0
+    )
+    reason_code = serializers.ChoiceField(choices=RollStocktake.Reason.choices)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+    def validate(self, attrs):
+        # «Прочее» без объяснения — это та же потерянная причина, от которой
+        # акт и заводился: через месяц строка «прочее, −1.5 м» ничего не скажет.
+        if attrs["reason_code"] == RollStocktake.Reason.OTHER and not (attrs.get("note") or "").strip():
+            raise serializers.ValidationError(
+                {"note": "Для причины «Прочее» напишите, что случилось."}
+            )
         return attrs
 
 
@@ -460,6 +631,10 @@ class SupplyLineSerializer(serializers.ModelSerializer):
             # У штучного материала количество ВВОДЯТ, у площадного оно считается
             # из размеров и присланное значение игнорируется (см. `line_quantity`).
             "quantity": {"required": False},
+            # Сумма строки — обязательна и не отрицательна: она идёт в закуп
+            # месяца и в себестоимость партии. Ноль допустим явно (подарок
+            # поставщика), пустоту сетка до сервера не доносит.
+            "cost": {"min_value": Decimal("0")},
         }
 
     def get_unit(self, obj):

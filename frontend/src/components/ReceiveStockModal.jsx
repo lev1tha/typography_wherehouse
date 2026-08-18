@@ -25,6 +25,10 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
     // записана в накладной. Себестоимость партии считается из неё умножением:
     // раньше это умножение заказчик делал в уме до того, как открыть окно.
     quantity: "", unit_cost: "", actual_price: "", code: "",
+    // Рулон принимают МЕТРАМИ: заявлено поставщиком и намерено по факту, плюс
+    // цена за метр — ровно то, что стоит в накладной. Считать 12 000 ÷ 45 в
+    // уме владелец не должен.
+    declared_length: "", cost_per_pm: "",
     // Дата поступления: заказчик вносит поставки задним числом, когда доходят
     // руки — в его Excel даты идут вразнобой. По ней же выстраивается FIFO.
     received_on: new Date().toISOString().slice(0, 10),
@@ -34,7 +38,10 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
 
   const area = useMemo(() => {
     const w = Number(v.width);
-    if (form === "ROLL") return w && Number(v.length) ? w * Number(v.length) : 0;
+    if (form === "ROLL") {
+      const rw = Number(material.roll_width) || w;
+      return rw && Number(v.length) ? rw * Number(v.length) : 0;
+    }
     if (form === "SHEET")
       return w && Number(v.height) && Number(v.sheet_count) ? w * Number(v.height) * Number(v.sheet_count) : 0;
     return 0;
@@ -43,7 +50,20 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
   // Партия = цена за штуку × сколько листов. В рулонной форме приходит один
   // рулон, поэтому его цена и есть себестоимость партии.
   const pieces = form === "SHEET" ? Number(v.sheet_count) || 0 : 1;
-  const batchCost = Number(v.unit_cost) > 0 && pieces > 0 ? Number(v.unit_cost) * pieces : 0;
+  // У рулона партию считает цена за МЕТР × принятые метры.
+  const batchCost =
+    form === "ROLL"
+      ? (Number(v.cost_per_pm) > 0 && Number(v.length) > 0
+          ? Number(v.cost_per_pm) * Number(v.length)
+          : 0)
+      : Number(v.unit_cost) > 0 && pieces > 0
+      ? Number(v.unit_cost) * pieces
+      : 0;
+  // Недолив: заявлено минус принято.
+  const shortfall =
+    Number(v.declared_length) > 0 && Number(v.length) > 0
+      ? Number(v.declared_length) - Number(v.length)
+      : 0;
 
   const costPerSqm = area && batchCost ? (batchCost / area).toFixed(2) : null;
   const cur = Number(material.quantity) || 0;
@@ -69,7 +89,9 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
   const money = (n) => Number(n).toLocaleString("ru-RU");
 
   const valid = roll
-    ? (form === "ROLL" ? v.width && v.length : v.width && v.height && v.sheet_count) && batchCost > 0
+    ? (form === "ROLL"
+        ? (material.roll_width || v.width) && v.length
+        : v.width && v.height && v.sheet_count) && batchCost > 0
     : !!v.quantity;
 
   async function submit() {
@@ -82,6 +104,12 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           code: v.code,
           width: Number(v.width),
           length: form === "ROLL" ? Number(v.length) : null,
+          ...(form === "ROLL"
+            ? {
+                cost_per_pm: Number(v.cost_per_pm) || null,
+                declared_length: Number(v.declared_length) || null,
+              }
+            : {}),
           height: form === "SHEET" ? Number(v.height) : null,
           sheet_count: form === "SHEET" ? Number(v.sheet_count) : null,
           purchase_cost: batchCost,
@@ -143,10 +171,29 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
       )}
 
       {roll && form === "ROLL" && (
-        <div className="row">
-          {numField(t("supply.width"), "width", { autoFocus: true })}
-          {numField(t("supply.length"), "length")}
-        </div>
+        <>
+          {/* Ширина берётся из карточки и ЗАМОРАЖИВАЕТСЯ в этой партии: правка
+              опечатки в справочнике потом не должна пересчитывать уже принятые
+              рулоны. Если у карточки ширины нет — спрашиваем её здесь. */}
+          {material.roll_width ? (
+            <p className="muted" style={{ fontSize: 13, margin: "0 0 8px" }}>
+              {t("supply.widthFromCard", { width: material.roll_width })}
+            </p>
+          ) : (
+            <div className="row">{numField(t("supply.width"), "width", { autoFocus: true })}</div>
+          )}
+          <div className="row">
+            {numField(t("supply.declaredLength"), "declared_length", { autoFocus: !!material.roll_width })}
+            {numField(t("supply.acceptedLength"), "length")}
+          </div>
+          {/* Недолив — на виду сразу, а не «когда-нибудь в отчёте»: рулон за
+              рулоном по метру это чистый убыток, который иначе не свести. */}
+          {shortfall > 0 && (
+            <p style={{ color: "var(--danger)", fontSize: 13, margin: "-4px 0 8px" }}>
+              {t("supply.shortfall", { n: shortfall.toFixed(2) })}
+            </p>
+          )}
+        </>
       )}
       {roll && form === "SHEET" && (
         <div className="row">
@@ -155,7 +202,19 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           {numField(t("supply.sheets"), "sheet_count")}
         </div>
       )}
-      {roll && (
+      {roll && form === "ROLL" && (
+        <div className="field" style={{ marginTop: 12 }}>
+          <label>{t("supply.costPerPm")}</label>
+          <input type="number" step="any" value={v.cost_per_pm} onChange={set("cost_per_pm")} />
+          {batchCost > 0 && (
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+              {t("supply.batchCost")}: {money(Number(v.cost_per_pm))} × {Number(v.length) || 0} ={" "}
+              <strong>{money(batchCost)}</strong> сом
+            </p>
+          )}
+        </div>
+      )}
+      {roll && form !== "ROLL" && (
         <div className="field" style={{ marginTop: 12 }}>
           <label>{t("supply.unitCost", { unit: wholeUnit })}</label>
           <input type="number" step="any" value={v.unit_cost} onChange={set("unit_cost")} />

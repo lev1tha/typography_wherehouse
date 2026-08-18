@@ -7,6 +7,7 @@ from .views import (
     MaterialTypeViewSet,
     ProductionSiteViewSet,
     MaterialViewSet,
+    RollStocktakeViewSet,
     RollViewSet,
     SupplierViewSet,
     SupplyViewSet,
@@ -19,6 +20,7 @@ router.register("production-sites", ProductionSiteViewSet, basename="production-
 router.register("material-images", MaterialImageViewSet, basename="material-image")
 router.register("inventory-logs", InventoryLogViewSet, basename="inventory-log")
 router.register("rolls", RollViewSet, basename="roll")
+router.register("roll-stocktakes", RollStocktakeViewSet, basename="roll-stocktake")
 router.register("month-openings", MaterialMonthOpeningViewSet, basename="month-opening")
 router.register("suppliers", SupplierViewSet, basename="supplier")
 router.register("supplies", SupplyViewSet, basename="supply")

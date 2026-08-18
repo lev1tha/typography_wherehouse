@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import i18n from "../../i18n/index.js";
 import { Link } from "react-router-dom";
 
 import api from "../../api/api.js";
@@ -14,7 +15,14 @@ import MonthPicker from "../../components/MonthPicker.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
 const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
-const q2 = (n) => Number(n || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+// Дробные величины (кв.м, пог.м) — по языку интерфейса: в английской версии
+// «1,11 sq.m» с русской запятой читается как «сто одиннадцать».
+// Целые суммы этим не задеты: там разделителя дробей нет, а «сом» заказчик
+// сознательно оставил непереведённым.
+const q2 = (n) =>
+  Number(n || 0).toLocaleString(i18n.language === "en" ? "en-US" : "ru-RU", {
+    maximumFractionDigits: 2,
+  });
 
 // Границы выбранного месяца. month = null → весь период (без дат).
 function periodParams({ year, month }) {
@@ -421,6 +429,20 @@ export default function Finance() {
           <span style={{ color: "var(--danger)" }}>− {som(report.cogs)}</span>
         </div>
         {totalRow(t("finance.grossMargin"), report.gross_margin)}
+        {/* Обрезки — часть этой же себестоимости, которая до клиента не дошла.
+            Отдельной строкой, а не в вычитании: это не добавочный расход, а
+            ответ на вопрос «сколько я подарил», которого раньше не было вовсе.
+            Показываем, только когда ширину изделия называли: иначе строка «0»
+            означала бы «отхода нет», а на деле его просто не считали. */}
+        {Number(report.offcuts?.area) > 0 && (
+          <div className="crow">
+            <span className="k">{t("finance.offcuts")}</span>
+            <span>
+              {q2(report.offcuts.area)} {t("finance.sqmShort")}{" "}
+              <span className="muted">· {som(report.offcuts.cost)}</span>
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Карточки «Реквизиты для документов» здесь больше нет: заказчик просил
@@ -505,6 +527,19 @@ export default function Finance() {
           ))}
         </div>
 
+        {/* Расчётная ЗП мастера — доля от стоимости работы резки по ставке из
+            «Цен и услуг». Настройка была, а цифры нигде не было. Справочно: в
+            прибыль не входит, зарплаты вносятся записями. */}
+        {Number(report.cutting?.master_commission_percent) > 0 && (
+          <p className="muted" style={{ fontSize: 13, margin: "10px 0 0" }}>
+            {t("finance.masterShare", {
+              pct: q2(report.cutting.master_commission_percent),
+              sum: som(report.cutting.master_share),
+            })}{" "}
+            <span style={{ fontSize: 12 }}>{t("finance.masterShareHint")}</span>
+          </p>
+        )}
+
         {/* Кто сколько отрезал. Считается по тому, кто ОФОРМИЛ заказ — поля
             «мастер за станком» в системе нет, и выдавать одно за другое
             нельзя, поэтому так и подписано. */}
@@ -520,7 +555,15 @@ export default function Finance() {
                   key={u.id ?? "none"}
                   label={u.name}
                   value={`${q2(u.area)} ${t("finance.sqmShort")}`}
-                  sub={t("finance.cuttingUserPm", { pm: q2(u.running_meters) })}
+                  sub={
+                    Number(report.cutting?.master_commission_percent) > 0
+                      ? t("finance.cuttingUserShare", {
+                          pm: q2(u.running_meters),
+                          sum: som(u.amount),
+                          share: som(u.master_share),
+                        })
+                      : t("finance.cuttingUserPm", { pm: q2(u.running_meters) })
+                  }
                 />
               ))}
             </div>

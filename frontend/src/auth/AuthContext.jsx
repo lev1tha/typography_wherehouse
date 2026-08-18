@@ -47,6 +47,10 @@ export function AuthProvider({ children }) {
     localStorage.removeItem("userToken");
     localStorage.removeItem("refreshToken");
     localStorage.removeItem("user");
+    // Снятый финансовый пароль уходит вместе с сессией. Раньше он оставался, и
+    // на общей кассовой машине следующий вошедший попадал в «Финансы» без
+    // пароля — все оставшиеся полчаса.
+    localStorage.removeItem("financeUnlockToken");
     setUser(null);
   }
 

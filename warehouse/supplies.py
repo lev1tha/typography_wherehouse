@@ -78,6 +78,11 @@ def post_supply(supply: Supply, lines_data: list[dict], *, user=None) -> Supply:
                 data["width"] = material.sheet_width
             if not data.get("height") and material.sheet_height:
                 data["height"] = material.sheet_height
+        # Рулон без ширины — ширина из карточки (она для того и заведена):
+        # партия замораживает её у себя, как и при быстром приходе.
+        if form == SupplyLine.Form.ROLL and material.is_roll_material:
+            if not data.get("width") and material.roll_width:
+                data["width"] = material.roll_width
         qty = line_quantity(
             material, form,
             width=data.get("width"), height=data.get("height"),
@@ -125,14 +130,55 @@ def post_supply(supply: Supply, lines_data: list[dict], *, user=None) -> Supply:
 
 
 @transaction.atomic
+def move_supply_date(supply: Supply, day) -> None:
+    """Перенести дату проведённой накладной вместе с её следом на складе.
+
+    По дате накладной идут закуп месяца (`SupplyLine` → `received_on`), FIFO
+    (`Roll.received_at`) и складской лист / журнал (`InventoryLog.happened_at`).
+    Раньше правилась только сама дата: закуп уезжал в другой месяц, а партии и
+    движения оставались в старом — финотчёт и складской лист расходились на
+    сумму накладной, партия стояла в очереди FIFO не по своей дате.
+    """
+    moment = _moment(day)
+    supply.received_on = day
+    supply.save(update_fields=["received_on"])
+    Roll.objects.filter(supply_line__supply=supply).update(received_at=moment)
+    supply.inventory_logs.update(happened_at=moment)
+
+
+def supply_summary(supply: Supply) -> str:
+    """Накладная одной строкой — для журнала действий ПЕРЕД отменой: после неё
+    от документа не остаётся ничего, и вопрос «что там было» отвечать нечем."""
+    head = f"№{supply.number}" if supply.number else f"#{supply.pk}"
+    if supply.supplier_id:
+        head += f" от {supply.supplier.name}"
+    head += f" ({supply.received_on:%d.%m.%Y})"
+    lines = ", ".join(
+        f"{line.material.name} × {line.quantity.normalize():f} на {line.cost.normalize():f} сом"
+        for line in supply.lines.select_related("material")
+    )
+    return f"{head}, {supply.total_cost.normalize():f} сом" + (f" ({lines})" if lines else "")
+
+
+@transaction.atomic
 def unpost_supply(supply: Supply) -> None:
-    """Отменить накладную и снять с остатков всё, что она принесла.
+    """Отменить накладную: такой поставки не было — убрать её след целиком.
 
     Отменяем ТОЛЬКО нетронутую поставку: если из партии уже резали, откат
     сдвинул бы себестоимость закрытых заказов — тех самых, что уже посчитаны в
     прибыли. В таком случае честнее сказать «нельзя», чем тихо переписать
     прошлое (ровно по этой причине материал с продажами не удаляется, а
     прячется).
+
+    Записи склада по накладной УДАЛЯЮТСЯ, а не остаются встречным движением —
+    как у удалённого чека (`delete_receipt`): отмена — это исправление ошибки
+    ввода, а не событие на складе. Раньше журнал оставался («поступление
+    +29.77» и рядом «отмена −29.77»), а логи поступления отвязывались от
+    документа — и дальше считались ОДИНОЧНЫМИ приходами: закуп месяца в
+    финотчёте держал сумму отменённой накладной (35 000 сом) навсегда, а
+    складской лист показывал её в «поступлении». Материал уходит с остатка
+    без записи в журнал — приход и его отмена дают ноль. След остаётся в
+    ЖУРНАЛЕ ДЕЙСТВИЙ, вместе с составом (см. `supply_summary` во вьюхе).
     """
     for line in supply.lines.select_related("material", "roll"):
         roll = line.roll
@@ -148,7 +194,6 @@ def unpost_supply(supply: Supply) -> None:
                 "накладной, — часть уже продали. Отменить нельзя."
             )
 
-    reason = f"Отмена накладной {supply.number or f'#{supply.pk}'}"
     for line in supply.lines.select_related("material", "roll"):
         material = line.material
         if line.roll:
@@ -156,19 +201,8 @@ def unpost_supply(supply: Supply) -> None:
             line.roll = None
             line.save(update_fields=["roll"])
             roll.delete()
-            # Партия ушла — снимаем её площадь с остатка материала.
-            apply_stock_change(
-                material, -line.quantity,
-                log_type=InventoryLog.Type.ADJUSTMENT,
-                reason=reason, user=None,
-            )
-        else:
-            apply_stock_change(
-                material, -line.quantity,
-                log_type=InventoryLog.Type.ADJUSTMENT,
-                reason=reason, user=None,
-            )
-    # Записи журнала этой накладной остаются: движение было, и стирать историю
-    # склада нельзя. Отмена — это встречное движение, а не подчистка.
-    supply.inventory_logs.update(supply=None)
+        # Снимаем с остатка ровно то, что накладная принесла, — без строки в
+        # журнале: её приход тоже уходит ниже, и движения в сумме нет.
+        apply_stock_change(material, -line.quantity)
+    supply.inventory_logs.all().delete()
     supply.delete()

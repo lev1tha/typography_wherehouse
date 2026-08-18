@@ -84,6 +84,24 @@ class ClientSerializer(serializers.ModelSerializer):
     def validate_referred_by(self, value):
         if value and self.instance and value.pk == self.instance.pk:
             raise serializers.ValidationError("Клиент не может привести сам себя.")
+        # И не по кругу: «А привёл Б, Б привёл А» проверка на самого себя не
+        # ловила, а по такой паре реферальные бонусы считаются в обе стороны и
+        # отчёт по рефералам показывает двух клиентов, приведённых друг другом.
+        # Идём вверх по цепочке рефереров — если упёрлись в самого клиента,
+        # кольцо замкнулось. Ограничитель на длину — от битых данных, чтобы
+        # проверка не крутилась вечно.
+        if value and self.instance:
+            seen, node, hops = {value.pk}, value.referred_by, 0
+            while node is not None and hops < 50:
+                if node.pk == self.instance.pk:
+                    raise serializers.ValidationError(
+                        f"«{value.display_name}» уже приведён этим клиентом — "
+                        "получается кольцо."
+                    )
+                if node.pk in seen:
+                    break
+                seen.add(node.pk)
+                node, hops = node.referred_by, hops + 1
         # Referral is locked once set. Storekeepers cannot change or clear it —
         # they must file a ReferralChangeRequest for an admin to approve. Admins
         # are the approval authority, so they may override it directly.
@@ -117,7 +135,16 @@ class ClientSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-        ctype = attrs.get("type", getattr(self.instance, "type", None))
+        # Тип берём с запасным значением МОДЕЛИ, а не None. Раньше при создании
+        # без явного `type` тут выходил None, обе проверки промахивались, и
+        # карточка заводилась вообще без имени — а модель ставила PHYSICAL по
+        # умолчанию. Дальше такая карточка запиралась: любая правка, даже одного
+        # ИНН, упиралась в «Для физ. лица укажите ФИО».
+        ctype = (
+            attrs.get("type")
+            or getattr(self.instance, "type", None)
+            or Client.Type.PHYSICAL
+        )
         if ctype == Client.Type.OSOO and not attrs.get(
             "company_name", getattr(self.instance, "company_name", None)
         ):

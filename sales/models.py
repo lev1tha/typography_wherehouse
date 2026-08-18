@@ -143,10 +143,17 @@ class Receipt(models.Model):
         super().save(*args, **kwargs)
 
     def recalculate_total(self) -> Decimal:
-        # Use .filter() (not .all()) to bypass any stale prefetch cache — the
-        # view loads receipts with prefetch_related, and дозаказ adds new items.
+        # Итог чека — стоимость ВСЕХ строк, включая возвращённые: возврат
+        # уменьшает не итог, а `refunded_amount`, и везде (долг, выручка,
+        # переплата при возврате) считается «итог − возвращено». Раньше здесь
+        # складывались только невозвращённые строки, и любой пересчёт после
+        # частичного возврата (правка состава, дозаказ) вычитал возврат дважды:
+        # чек 7 400 с возвратом на 3 700 после дозаказа на 3 700 показывал итог
+        # 7 400, долг 0.
+        # Свежий запрос, а не `.all()`: вьюха грузит чеки с prefetch, и после
+        # дозаказа кэш строк устаревший.
         total = sum(
-            (item.line_total for item in self.items.filter(is_returned=False)),
+            (item.sold_total for item in TransactionItem.objects.filter(receipt=self)),
             Decimal("0"),
         )
         self.total_price = total
@@ -212,6 +219,10 @@ class TransactionItem(models.Model):
     class SaleMode(models.TextChoices):
         SQM = "SQM", _("По площади / кв.м")
         PIECE = "PIECE", _("Целиком (лист/рулон)")
+        # Рулон: количество строки — ДЛИНА в метрах, цена — за погонный метр.
+        # Со склада при этом уходит вся ширина полотна: отрезают поперёк рулона
+        # целиком, и узкий остаток полосы — это обрезок цеха, а не товар клиента.
+        METER = "METER", _("По длине / пог.м")
 
     receipt = models.ForeignKey(
         Receipt, on_delete=models.CASCADE, related_name="items"
@@ -223,6 +234,32 @@ class TransactionItem(models.Model):
         null=True,
         blank=True,
         related_name="transaction_items",
+    )
+    # Ширина, которая РЕАЛЬНО ушла клиенту, когда она уже рулона.
+    #
+    # Полосу 0.5 м от рулона шириной 0.9 отрезают на всю ширину — иначе никак,
+    # рулон режут поперёк. Клиент забирает 0.5, а 0.4 остаётся в цехе и обычно
+    # идёт в мусор. Деньги при этом берутся за полную ширину (и это правильно:
+    # материал потрачен весь), но цифра «сколько я подарил» до сих пор была
+    # недоступна В ПРИНЦИПЕ — обрезок растворялся в списании.
+    #
+    # Поле необязательное: не заполнили — значит ушло всё, отхода нет.
+    used_width = models.DecimalField(
+        _("ширина изделия, м"), max_digits=8, decimal_places=2,
+        null=True, blank=True,
+        help_text=_("Сколько ширины ушло клиенту. Остальное — обрезок цеха"),
+    )
+    # Из какого ФИЗИЧЕСКОГО рулона отрезали. Партия — это не «поступление», а
+    # рулон на полке: у мастера их три, один початый на 8 метров, и дожигать
+    # надо его. Без этой ссылки нельзя ни написать в чеке «списано с рулона №7»,
+    # ни вернуть метры при возврате в тот же рулон, из которого их взяли.
+    roll = models.ForeignKey(
+        "warehouse.Roll",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="sold_items",
+        verbose_name=_("рулон"),
     )
     service = models.ForeignKey(
         "services.PrintingService",
@@ -262,12 +299,69 @@ class TransactionItem(models.Model):
         verbose_name_plural = _("позиции чека")
 
     @property
+    def roll_width(self) -> Decimal:
+        """Ширина полотна, с которого резали, — партии, а не карточки.
+
+        Ширина заморожена в партии при приёмке; под одной карточкой законно
+        лежат рулоны 1.0, 1.26 и 1.52, и «ширина рулона» в карточке — лишь
+        значение по умолчанию для приёмки. Считать обрезок и площадь резки по
+        карточке — врать на разницу ширин: рулон 1.5 при карточке 1.2 давал
+        обрезок 0.4 кв.м вместо 1.0. Партии нет (старые чеки, FIFO без выбора)
+        — остаётся ширина карточки.
+        """
+        if self.roll_id and self.roll.width:
+            return self.roll.width
+        return (self.material.roll_width if self.material_id else None) or Decimal("0")
+
+    @property
+    def offcut_area(self) -> Decimal:
+        """Площадь обрезка — того, что списали, но клиенту не отдали.
+
+        Считается только у рулона и только когда ширину изделия назвали: без
+        неё мы не знаем, ушёл материал целиком или половина легла в мусор.
+        Возвращённая строка обрезка не даёт — материал вернулся на склад.
+        """
+        if self.is_returned or self.sale_mode != self.SaleMode.METER:
+            return Decimal("0")
+        if not self.used_width or not self.material_id:
+            return Decimal("0")
+        spare = self.roll_width - self.used_width
+        if spare <= 0:
+            return Decimal("0")
+        return (spare * self.quantity).quantize(Decimal("0.0001"))
+
+    @property
+    def offcut_cost(self) -> Decimal:
+        """Во сколько обрезок обошёлся — по цене ТОЙ партии, из которой резали.
+
+        Это не дополнительный расход: он уже сидит в `cost_total`, потому что
+        списали всю ширину. Здесь — та его часть, которая до клиента не дошла.
+        """
+        area = self.offcut_area
+        if area <= 0:
+            return Decimal("0")
+        if self.roll_id and self.roll.cost_per_sqm:
+            per_sqm = self.roll.cost_per_sqm
+        else:
+            per_sqm = self.material.purchase_price or Decimal("0")
+        return (area * per_sqm).quantize(Decimal("0.01"))
+
+    @property
+    def sold_total(self) -> Decimal:
+        """Стоимость строки, как она стояла в чеке, — и у возвращённой тоже.
+
+        Из неё складывается `Receipt.total_price`; возврат уменьшает не итог, а
+        `refunded_amount`. Цену строки округляем ВВЕРХ до целого сома (решение
+        заказчика) — без копеек; итог чека = сумма таких целых строк.
+        """
+        return (self.quantity * self.price_per_item).quantize(Decimal("1"), rounding=ROUND_CEILING)
+
+    @property
     def line_total(self) -> Decimal:
+        """То, что клиент должен за строку СЕЙЧАС: возвращённая — ноль."""
         if self.is_returned:
             return Decimal("0")
-        # Цену строки округляем ВВЕРХ до целого сома (решение заказчика) — без
-        # копеек. Итог чека = сумма таких целых строк, поэтому тоже целый.
-        return (self.quantity * self.price_per_item).quantize(Decimal("1"), rounding=ROUND_CEILING)
+        return self.sold_total
 
 
 class Payment(models.Model):

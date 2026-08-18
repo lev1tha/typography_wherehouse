@@ -18,6 +18,9 @@ class EdgeWholesaleTests(APITestCase):
         self.user = User.objects.create_user(
             username="edge_store", password="x", role=User.Role.STOREKEEPER
         )
+        self.admin = User.objects.create_user(
+            username="edge_admin", password="x", role=User.Role.ADMIN
+        )
         self.client.force_authenticate(self.user)
         # Лист продаётся целиком (piece_price=3700), площадь листа 2.98 кв.м.
         self.acrylic = Material.objects.create(
@@ -120,6 +123,8 @@ class EdgeWholesaleTests(APITestCase):
     # --- приоритет ручного override над оптом (режим PIECE) ---
 
     def test_manual_override_beats_wholesale_in_piece_mode(self):
+        # Ручные цены — право админа (аудит п. 14).
+        self.client.force_authenticate(self.admin)
         self.acrylic.wholesale_price = Decimal("3000")
         self.acrylic.wholesale_min_qty = Decimal("3")
         self.acrylic.save()

@@ -198,12 +198,26 @@ class EdgeRolesTests(APITestCase):
 
     # ---- customer login by phone ---------------------------------------
     def test_customer_login_nonexistent_phone(self):
+        """Неизвестный номер отвечает ровно как известный.
+
+        Портал открыт на публичном домене, и по нему нельзя выяснять, кто у
+        цеха заказывает: разные ответы превращали страницу входа в справочник
+        клиентов. Отказ приходит только вместе с паролем — и без подробностей.
+        """
         self._clear_auth()
         r = self.client.post(
             "/api/customer/login/", {"phone": "+996555999999"}, format="json",
         )
-        self.assertEqual(r.status_code, 400, getattr(r, "data", None))
-        self.assertEqual(r.data["detail"], "Клиент с таким номером не найден")
+        self.assertEqual(r.status_code, 200, getattr(r, "data", None))
+        self.assertEqual(r.data.get("status"), "need_password")
+        self.assertNotIn("name", r.data)
+
+        with_pass = self.client.post(
+            "/api/customer/login/",
+            {"phone": "+996555999999", "password": "любой"}, format="json",
+        )
+        self.assertEqual(with_pass.status_code, 400)
+        self.assertEqual(with_pass.data["detail"], "Неверный номер или пароль.")
 
     def test_customer_login_empty_phone(self):
         self._clear_auth()
@@ -212,14 +226,18 @@ class EdgeRolesTests(APITestCase):
         self.assertEqual(r.data["detail"], "Введите номер телефона")
 
     def test_customer_login_normalizes_phone_format(self):
-        # Same digits as client_a's +996700000001, different punctuation.
+        """Тот же номер в другом написании пускает в кабинет.
+
+        Проверяем ВХОДОМ: шаг «только телефон» теперь отвечает одинаково всем,
+        и по нему нормализацию уже не видно.
+        """
+        self.client_a.set_password("issued99")
+        self.client_a.save()
         self._clear_auth()
         r = self.client.post(
             "/api/customer/login/",
-            {"phone": "+996 (700) 00-00-01"}, format="json",
+            {"phone": "+996 (700) 00-00-01", "password": "issued99"}, format="json",
         )
         self.assertEqual(r.status_code, 200, getattr(r, "data", None))
-        # Нормализованный телефон нашёл клиента; пароль ещё не выдан админом
-        # → система отправляет к администратору.
-        self.assertEqual(r.data.get("status"), "no_password")
-        self.assertEqual(r.data.get("name"), self.client_a.display_name)
+        self.assertIn("access", r.data)
+        self.assertEqual(r.data["client"]["id"], self.client_a.id)

@@ -427,7 +427,7 @@ export default function Clients() {
               {Number(detail.debt) > 0 ? (
                 <strong style={{ color: "var(--danger)" }}>{Number(detail.debt).toLocaleString("ru-RU")} сом</strong>
               ) : (
-                <span className="paid">0</span>
+                <span className="paid">0 сом</span>
               )}
               {/* Общая выплата: клиент гасит несколько заказов одной суммой.
                   Деньги — за админом, как и оплата по отдельному чеку. */}

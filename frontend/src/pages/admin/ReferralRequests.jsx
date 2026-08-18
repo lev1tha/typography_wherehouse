@@ -91,7 +91,9 @@ export default function ReferralRequests() {
           ))}
         </select>
       </div>
-      <DataTable columns={columns} rows={rows} />
+      {/* Общее «Нет данных» ничего не говорит о разделе: заявки сюда попадают
+          не сами, их подаёт складовщик из карточки клиента. */}
+      <DataTable columns={columns} rows={rows} empty={t("clients.referralQueueEmpty")} />
     </>
   );
 }
