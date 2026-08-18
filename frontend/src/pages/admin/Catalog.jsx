@@ -155,7 +155,11 @@ export default function Catalog({ embedded = false }) {
   const [bulk, setBulk] = useState(false);
 
   function load() {
-    const params = { ordering };
+    // page_size: без него приезжает первая страница из 25 материалов, и
+    // каталог из полусотни позиций обрывался на 25-й — молча, без всякой
+    // пагинации на экране: материала просто не было в списке. Во всех
+    // остальных списках материалов (касса, приход, обзор) он уже стоял.
+    const params = { ordering, page_size: 500 };
     if (search) params.search = search;
     if (typeId) params.type = typeId;
     if (color) params.color = color;
