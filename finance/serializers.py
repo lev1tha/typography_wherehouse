@@ -42,6 +42,10 @@ class ExpenseKindSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         instance = self.instance
         block = attrs.get("block", instance.block if instance else None)
+        # Блок «Инвестиции» в прибыль не входит по определению — флаг «входит
+        # в прибыль» у его видов всегда снят, что бы ни пришло с формы.
+        if block == ExpenseKind.Block.INVESTMENT:
+            attrs["in_profit"] = False
         if instance and instance.is_builtin:
             # Отчёт опирается на встроенные виды по коду: транспорт живёт в
             # блоке «Материалы», зарплаты — с именами сотрудников. Переезд в

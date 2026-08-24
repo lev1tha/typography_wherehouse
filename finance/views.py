@@ -1,7 +1,7 @@
 import calendar
 import secrets
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 
 from django.conf import settings
@@ -28,7 +28,6 @@ from .material_sheet import (
     counting_unit,
     opening_for,
     purchases_from_stock,
-    purchases_from_stock_by_day,
     q2,
     sheet_unit,
     to_units,
@@ -453,46 +452,85 @@ class FinanceReportView(APIView):
 
         total_fixed = block_total(fixed_rows)
         operating_variable = block_total(variable_rows)
-        # Вложения (оборудование + улучшение цеха и любые другие виды со снятым
-        # флагом) показываются В БЛОКЕ переменных расходов, но в прибыль НЕ
-        # входят: станок за 300 000 не должен делать месяц убыточным.
-        investment_rows = [r for r in variable_rows if not r["in_profit"]]
+        # Инвестиции — СВОЙ блок (решение заказчика, 2026-08-24), а не строки
+        # со снятым флагом внутри «Переменных». Станок и ремонт цеха не входят
+        # ни в прибыль, ни в «Расходы»: это вложения, у них своя графа и свой
+        # итог. Виды блока всегда с in_profit=False — следит сериализатор.
+        investment_rows = block_rows(ExpenseKind.Block.INVESTMENT)
         investments = {
             "rows": investment_rows,
             "total": sum((r["amount"] for r in investment_rows), Decimal("0")),
         }
-        # --- Блок «Материалы» (как в исходном Excel заказчика) ---------------
-        # Закуп, транспорт и долг материала — такие же виды расхода с записями,
-        # как строки остальных блоков. В расход материала идут строки с флагом
-        # «входит в прибыль» (закуп + транспорт + свои виды); долг материала
-        # флага не имеет и остаётся справочным — материал, взятый в долг, уже
-        # сидит в закупе, иначе посчитали бы дважды.
-        #
-        #   расход материала = Σ(строки блока) = закуп + транспорт
-        #
-        # Остатки на начало и на конец из формулы УБРАНЫ (решение заказчика,
-        # 2026-08-14). Раньше было «начало + закуп + транспорт − конец»: расход
-        # выводился через склад, и пока остатки не заполнены, формула уходила в
-        # минус на всю стоимость склада — приходилось держать признак
-        # needs_setup и не пускать такой итог в прибыль. Теперь в расход идёт то,
-        # что за месяц реально потратили на материал.
-        materials_spend = block_total(material_rows)
-        materials = {
-            "spend": materials_spend,            # сумма строк блока, идущих в итог
-            "rows": material_rows,               # виды расхода этого блока
-            "total": materials_spend,
-        }
 
         # Себестоимость проданного: закупочная стоимость материала, ушедшего в
         # заказы за период (FIFO по партиям, зафиксирована в момент продажи).
-        # В прибыль НЕ входит — её считает блок «Материалы» (решение заказчика);
-        # остаётся справочной цифрой для сверки маржи.
         cogs = by_created(
             TransactionItem.objects.filter(is_returned=False).exclude(
                 receipt__status=Receipt.Status.CANCELLED
             ),
             field="receipt__created_at",
         ).aggregate(v=_SUM("cost_total"))["v"]
+
+        # --- Блок «Материалы» ------------------------------------------------
+        # Расход материала в прибыли — СЕБЕСТОИМОСТЬ ПРОДАННОГО, а не закуп
+        # (решение заказчика, 2026-08-24; отменяет правило от 2026-08-14
+        # «расход = закуп за месяц»). Закуп — деньги, переложенные из кассы в
+        # склад: это оборот, а не расход месяца. Пока расходом считался закуп,
+        # первый же ввод каталога делал месяц убыточным на всю стоимость склада
+        # (−500 000 при пустых продажах), хотя материал никуда не делся — он
+        # лежит на полке. Строка закупа осталась в блоке справочной (флаг
+        # снят миграцией 0006), его сумма и стоимость склада — в секции
+        # «Склад (оборот)» ниже.
+        #
+        #   материалы в прибыли = себестоимость проданного + транспорт + свои виды
+        #
+        # Транспорт остаётся расходом месяца: в цену партии он не входит (там —
+        # сумма из накладной поставщика), и копить его на складе не из чего.
+        materials_spend = block_total(material_rows)
+        materials = {
+            "spend": materials_spend,            # ручные строки блока (транспорт + свои)
+            "cogs": cogs,                        # авто-строка: себестоимость проданного
+            "rows": material_rows,               # виды расхода этого блока
+            "total": materials_spend + cogs,
+        }
+
+        # --- Склад (оборот) --------------------------------------------------
+        # Деньги, вложенные в материал. Закуп за период — сколько переложили из
+        # кассы в склад (авто по приходам + ручные записи вида «Закуп»);
+        # стоимость склада — сколько лежит на полках СЕЙЧАС, по ценам партий
+        # (штучные и кг/л — по закупочной из карточки). Именно «сейчас», а не
+        # «на конец периода»: отматывать остатки назад по журналу система
+        # сознательно не берётся (см. складской лист).
+        purchase_kind_id = next(
+            (k.id for k in kinds if k.code == ExpenseKind.MATERIAL_PURCHASE), None
+        )
+        stock_purchases = auto_by_code[ExpenseKind.MATERIAL_PURCHASE] + spent_by_kind.get(
+            purchase_kind_id, Decimal("0")
+        )
+        # По партиям, той же ценой за кв.м, что и списание (свойство партии,
+        # не поле) — питоном: партий сотни, а не миллионы.
+        lots_value = sum(
+            (
+                r.remaining_area * r.cost_per_sqm
+                for r in Roll.objects.filter(remaining_area__gt=0).only(
+                    "remaining_area", "purchase_cost", "initial_area"
+                )
+            ),
+            Decimal("0"),
+        )
+        pieces_value = sum(
+            (
+                (m.quantity or Decimal("0")) * (m.purchase_price or Decimal("0"))
+                for m in Material.objects.filter(
+                    is_roll_material=False, is_archived=False
+                ).only("quantity", "purchase_price")
+            ),
+            Decimal("0"),
+        )
+        stock = {
+            "purchases": stock_purchases,
+            "value_now": (lots_value + pieces_value).quantize(Decimal("0.01")),
+        }
 
         total_expenses = materials["total"] + total_fixed + operating_variable
 
@@ -729,6 +767,9 @@ class FinanceReportView(APIView):
                 # Вложения показываем в этом же блоке, но в total их нет —
                 # total идёт в прибыль, вложения нет.
                 "variable": {"rows": variable_rows, "total": operating_variable},
+                # Деньги в складе: закуп за период и стоимость полок сейчас.
+                # Оборот, а не расход — прибыль он уменьшает по мере продажи.
+                "stock": stock,
                 # Себестоимость проданного материала — отдельной строкой, чтобы
                 # было видно маржу: выручка − себестоимость = сколько заработали
                 # на материале до накладных расходов.
@@ -826,33 +867,27 @@ class DailyReportView(APIView):
         for row in expense_rows:
             variable_by_day[row["spent_at"]] += row["v"]
 
-        # ЗАКУП ПО ПРИХОДАМ НА СКЛАД — тот же авторасчёт, что стоит в строке
-        # «Закуп материала» месячного отчёта (`purchases_from_stock`), только по
-        # дням. Без него график видел лишь записи трат, и пока закуп не вписан
-        # руками, на одном экране спорили две «Прибыли»: плитки −14 265,
-        # график +3 735. Условия те же, что у плиток: вид расхода есть, не в
-        # архиве и с флагом «уменьшает прибыль».
-        purchase_kind = ExpenseKind.objects.filter(
-            code=ExpenseKind.MATERIAL_PURCHASE, is_archived=False
-        ).first()
-        if purchase_kind is not None and purchase_kind.in_profit:
-            last_day = next_month_first - timedelta(days=1)
-            for day, amount in purchases_from_stock_by_day(first_day, last_day).items():
-                variable_by_day[day] += amount
-
-        # СЕБЕСТОИМОСТЬ ПРОДАННОГО в дневные расходы НЕ входит.
-        #
-        # Раньше входила — и на одном экране получались две «Прибыли», которые
-        # спорили друг с другом: сверху 6 924, в графике 939. Причина в том, что
-        # это были две РАЗНЫЕ формулы под одним словом: плитки считают
-        # «выручка − (Материалы + Постоянные + Переменные)», а график добавлял
-        # сюда ещё и себестоимость.
-        #
-        # Правило заказчика: прибыль = выручка − (Материалы + Постоянные +
-        # Переменные); себестоимость проданного считается точно (FIFO), но она
-        # СПРАВОЧНАЯ и в прибыль не идёт — материал уже посчитан закупом. График
-        # обязан жить по тому же правилу, иначе он не «второй взгляд», а второй
-        # ответ на тот же вопрос.
+        # СЕБЕСТОИМОСТЬ ПРОДАННОГО — в расходы дня, той же формулой, что и
+        # плитки месяца (решение заказчика, 2026-08-24): прибыль = выручка −
+        # (себестоимость + транспорт и свои материалы + переменные) −
+        # постоянные. ЗАКУП сюда больше не входит — деньги, переложенные в
+        # склад, это оборот, а не расход дня: раньше день прихода партии
+        # выглядел провалом на всю накладную, хотя материал лежит на полке.
+        # График обязан жить по правилу плиток, иначе он не «второй взгляд»,
+        # а второй ответ на тот же вопрос.
+        cogs_rows = (
+            TransactionItem.objects.filter(
+                is_returned=False,
+                receipt__created_at__date__gte=first_day,
+                receipt__created_at__date__lt=next_month_first,
+            )
+            .exclude(receipt__status=Receipt.Status.CANCELLED)
+            .annotate(day=TruncDate("receipt__created_at"))
+            .values("day")
+            .annotate(v=_SUM("cost_total"))
+        )
+        for row in cogs_rows:
+            variable_by_day[row["day"]] += row["v"]
 
         rows = []
         for day_num in range(1, days_in_month + 1):

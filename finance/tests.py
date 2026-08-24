@@ -320,26 +320,47 @@ class ExpenseKindAPITests(APITestCase):
         self.assertEqual(Decimal(str(rep.data["fixed"]["total"])), Decimal("500"))
 
     def test_kind_out_of_profit_is_shown_but_not_in_total(self):
-        """Как оборудование: строка видна, а прибыль не уменьшает."""
+        """Строка со снятым флагом видна в своём блоке, а прибыль не уменьшает."""
         r = self.client.post(
-            self.URL, {"name": "Новый станок", "block": "VARIABLE", "in_profit": False}, format="json"
+            self.URL, {"name": "Спорная строка", "block": "VARIABLE", "in_profit": False}, format="json"
         )
         self.assertEqual(r.status_code, 201, r.data)
+        ExpenseEntry.objects.create(
+            kind=ExpenseKind.objects.get(name="Спорная строка"),
+            amount=Decimal("300000"), spent_at=date(2026, 6, 5),
+        )
+        rep = self.client.get("/api/finance/report/", {"date_from": "2026-06-01", "date_to": "2026-06-30"})
+        row = next(x for x in rep.data["variable"]["rows"] if x["name"] == "Спорная строка")
+        self.assertEqual(Decimal(str(row["amount"])), Decimal("300000"))
+        self.assertEqual(Decimal(str(rep.data["variable"]["total"])), Decimal("0"))
+        # В «Инвестиции» чужая строка не попадает: тот блок — только свои виды.
+        self.assertEqual(Decimal(str(rep.data["investments"]["total"])), Decimal("0"))
+
+    def test_investment_kind_is_never_in_profit(self):
+        """Станок заводят в блоке «Инвестиции» — и флаг «входит в прибыль»
+        там не работает, что бы ни прислала форма."""
+        r = self.client.post(
+            self.URL, {"name": "Новый станок", "block": "INVESTMENT", "in_profit": True}, format="json"
+        )
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertFalse(r.data["in_profit"])
         ExpenseEntry.objects.create(
             kind=ExpenseKind.objects.get(name="Новый станок"),
             amount=Decimal("300000"), spent_at=date(2026, 6, 5),
         )
         rep = self.client.get("/api/finance/report/", {"date_from": "2026-06-01", "date_to": "2026-06-30"})
-        row = next(x for x in rep.data["variable"]["rows"] if x["name"] == "Новый станок")
+        row = next(x for x in rep.data["investments"]["rows"] if x["name"] == "Новый станок")
         self.assertEqual(Decimal(str(row["amount"])), Decimal("300000"))
-        self.assertEqual(Decimal(str(rep.data["variable"]["total"])), Decimal("0"))
         self.assertEqual(Decimal(str(rep.data["investments"]["total"])), Decimal("300000"))
+        # Ни в прибыли, ни в «Расходах» станка нет.
+        self.assertEqual(Decimal(str(rep.data["total_expenses"])), Decimal("0"))
+        self.assertEqual(Decimal(str(rep.data["profit"])), Decimal("0"))
 
     def test_own_kind_allowed_in_every_block(self):
-        """Свой вид можно завести в любом из трёх блоков, включая «Материалы»:
-        итог там считается как Σ строк с флагом, поэтому лишняя строка формулу
-        не ломает."""
-        for block in ("MATERIALS", "FIXED", "VARIABLE"):
+        """Свой вид можно завести в любом блоке, включая «Материалы» и
+        «Инвестиции»: итог считается как Σ строк с флагом, поэтому лишняя
+        строка формулу не ломает."""
+        for block in ("MATERIALS", "FIXED", "VARIABLE", "INVESTMENT"):
             r = self.client.post(self.URL, {"name": f"Своё {block}", "block": block}, format="json")
             self.assertEqual(r.status_code, 201, r.data)
 
@@ -458,12 +479,12 @@ class CogsTests(APITestCase):
         self.assertEqual(Decimal(str(data["revenue"])), Decimal("2000"))
         self.assertEqual(Decimal(str(data["cogs"])), Decimal("400"))
         self.assertEqual(Decimal(str(data["gross_margin"])), Decimal("1600"))
-        # Себестоимость — справочная цифра: в прибыль идёт итог блока
-        # «Материалы» (решение заказчика), поэтому 2000 − cogs здесь не ждём.
-        self.assertEqual(
-            Decimal(str(data["profit"])),
-            Decimal(str(data["revenue"])) - Decimal(str(data["total_expenses"])),
-        )
+        # Себестоимость проданного — расход блока «Материалы» (решение
+        # заказчика, 2026-08-24): продали на 2000, материал обошёлся в 400.
+        self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("400"))
+        self.assertEqual(Decimal(str(data["profit"])), Decimal("1600"))
+        # Закуп партии (2000) — не расход, а оборот: он в секции «Склад».
+        self.assertEqual(Decimal(str(data["stock"]["purchases"])), Decimal("2000"))
 
     def test_returned_line_drops_out_of_cogs(self):
         from sales.sale_service import refund_receipt
@@ -496,28 +517,26 @@ class CogsTests(APITestCase):
     def test_daily_report_uses_the_same_profit_formula_as_the_tiles(self):
         """График по дням и плитки сверху должны считать ОДНО И ТО ЖЕ.
 
-        Раньше себестоимость проданного попадала в дневные расходы, а в плитки —
-        нет, и на одном экране стояли две «Прибыли», которые спорили друг с
-        другом (6 924 сверху и 939 в графике). Правило заказчика одно: прибыль =
-        выручка − (Материалы + Постоянные + Переменные), себестоимость
-        справочная. График живёт по нему же.
+        Правило заказчика (2026-08-24): прибыль = выручка − (себестоимость
+        проданного + транспорт и свои материалы + Переменные) − Постоянные.
+        Закуп — оборот, в расходы не входит ни в месяце, ни в дне. График
+        обязан жить по правилу плиток, иначе он не «второй взгляд», а второй
+        ответ на тот же вопрос.
         """
-        self._sell(area="2")  # себестоимость 400, записей трат нет
+        self._sell(area="2")  # выручка 2000, себестоимость 400
         today = timezone.localdate()
         r = self.client.get("/api/finance/daily/", {"year": today.year, "month": today.month})
         self.assertEqual(r.status_code, 200, r.data)
         row = next(x for x in r.data["rows"] if x["day"] == today.day)
-        # Себестоимость (400) в расходы дня НЕ попадает. А вот ЗАКУП по приходу
-        # партии (2000, сегодня) — попадает: плитки считают его сами по приходам
-        # на склад, и график обязан видеть ту же цифру, иначе на одном экране
-        # снова две «Прибыли» (−14 265 сверху и +3 735 в графике).
-        self.assertEqual(Decimal(str(row["variable"])), Decimal("2000"))
+        # В расходах дня — себестоимость проданного (400). Закупа партии
+        # (2000, сегодня) там НЕТ: день прихода накладной — не провальный день.
+        self.assertEqual(Decimal(str(row["variable"])), Decimal("400"))
 
         # Итог графика сходится с плитками месяца: те же расходы, та же прибыль.
         report = self._report()
         totals = r.data["totals"]
         self.assertEqual(Decimal(str(totals["variable"])), Decimal(str(report["total_expenses"])))
-        self.assertEqual(Decimal(str(totals["variable"])), Decimal("2000"))
+        self.assertEqual(Decimal(str(totals["variable"])), Decimal("400"))
         self.assertEqual(Decimal(str(totals["profit"])), Decimal(str(report["profit"])))
         self.assertEqual(Decimal(str(totals["revenue"])), Decimal(str(report["revenue"])))
 
@@ -526,13 +545,15 @@ class CogsTests(APITestCase):
         обязана попасть в свой день."""
         from finance.models import ExpenseEntry, ExpenseKind
 
-        kind = ExpenseKind.objects.filter(block=ExpenseKind.Block.VARIABLE).first()
+        kind = ExpenseKind.objects.filter(
+            block=ExpenseKind.Block.VARIABLE, in_profit=True
+        ).first()
         today = timezone.localdate()
         ExpenseEntry.objects.create(kind=kind, amount=Decimal("700"), spent_at=today)
         r = self.client.get("/api/finance/daily/", {"year": today.year, "month": today.month})
         row = next(x for x in r.data["rows"] if x["day"] == today.day)
-        # 700 трата + 2000 закуп партии из setUp — как в плитках.
-        self.assertEqual(Decimal(str(row["variable"])), Decimal("2700"))
+        # Только трата: закуп партии из setUp — оборот, не расход дня.
+        self.assertEqual(Decimal(str(row["variable"])), Decimal("700"))
         self.assertEqual(
             Decimal(str(r.data["totals"]["variable"])),
             Decimal(str(self._report()["total_expenses"])),
@@ -540,12 +561,13 @@ class CogsTests(APITestCase):
 
 
 class MaterialsBlockTests(APITestCase):
-    """Блок «Материалы»: расход материала = закуп + транспорт (+ свои виды).
+    """Блок «Материалы»: расход = себестоимость проданного + транспорт (+ свои).
 
-    Остатков на начало и на конец в блоке НЕТ — заказчик попросил убрать обе
-    строки (2026-08-14). До этого расход выводился через склад
-    («начало + закуп + транспорт − конец»), и пока остатки не заполнены,
-    формула уходила в минус на всю стоимость склада.
+    Закуп — НЕ расход, а оборот (решение заказчика, 2026-08-24): деньги
+    переложили из кассы в склад, материал лежит на полке. Строка закупа в блоке
+    осталась справочной, его сумма — в секции «Склад (оборот)». До этого
+    расходом был закуп за месяц, и первый же ввод каталога делал месяц
+    убыточным на всю стоимость склада.
     """
 
     URL = "/api/finance/report/"
@@ -575,12 +597,15 @@ class MaterialsBlockTests(APITestCase):
         entry("TRANSPORT", "300", timezone.localdate())
         data = self._report()
         m = data["materials"]
-        self.assertEqual(
-            Decimal(str(row_by_code(m, "MATERIAL_PURCHASE")["amount"])), Decimal("5000")
-        )
+        purchase = row_by_code(m, "MATERIAL_PURCHASE")
+        self.assertEqual(Decimal(str(purchase["amount"])), Decimal("5000"))
+        # Закуп — справочная строка: видна, но не в прибыли.
+        self.assertFalse(purchase["in_profit"])
         self.assertEqual(Decimal(str(row_by_code(m, "TRANSPORT")["amount"])), Decimal("300"))
-        # 5000 + 300 = 5300; склад (10 × 200) в итог не входит.
-        self.assertEqual(Decimal(str(m["total"])), Decimal("5300"))
+        # В итоге блока — транспорт и себестоимость проданного (продаж нет: 0).
+        self.assertEqual(Decimal(str(m["total"])), Decimal("300"))
+        # Закуп ушёл в оборот — секцию «Склад».
+        self.assertEqual(Decimal(str(data["stock"]["purchases"])), Decimal("5000"))
 
     def test_block_has_no_stock_balances(self):
         """Остатков в блоке нет ни строками, ни в ответе API."""
@@ -595,8 +620,8 @@ class MaterialsBlockTests(APITestCase):
         debt = row_by_code(m, "MATERIAL_DEBT")
         self.assertEqual(Decimal(str(debt["amount"])), Decimal("700"))
         self.assertFalse(debt["in_profit"])
-        # Только закуп: долг не добавлен.
-        self.assertEqual(Decimal(str(m["total"])), Decimal("5000"))
+        # Ни долг, ни закуп в итог не идут: продаж нет — итог блока ноль.
+        self.assertEqual(Decimal(str(m["total"])), Decimal("0"))
 
     def test_transport_counted_once_not_in_variable(self):
         entry("TRANSPORT", "300", timezone.localdate())
@@ -619,22 +644,23 @@ class MaterialsBlockTests(APITestCase):
             amount=Decimal("500"), spent_at=timezone.localdate(),
         )
         m = self._report()["materials"]
-        # 5000 + 500 = 5500
-        self.assertEqual(Decimal(str(m["total"])), Decimal("5500"))
+        # Свой вид в итоге есть, закуп — нет: 500.
+        self.assertEqual(Decimal(str(m["total"])), Decimal("500"))
 
     def test_investments_shown_but_not_in_profit(self):
         entry("EQUIPMENT", "9000", timezone.localdate())
         entry("CUTTER", "100", timezone.localdate())
         data = self._report()
-        # Оборудование видно в блоке…
+        # Оборудование — в СВОЁМ блоке «Инвестиции», не в переменных…
         self.assertEqual(
-            Decimal(str(row_by_code(data["variable"], "EQUIPMENT")["amount"])), Decimal("9000")
+            Decimal(str(row_by_code(data["investments"], "EQUIPMENT")["amount"])), Decimal("9000")
         )
-        # …но в подытог переменных (который идёт в прибыль) не входит.
         self.assertEqual(Decimal(str(data["variable"]["total"])), Decimal("100"))
         self.assertEqual(Decimal(str(data["investments"]["total"])), Decimal("9000"))
+        # …и в «Расходы» не входит: там переменные (100), и всё.
+        self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("100"))
 
-    def test_profit_uses_materials_block_not_cogs(self):
+    def test_profit_uses_cogs_not_purchases(self):
         data = self._report()
         expected = (
             Decimal(str(data["materials"]["total"]))
@@ -646,8 +672,13 @@ class MaterialsBlockTests(APITestCase):
             Decimal(str(data["profit"])),
             Decimal(str(data["revenue"])) - expected,
         )
-        # Себестоимость осталась справочной цифрой и в расходы не добавлена.
-        self.assertIn("cogs", data)
+        # Закупа (5000 из setUp) в расходах нет — он оборот.
+        self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("0"))
+        # Материалы в прибыли — это себестоимость проданного + ручные строки.
+        self.assertEqual(
+            Decimal(str(data["materials"]["total"])),
+            Decimal(str(data["materials"]["cogs"])) + Decimal(str(data["materials"]["spend"])),
+        )
 
     def test_full_stock_with_no_purchases_gives_zero_not_minus(self):
         """Полный склад и ни одной траты за месяц — расход материала ноль.
@@ -919,9 +950,8 @@ class AutoComputedInputsTests(APITestCase):
     def test_month_opening_does_not_touch_the_materials_block(self):
         """Остаток на начало месяца из складского листа на расход не влияет.
 
-        Он и раньше был единственным, ради чего блоку нужен был склад; после
-        отказа от остатков (просьба заказчика, 2026-08-14) расход материала —
-        это только траты периода.
+        Расход материала — себестоимость проданного плюс ручные строки блока;
+        закуп (3000) — оборот и виден в секции «Склад», а не в итоге блока.
         """
         from warehouse.models import MaterialMonthOpening
 
@@ -929,6 +959,11 @@ class AutoComputedInputsTests(APITestCase):
             material=self.material, year=2026, month=6, quantity=Decimal("8")
         )
         self._supply(qty=100, price=30, day=date(2026, 6, 5))  # 3000
-        m = self._report()["materials"]
-        self.assertEqual(Decimal(str(m["total"])), Decimal("3000"))
+        data = self._report()
+        m = data["materials"]
+        self.assertEqual(Decimal(str(m["total"])), Decimal("0"))
+        self.assertEqual(
+            Decimal(str(row_by_code(m, "MATERIAL_PURCHASE")["amount"])), Decimal("3000")
+        )
+        self.assertEqual(Decimal(str(data["stock"]["purchases"])), Decimal("3000"))
         self.assertNotIn("stock_start", m)

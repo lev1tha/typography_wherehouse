@@ -1,9 +1,9 @@
-"""График «По дням» видит закуп по приходам на склад — как плитки месяца.
+"""Закуп по приходам — оборот, а не расход: ни в плитках, ни в графике.
 
-Плитки считают строку «Закуп материала» сами, по приходам (документ накладной
-и одиночные поступления), плюс ручные записи. График по дням брал только
-записи трат, и пока закуп не вписан руками, на одном экране стояли две
-«Прибыли»: −14 265 сверху и +3 735 в графике. Один источник — одна цифра.
+Решение заказчика (2026-08-24): деньги, переложенные из кассы в склад, месяц
+убыточным не делают — материал лежит на полке. Прибыль они уменьшают по мере
+продажи, строкой «Себестоимость проданного». График по дням обязан жить по
+тому же правилу, что плитки, иначе на одном экране две «Прибыли».
 """
 from datetime import date
 from decimal import Decimal
@@ -56,17 +56,16 @@ class DailyPurchasesTests(APITestCase):
         self.assertEqual(r.status_code, 200, r.data)
         return r.data
 
-    def test_supply_document_lands_on_its_day_and_matches_tiles(self):
+    def test_supply_document_is_working_capital_not_expense(self):
         self.assertEqual(self._supply().status_code, 201)
         daily = self._daily()
-        row = next(x for x in daily["rows"] if x["date"] == self.doc_day.isoformat())
-        self.assertEqual(Decimal(str(row["variable"])), Decimal("18000"))
-        # Ни в какой другой день закуп не попал.
-        others = sum(Decimal(str(x["variable"])) for x in daily["rows"] if x["date"] != self.doc_day.isoformat())
-        self.assertEqual(others, Decimal("0"))
-        # Главное: график и плитки — одни и те же расходы и одна прибыль.
+        # Закупа нет НИ В ОДНОМ дне: день прихода накладной — не провальный день.
+        total_daily = sum(Decimal(str(x["variable"])) for x in daily["rows"])
+        self.assertEqual(total_daily, Decimal("0"))
+        # Плитки согласны: расходов нет, закуп — в секции «Склад» (оборот).
         report = self._report()
-        self.assertEqual(Decimal(str(report["total_expenses"])), Decimal("18000"))
+        self.assertEqual(Decimal(str(report["total_expenses"])), Decimal("0"))
+        self.assertEqual(Decimal(str(report["stock"]["purchases"])), Decimal("18000"))
         self.assertEqual(Decimal(str(daily["totals"]["variable"])), Decimal(str(report["total_expenses"])))
         self.assertEqual(Decimal(str(daily["totals"]["profit"])), Decimal(str(report["profit"])))
 

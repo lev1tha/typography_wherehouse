@@ -259,6 +259,9 @@ class InventoryLogSerializer(serializers.ModelSerializer):
             "material_name",
             "material_unit",
             "quantity_changed",
+            # Метры у рулона — чем операцию мерили на самом деле. Пусто у
+            # листа и штучного: там мера и есть та, что в quantity_changed.
+            "metres_changed",
             "actual_price",
             "reason",
             "receipt",

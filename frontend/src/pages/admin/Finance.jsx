@@ -384,9 +384,19 @@ export default function Finance() {
       {report.materials && (
         <div className="card" style={{ marginTop: 16 }}>
           {blockHead(t("finance.blockMaterials"))}
-          {/* Остатков на начало и на конец в блоке больше нет (просьба
-              заказчика): расход материала — это то, что за месяц потратили,
-              закуп плюс транспорт. */}
+          {/* Расход материала в прибыли — СЕБЕСТОИМОСТЬ ПРОДАННОГО (решение
+              заказчика, 2026-08-24), а не закуп: деньги, переложенные в склад,
+              месяц убыточным не делают. Строка закупа осталась справочной —
+              видна здесь, а считается в карточке «Склад (оборот)» ниже. */}
+          <div className="crow">
+            <span className="k">
+              {t("finance.cogsRow")}
+              <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>
+                {t("finance.cogsRowHint")}
+              </div>
+            </span>
+            <span>{som(report.materials.cogs)}</span>
+          </div>
           {materialRow("MATERIAL_PURCHASE")}
           {materialRow("TRANSPORT")}
           {materialRow("MATERIAL_DEBT")}
@@ -396,6 +406,25 @@ export default function Finance() {
             {t("finance.materialsHint")}
           </p>
           {totalRow(t("finance.totalMaterials"), report.materials.total)}
+        </div>
+      )}
+
+      {/* Склад (оборот): деньги, вложенные в материал. Не расход — материал
+          лежит на полке и уменьшает прибыль по мере продажи. Именно из-за
+          того, что закуп считался расходом, первый ввод каталога показывал
+          «−500 000 прибыли», хотя не продано ещё ничего. */}
+      {report.stock && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <h3>{t("finance.stockTitle")}</h3>
+          <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.stockHint")}</p>
+          <div className="crow">
+            <span className="k">{t("finance.stockPurchases")}</span>
+            <span>{som(report.stock.purchases)}</span>
+          </div>
+          <div className="crow">
+            <span className="k">{t("finance.stockValueNow")}</span>
+            <span>{som(report.stock.value_now)}</span>
+          </div>
         </div>
       )}
 
@@ -411,12 +440,24 @@ export default function Finance() {
         {(report.variable.rows || []).map(kindRow)}
         {addKindButton("VARIABLE")}
         {totalRow(t("finance.totalVariable"), report.variable.total)}
-        {report.investments && Number(report.investments.total) > 0 && (
-          <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
-            {t("finance.investmentsHint")} — {som(report.investments.total)}
-          </p>
-        )}
       </div>
+
+      {/* Инвестиции — свой блок (решение заказчика, 2026-08-24): станок и
+          ремонт цеха не входят ни в прибыль, ни в «Расходы». Своя графа со
+          своим итогом — видно, сколько вложено, и цифра ничего не портит. */}
+      {report.investments && (
+        <div className="card" style={{ marginTop: 16 }}>
+          {blockHead(t("finance.blockInvestment"))}
+          <p className="muted" style={{ fontSize: 13, marginTop: -4 }}>
+            {t("finance.investmentBlockHint")}
+          </p>
+          {/* Бейдж «не в прибыли» тут не нужен: весь блок такой, о чём и
+              сказано в подписи. Флаг гасим только для отображения. */}
+          {(report.investments.rows || []).map((r) => kindRow({ ...r, in_profit: true }))}
+          {addKindButton("INVESTMENT")}
+          {totalRow(t("finance.totalInvestment"), report.investments.total)}
+        </div>
+      )}
 
       {/* Себестоимость проданного и маржа: сколько осталось от выручки после
           закупочной стоимости материала, ещё до аренды и прочих расходов. */}

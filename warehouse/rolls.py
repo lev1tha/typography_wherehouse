@@ -96,6 +96,9 @@ def receive_lot(
         type=InventoryLog.Type.SUPPLY,
         material=locked,
         quantity_changed=Decimal(area),
+        # Рулон пришёл длиной — её и записываем: в журнале он должен читаться
+        # метрами, как его меряют в цехе.
+        metres_changed=roll.metres_initial if roll.form == Roll.Form.ROLL else None,
         actual_price=roll.cost_per_sqm,
         # Площадь до двух знаков и сумма с разрядами: «(14.88 кв.м), 12 000 сом»
         # читается, «(14.8840 кв.м), 12000.00 сом» — нет.
@@ -136,11 +139,17 @@ def consume_area(
     log_type: str | None = None,
     receipt=None,
     happened_at=None,
+    preferred_roll=None,
 ) -> Decimal:
     """Consume `area` кв.м from a roll-material, FIFO across rolls.
 
     Returns the total cost of goods consumed. Raises InsufficientStock if there
     is not enough remaining area across all rolls.
+
+    ``preferred_roll`` — партия, с которой мастер решил начать; она встаёт
+    первой, остальные идут за ней обычным порядком, и если в выбранной не
+    хватило, добираем со следующей. Так это и происходит в цехе: пачка
+    кончается посреди заказа. Не указана — обычный FIFO, старейшая первой.
 
     Запись в журнал делается по ``log_type`` — как в ``apply_stock_change``.
     Раньше она стояла под непустым ``reason``, и продажа рулонного материала
@@ -169,6 +178,11 @@ def consume_area(
         .filter(material=locked, remaining_area__gt=0)
         .order_by("received_at")
     )
+    if preferred_roll is not None:
+        pk = getattr(preferred_roll, "pk", preferred_roll)
+        chosen = next((r for r in rolls if r.pk == pk), None)
+        if chosen is not None:
+            rolls = [chosen] + [r for r in rolls if r.pk != chosen.pk]
 
     for roll in rolls:
         if remaining <= 0:
@@ -300,6 +314,9 @@ def consume_metres(
             type=log_type,
             material=locked,
             quantity_changed=-area_taken,
+            # Метры считаны по ширине КАЖДОЙ партии, из которой резали, —
+            # постфактум из площади их уже не восстановить.
+            metres_changed=-(need - remaining),
             reason=reason,
             receipt=receipt,
             created_by=user,
@@ -380,6 +397,9 @@ def restore_metres(
             type=log_type,
             material=locked,
             quantity_changed=area_added,
+            # Вернули столько же метров, сколько отрезали, — в журнале возврат
+            # рулона тоже читается метрами.
+            metres_changed=add,
             reason=reason,
             receipt=receipt,
             created_by=user,
@@ -444,6 +464,7 @@ def stocktake_roll(roll: Roll, counted_metres: Decimal, *, reason_code, note="",
             type=InventoryLog.Type.ADJUSTMENT,
             material=material,
             quantity_changed=delta_area,
+            metres_changed=(counted - expected),
             reason=(
                 f"Промер рулона {locked_roll.code or f'№{locked_roll.pk}'}: "
                 f"было {expected} м, намерено {counted} м "
@@ -495,6 +516,7 @@ def write_off_roll(roll: Roll, metres: Decimal, *, reason: str = "", user=None) 
         type=InventoryLog.Type.WRITE_OFF,
         material=material,
         quantity_changed=-area,
+        metres_changed=-metres,
         reason=f"{reason} Рулон {label}: {metres.normalize():f} м".strip(),
         created_by=user,
     )
@@ -515,6 +537,7 @@ def restore_area(
     log_type: str | None = None,
     receipt=None,
     happened_at=None,
+    preferred_roll=None,
 ) -> None:
     """Return `area` кв.м back to stock (refund).
 
@@ -524,6 +547,10 @@ def restore_area(
     initial area. Any surplus that no lot can hold (e.g. restoring more than was
     consumed) lands on the newest roll so material.quantity stays consistent with
     the sum of roll remainders.
+
+    ``preferred_roll`` — партия, из которой продавали: она пополняется первой.
+    Иначе возврат лёг бы в старейшую пачку, а не в ту, из которой лист брали,
+    и остаток каждой партии перестал бы отвечать тому, что лежит на полке.
     """
     locked = Material.objects.select_for_update().get(pk=material.pk)
     add = Decimal(area)
@@ -532,6 +559,11 @@ def restore_area(
     rolls = list(
         Roll.objects.select_for_update().filter(material=locked).order_by("received_at")
     )
+    if preferred_roll is not None:
+        pk = getattr(preferred_roll, "pk", preferred_roll)
+        chosen = next((r for r in rolls if r.pk == pk), None)
+        if chosen is not None:
+            rolls = [chosen] + [r for r in rolls if r.pk != chosen.pk]
     remaining = add
     for roll in rolls:
         if remaining <= 0:

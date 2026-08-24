@@ -9,8 +9,13 @@ import { useUI } from "./UIProvider.jsx";
 // как остаток на начало + Σ(строки с «уменьшает прибыль») − остаток на конец,
 // поэтому лишняя строка формулу не ломает: со снятым флагом она останется
 // справочной, как «долг материала».
-const USER_BLOCKS = ["MATERIALS", "FIXED", "VARIABLE"];
-const BLOCK_LABEL = { MATERIALS: "blockMaterials", FIXED: "blockFixed", VARIABLE: "blockVariable" };
+const USER_BLOCKS = ["MATERIALS", "FIXED", "VARIABLE", "INVESTMENT"];
+const BLOCK_LABEL = {
+  MATERIALS: "blockMaterials",
+  FIXED: "blockFixed",
+  VARIABLE: "blockVariable",
+  INVESTMENT: "blockInvestment",
+};
 
 // Создание и правка вида расхода — строки финотчёта. Раньше виды были зашиты в
 // код, и завести «Рекламу» или «Налоги» без правки исходников было нельзя.
@@ -101,18 +106,24 @@ export default function ExpenseKindFormModal({ kind, block, onClose, onSaved }) 
         )}
       </div>
 
-      <div className="field">
-        <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            checked={form.in_profit}
-            onChange={(e) => setForm({ ...form, in_profit: e.target.checked })}
-            style={{ width: 18, height: 18 }}
-          />
-          {t("kinds.inProfit")}
-        </label>
-        <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("kinds.inProfitHint")}</p>
-      </div>
+      {/* У инвестиций галочки нет: блок в прибыль не входит по определению,
+          сервер снимает флаг сам — форма не должна обещать выбор, которого нет. */}
+      {form.block !== "INVESTMENT" ? (
+        <div className="field">
+          <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={form.in_profit}
+              onChange={(e) => setForm({ ...form, in_profit: e.target.checked })}
+              style={{ width: 18, height: 18 }}
+            />
+            {t("kinds.inProfit")}
+          </label>
+          <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("kinds.inProfitHint")}</p>
+        </div>
+      ) : (
+        <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("kinds.investmentHint")}</p>
+      )}
     </Modal>
   );
 }

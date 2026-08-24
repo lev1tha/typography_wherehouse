@@ -48,7 +48,8 @@ def _area(width, length) -> Decimal:
     return _qty(Decimal(str(width)) * Decimal(str(length)))
 
 
-def _deduct(material, qty, user, reason="", receipt=None, happened_at=None) -> Decimal:
+def _deduct(material, qty, user, reason="", receipt=None, happened_at=None,
+            preferred_roll=None) -> Decimal:
     """Deduct stock, routing roll-materials through FIFO area consumption.
 
     Возвращает СЕБЕСТОИМОСТЬ списанного — её мы фиксируем на строке чека, чтобы
@@ -67,6 +68,7 @@ def _deduct(material, qty, user, reason="", receipt=None, happened_at=None) -> D
         return consume_area(
             material, qty, user=user, reason=reason,
             log_type=InventoryLog.Type.SALE, receipt=receipt, happened_at=happened_at,
+            preferred_roll=preferred_roll,
         )
     apply_stock_change(
         material, -qty, user=user, reason=reason,
@@ -76,7 +78,8 @@ def _deduct(material, qty, user, reason="", receipt=None, happened_at=None) -> D
     return qty * (material.purchase_price or Decimal("0"))
 
 
-def _restore(material, qty, user, reason="", receipt=None, happened_at=None) -> Decimal:
+def _restore(material, qty, user, reason="", receipt=None, happened_at=None,
+             preferred_roll=None) -> Decimal:
     """Вернуть материал на склад при возврате заказа.
 
     Тип ВОЗВРАТ, а не «корректировка»: корректировка — это инвентаризация, а
@@ -88,6 +91,7 @@ def _restore(material, qty, user, reason="", receipt=None, happened_at=None) -> 
         restore_area(
             material, qty, user=user, reason=reason,
             log_type=InventoryLog.Type.RETURN, receipt=receipt,
+            preferred_roll=preferred_roll,
         )
     else:
         apply_stock_change(
@@ -254,6 +258,24 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> Non
         qty = item.quantity
         if item.sale_mode == TransactionItem.SaleMode.PIECE and item.material.piece_area:
             qty = item.material.piece_area * item.quantity
+        # У ЛИСТА партии тоже есть, и мастер может взять лист из конкретной
+        # пачки: партия строки чека уходит в списание первой, остальные — за
+        # ней обычным FIFO. Партию запоминаем в строке (как у рулона), иначе
+        # возврат вернул бы листы не в ту пачку, а себестоимость строки
+        # перестала бы сходиться с той, по которой продали.
+        if item.material.is_roll_material:
+            if not restore and item.roll_id is None:
+                from warehouse.models import Roll
+
+                first = (
+                    Roll.objects.filter(material=item.material, remaining_area__gt=0)
+                    .order_by("received_at")
+                    .first()
+                )
+                if first is not None:
+                    item.roll = first
+                    item.save(update_fields=["roll"])
+            extra = {**extra, "preferred_roll": item.roll_id}
         cost = fn(
             item.material, qty, user,
             reason=_reason(receipt, restore=restore), receipt=receipt, **extra,
@@ -349,9 +371,11 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
             receipt=receipt, type=item_type, material=material,
             quantity=qty, price_per_item=price,
             sale_mode=mode,
-            # Рулон запоминаем на строке: из него списывали, в него же вернём
-            # при возврате, и по нему в чеке пишется «списано с рулона №7».
-            roll=entry.get("roll") if mode == TransactionItem.SaleMode.METER else None,
+            # Партию запоминаем на строке: из неё списывали, в неё же вернём
+            # при возврате, и по ней в чеке пишется «списано с рулона №7».
+            # Не только у рулона: у листа пачки тоже разные по цене закупки, и
+            # мастер может взять лист из той, что стоит ближе.
+            roll=entry.get("roll") if material.is_roll_material else None,
             # Ширина изделия — чтобы посчитать обрезок. Полную ширину списали и
             # деньги за неё взяли; сколько из этого ушло в мусор, без неё не
             # узнать никак.
@@ -409,6 +433,8 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
                 receipt=receipt, type=TransactionItem.Type.MATERIAL, material=material,
                 quantity=area, price_per_item=_priced("material_price", material.sqm_price),
                 sale_mode=TransactionItem.SaleMode.SQM,
+                # Режут из ВЫБРАННОЙ пачки — как и при обычной продаже листа.
+                roll=entry.get("roll") if material.is_roll_material else None,
             ))
         return items
 

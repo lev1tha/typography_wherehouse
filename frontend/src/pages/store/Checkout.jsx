@@ -559,6 +559,17 @@ export default function Checkout() {
       ? ` · ${Math.round(Number(r.cost_per_pm))} ${t("checkout.perPieceShort", { unit: t("unit.METER") })}`
       : "");
 
+  // Партия ЛИСТА: остаток считаем в листах — пачками их и считают на стеллаже.
+  const sheetLotLabel = (r, m) => {
+    const area = Number(m?.piece_area) || 0;
+    const left = area ? `${(Number(r.remaining_area) / area).toFixed(2)} ${t("warehouse.unitSheetShort")}`
+                      : `${r.remaining_area} ${t("unit.SQM")}`;
+    const cost = isAdmin && r.cost_per_sqm != null && area
+      ? ` · ${Math.round(Number(r.cost_per_sqm) * area)} ${t("checkout.perPieceShort", { unit: t("warehouse.unitSheet") })}`
+      : "";
+    return `${r.code || `№${r.id}`} · ${left}${cost}`;
+  };
+
   const wholeUnitOf = (m) =>
     (m?.intake_form || "SHEET") === "ROLL" ? t("warehouse.unitRoll") : t("warehouse.unitSheet");
 
@@ -577,6 +588,8 @@ export default function Checkout() {
         const edited = !!cut.priceEdited;
         addOrInc({
           key: `M${m.id}-PIECE`, kind: "material", id: m.id, name: m.name,
+          lotId: cutSheetLotPicked ? cutSheetLotPicked.id : null,
+          lotName: cutSheetLotPicked ? (cutSheetLotPicked.code || `№${cutSheetLotPicked.id}`) : "",
           price: edited ? Number(cut.piecePrice || 0) : Number(m.piece_price || 0),
           mode: "PIECE",
           priceEdited: edited,
@@ -645,6 +658,8 @@ export default function Checkout() {
           key: `MA${m.id}-${prev.length}`, kind: "material-area",
           id: m.id, name: m.name, price: matPrice, priceEdited: !!cut.matPriceEdited,
           width: w, length: l, area, qty: 1,
+          lotId: cutSheetLotPicked ? cutSheetLotPicked.id : null,
+          lotName: cutSheetLotPicked ? (cutSheetLotPicked.code || `№${cutSheetLotPicked.id}`) : "",
         }]);
         setCut(null);
         return;
@@ -653,6 +668,8 @@ export default function Checkout() {
       setCart((prev) => [...prev, {
         key: `C${m.id}-${prev.length}`, kind: "cutting",
         serviceId: areaSvc.id, name: areaSvc.name || "Резка",
+        lotId: cutSheetLotPicked ? cutSheetLotPicked.id : null,
+        lotName: cutSheetLotPicked ? (cutSheetLotPicked.code || `№${cutSheetLotPicked.id}`) : "",
         materialId: m.id, materialName: m.name, materialPrice: matPrice,
         materialPriceEdited: !!cut.matPriceEdited,
         rate: Number(cut.cutRate || 0), rateEdited: !!cut.cutRateEdited,
@@ -714,6 +731,9 @@ export default function Checkout() {
       if (l.kind === "material")
         return {
           type: "MATERIAL", material: l.id, quantity: l.qty, mode: l.mode || "SQM",
+          // Пачка листа уходит тем же полем, что и рулон: на сервере это одна
+          // и та же партия (Roll), просто формы разные.
+          ...(l.lotId ? { roll: l.lotId } : {}),
           // Цену шлём, только если админ правил её руками. Иначе сервер сам
           // решит, розничная тут цена или оптовая (опт включается от количества).
           ...(isAdmin && l.priceEdited ? { material_price: l.price } : {}),
@@ -734,12 +754,14 @@ export default function Checkout() {
       if (l.kind === "material-area")
         return {
           type: "MATERIAL", material: l.id, quantity: l.area, mode: "SQM",
+          ...(l.lotId ? { roll: l.lotId } : {}),
           ...(isAdmin && l.priceEdited ? { material_price: l.price } : {}),
         };
       if (l.kind === "cutting")
         return {
           type: "SERVICE", service: l.serviceId, material: l.materialId,
           width: l.width, length: l.length, running_meters: l.runM,
+          ...(l.lotId ? { roll: l.lotId } : {}),
           ...(isAdmin && l.materialPriceEdited ? { material_price: l.materialPrice } : {}),
           ...(isAdmin && l.rateEdited ? { cut_rate: l.rate } : {}),
         };
@@ -824,6 +846,16 @@ export default function Checkout() {
         .filter((r) => r.material === cutRollMat.id && r.form === "ROLL" && Number(r.metres_remaining) > 0)
         .sort((a, b) => new Date(a.received_at) - new Date(b.received_at))
     : [];
+  // Партии ЛИСТА того же материала: пачки с разной ценой закупки. Выбор нужен
+  // по той же причине, что и у рулона, — мастер берёт лист из конкретной пачки,
+  // а не из той, которую первой посчитал бы FIFO.
+  const cutSheetLots = isMatModal && cutRollMat && !cutRoll && cutRollMat.is_roll_material
+    ? rolls
+        .filter((r) => r.material === cutRollMat.id && r.form === "SHEET" && Number(r.remaining_area) > 0)
+        .sort((a, b) => new Date(a.received_at) - new Date(b.received_at))
+    : [];
+  const cutSheetLotPicked =
+    cutSheetLots.find((r) => String(r.id) === String(cut?.lotId)) || cutSheetLots[0] || null;
   // По умолчанию — первый в очереди: початый дожигают раньше целого.
   const cutRollPicked =
     cutRolls.find((r) => String(r.id) === String(cut?.rollId)) || cutRolls[0] || null;
@@ -863,7 +895,13 @@ export default function Checkout() {
   // Editable (overridable) prices — default to the material's catalogue values.
   const cutMatSqm = cut ? Number(cut.matPrice || 0) : 0;
   // Работа реза считается у услуги «внутренний монтаж» и в режимах реза.
-  const cutWorkOn = cut?.service ? true : isMatModal && CUT_MODES.includes(cut.mode);
+  // Услуги резки в каталоге нет вовсе (её ещё не завели) — работа в чек НЕ
+  // попадёт: строку резки не из чего собрать. Раньше касса всё равно считала
+  // её в окне, а в чек клала один материал: показывала 472, добавляла 427.
+  // Считаем работу только тогда, когда она правда будет продана.
+  const cutWorkOn = cut?.service
+    ? true
+    : isMatModal && CUT_MODES.includes(cut.mode) && !!cuttingService;
   // Ставка: у монтажа — своя за кв.м, у реза — ставка станка/материала.
   const cutWorkRate = cut?.service
     ? (cut.service.uses_running_meter ? Number(cut.cutRate || 0) : Number(cut.service.rate_flat))
@@ -889,7 +927,15 @@ export default function Checkout() {
   // «Весь лист» тоже можно резать: работа = пог.м × ставка реза материала.
   const cutPieceRunM = Number(cut?.running_meters) || 0;
   const cutPieceRate = Number(cut?.cutRate || 0);
-  const cutPieceWork = cutPiece && cut?.pieceCut ? cutPieceRate * cutPieceRunM : 0;
+  const cutPieceWork =
+    cutPiece && cut?.pieceCut && cuttingService ? cutPieceRate * cutPieceRunM : 0;
+  // Резать просят, а услуги нет — единственный честный ответ «так продать
+  // нельзя»: молча снять работу значит подарить её, а показать в окне и не
+  // положить в чек — соврать. Оба варианта уже были.
+  const cutNoService =
+    isMatModal &&
+    !cuttingService &&
+    (CUT_MODES.includes(cut?.mode) || !!cut?.pieceCut || !!cut?.rollCut);
   // Длина реза, которую мастер должен ввести САМ и ещё не ввёл. У фигурного
   // реза длину кривой знает только он, и пустое поле раньше молча уезжало в чек
   // нулём: материал посчитан, а самая дорогая работа цеха — бесплатно. Пока
@@ -1338,6 +1384,8 @@ export default function Checkout() {
               <button
                 onClick={addCutting}
                 disabled={
+                  // Резку просят, а услуги нет — добавлять нечего.
+                  cutNoService ||
                   cutRoll
                     // Рулон: нужна длина, цена за метр, чтобы её хватило на
                     // складе и чтобы ширина изделия не превышала рулон.
@@ -1396,6 +1444,40 @@ export default function Checkout() {
                 })}
               </p>
             </>
+          )}
+
+          {/* Услуги резки в каталоге нет — говорим об этом здесь, а не после
+              оформления: без неё работа мастера в заказ не попадёт вовсе. */}
+          {cutNoService && (
+            <p style={{ color: "var(--danger)", fontSize: 13, margin: "0 0 10px" }}>
+              {isAdmin ? t("checkout.noCutServiceAdmin") : t("checkout.noCutService")}
+            </p>
+          )}
+
+          {/* Из какой ПАЧКИ берём лист — та же развилка, что «из какого рулона
+              режем». Пачки отличаются ценой закупки, и себестоимость строки
+              считается по выбранной. Одна пачка — просто подпись: выбирать не
+              из чего, а знать, чем сейчас торгуют, полезно. */}
+          {cutSheetLots.length > 0 && (
+            <div className="field">
+              <label>{t("checkout.sheetLotPick")}</label>
+              {cutSheetLots.length === 1 ? (
+                <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                  {sheetLotLabel(cutSheetLots[0], cutRollMat)}
+                </p>
+              ) : (
+                <select
+                  value={cutSheetLotPicked ? cutSheetLotPicked.id : ""}
+                  onChange={(e) => setCut({ ...cut, lotId: e.target.value })}
+                >
+                  {cutSheetLots.map((r, i) => (
+                    <option key={r.id} value={r.id}>
+                      {sheetLotLabel(r, cutRollMat)}{i === 0 ? ` — ${t("checkout.rollFirst")}` : ""}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
           )}
 
           {/* Станок: ЧПУ или лазер. Показываем, только когда станков правда

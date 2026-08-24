@@ -108,7 +108,14 @@ export default function StockJournal() {
       key: "quantity_changed",
       label: t("journal.change"),
       render: (r) => {
-        const value = Number(r.quantity_changed);
+        // У рулона показываем МЕТРЫ: в цехе отрезали 5 пог.м, а склад считает
+        // площадь, и «−8 кв.м» отвечает не на тот вопрос. Метры записаны в
+        // самой операции (ширина партии известна только там), поэтому берём их,
+        // а не делим площадь на ширину из карточки — партии бывают разной
+        // ширины, и деление врало бы.
+        const metres = r.metres_changed == null ? null : Number(r.metres_changed);
+        const value = metres ?? Number(r.quantity_changed);
+        const unit = metres == null ? t(`unit.${r.material_unit}`) : t("unit.METER");
         return (
           <strong
             style={{
@@ -117,7 +124,7 @@ export default function StockJournal() {
             }}
           >
             {value > 0 ? "+" : ""}
-            {value.toFixed(2)} {t(`unit.${r.material_unit}`)}
+            {value.toFixed(2)} {unit}
           </strong>
         );
       },

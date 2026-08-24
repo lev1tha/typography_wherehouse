@@ -67,13 +67,14 @@ class ExpenseFeedTests(APITestCase):
         self.assertEqual(row["name"], "Накладная НК-001")
         self.assertEqual(Decimal(str(row["amount"])), Decimal("18000"))
         self.assertEqual(str(row["spent_at"]), self.day.isoformat())
-        # Итог ленты — то же число, что «Расходы» в отчёте: заказчик их сверяет.
+        # Итог ленты — ВСЕ деньги, ушедшие за период, включая закуп. С
+        # «Расходами» отчёта он теперь расходится сознательно: закуп — оборот
+        # (в «Расходах» его нет), а лента отвечает на «куда ушли деньги».
+        self.assertEqual(Decimal(str(data["total"])), Decimal("18000"))
         report = self.client.get(
             self.REPORT, {"year": self.today.year, "month": self.today.month}
         ).data
-        self.assertEqual(
-            Decimal(str(data["total"])), Decimal(str(report["total_expenses"]))
-        )
+        self.assertEqual(Decimal(str(report["total_expenses"])), Decimal("0"))
 
     def test_single_intake_shows_up_too(self):
         """Приход кнопкой на строке материала — мимо накладной, но это трата."""

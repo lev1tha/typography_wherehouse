@@ -191,7 +191,8 @@
     "metresLeft": "{{n}} running m left",
     "rollsBreakdown": "{{n}} rolls",
     "allForms": "All forms",
-    "purchasePerPm": "Purchase, som/running m"
+    "purchasePerPm": "Purchase, som/running m",
+    "unitSheetShort": "sheets"
   },
   "unit": {
     "SQM": "sqm",
@@ -449,7 +450,10 @@
     "priceMissing": "The material has no price in the catalogue — it cannot be sold for 0. Ask an administrator to set the price.",
     "priceMissingAdmin": "The material has no price in the catalogue. Set it on the material card — or type it here (0 = gift).",
     "priceMissingShort": "no price set",
-    "rollCutAdd": "Contour cutting (per running metre)"
+    "rollCutAdd": "Contour cutting (per running metre)",
+    "sheetLotPick": "Which pack to take from",
+    "noCutService": "There is no cutting service in the catalogue — the master's work will not reach the order. Ask an administrator to add one under “Prices & services”.",
+    "noCutServiceAdmin": "There is no cutting service in the catalogue — the work will not reach the order, only the material will. Add one with “New service” under “Prices & services” (kind “Cutting”, machine, rate som/running m)."
   },
   "receipts": {
     "title": "Receipts",
@@ -657,7 +661,7 @@
     "stockEnd": "Closing stock",
     "transport": "Transport costs",
     "materialDebt": "Material debt",
-    "totalMaterials": "Total material purchase",
+    "totalMaterials": "Materials total",
     "fixed": "Fixed costs",
     "rent": "Workshop rent",
     "utilities": "Utilities",
@@ -685,7 +689,7 @@
     "tabReport": "Report",
     "tabPurchases": "Purchases",
     "dailyTitle": "By day",
-    "dailyHint": "Rent, utilities and internet are whole-month costs, so they're split evenly across each day here. A day shows red if revenue didn't cover that day's purchases plus its share of these costs.",
+    "dailyHint": "Rent, utilities and internet are month-long costs, so they are split evenly across the days. A day is in the red if its revenue did not cover the cost of materials sold, that day's spending and its share of these costs.",
     "dailyHoverHint": "Hover a bar to see the day",
     "m1": "January",
     "m2": "February",
@@ -713,7 +717,7 @@
     "cogsTitle": "Cost of goods & margin",
     "cogs": "Cost of goods sold",
     "grossMargin": "Gross margin",
-    "cogsHint": "For cross-checking: purchase cost of material consumed by orders in the period (taken from lots at sale time). Profit uses the Materials block total.",
+    "cogsHint": "Purchase cost of the material that went into orders this period (per-lot, fixed at sale time). The same figure is the expense in the “Materials” block.",
     "colReceived": "Received",
     "totalRow": "TOTAL",
     "blockMaterials": "Materials",
@@ -722,7 +726,7 @@
     "materialPurchase": "Material purchase",
     "transportRow": "Transport costs",
     "notInProfit": "not in profit",
-    "materialsHint": "Total = opening stock + purchases + transport − closing stock. Opening stock and purchases are computed by the system — from stock and from intakes; a hand-entered value wins. Material debt is shown for reference and is not in the total.",
+    "materialsHint": "Total = cost of materials sold + transport + your own lines. Purchases are shown for reference: that is working capital, counted in the “Stock” card below. Material debt is informational.",
     "materialsNeedSetup": "Material cost is off for now: closing stock exceeds opening plus purchases. Fill in the balances under Stock → “Monthly stock”, or enter the opening stock by hand.",
     "allTime": "All time",
     "thisMonth": "This month",
@@ -754,12 +758,21 @@
     "revenuePaid": "Paid",
     "revenueDebt": "On credit",
     "revenueTitle": "Revenue for the period",
-    "dailySubtitle": "Profit for each day of the month: the day's revenue minus that day's purchases and its share of the fixed costs. Green is a day in the black, red in the red.",
+    "dailySubtitle": "Each day's profit: the day's revenue minus the cost of materials sold, that day's spending and the daily share of fixed costs. Green — the day is in the black, red — in the red.",
     "revenueHint": "Revenue is the sum of all orders of the period by order date, except cancelled ones. Whether an order is paid does not change revenue: unpaid orders are shown separately as “on credit”.",
     "offcuts": "Of that, into offcuts",
     "masterShare": "Master's pay at {{pct}} % of cutting work: {{sum}}.",
     "masterShareHint": "For reference — not part of profit; salaries are entered as records.",
-    "cuttingUserShare": "{{pm}} r.m of cut · work {{sum}} · master's share {{share}}"
+    "cuttingUserShare": "{{pm}} r.m of cut · work {{sum}} · master's share {{share}}",
+    "blockInvestment": "Investments",
+    "totalInvestment": "Investments total",
+    "investmentBlockHint": "Machines, repairs, workshop upgrades. Not part of profit or “Expenses” — these are investments, not monthly spending.",
+    "cogsRow": "Cost of materials sold",
+    "cogsRowHint": "Computed automatically per lot at the moment of sale",
+    "stockTitle": "Stock (working capital)",
+    "stockHint": "Money invested in material. Not an expense: the material sits on the shelf and reduces profit as it is sold — via “Cost of materials sold”.",
+    "stockPurchases": "Material purchased this period",
+    "stockValueNow": "Material in stock now"
   },
   "expenses": {
     "amount": "Amount",
@@ -860,7 +873,8 @@
     "empty": "No spending in this period.",
     "periodHint": "Spending from {{from}} to {{to}}",
     "allTimeHint": "All spending, all time",
-    "notInProfitHint": "does not reduce profit"
+    "notInProfitHint": "does not reduce profit",
+    "investmentHint": "Investments are not part of profit or “Expenses” — they have their own section."
   },
   "stockSheet": {
     "title": "Stock by material",
