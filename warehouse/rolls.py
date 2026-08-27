@@ -528,6 +528,7 @@ def write_off_roll(roll: Roll, metres: Decimal, *, reason: str = "", user=None) 
     return area
 
 
+@transaction.atomic
 def restore_area(
     material: Material,
     area: Decimal,
