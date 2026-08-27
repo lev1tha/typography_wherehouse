@@ -205,22 +205,90 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 ---
 
-## Резервные копии
+## HSTS (только https)
 
-База живёт в docker-томе `pgdata`. Дамп:
+`Strict-Transport-Security` говорит браузеру: этот домен открывать только по
+https — и он перестаёт ходить по http вообще, даже по прямой ссылке. Заголовок
+ставит **nginx**, а не Django: фронтенд и статику nginx отдаёт с диска, мимо
+приложения, и на самый частый ответ (`index.html`) заголовок Django просто не
+попал бы.
+
+Конфиг уже в репозитории; на сервере его надо разложить и перечитать:
 
 ```bash
-    docker compose -f docker-compose.prod.yml exec -T db \
-        pg_dump -U chpu chpu | gzip > /root/backup-$(date +%F).sql.gz
+sudo cp /opt/chpucenter/deploy/nginx/chpucenter.com /etc/nginx/sites-available/chpucenter.com
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Автоматизировать (ежедневно в 3 ночи, хранить 14 дней) — `crontab -e`:
+Проверить, что заголовок отдаётся — и на странице, и на статике:
+
+```bash
+curl -sI https://chpucenter.com | grep -i strict
+curl -sI https://chpucenter.com/assets/ | grep -i strict
+```
+
+Ожидаемо в обоих случаях: `strict-transport-security: max-age=31536000; includeSubDomains`.
+
+Две тонкости, из-за которых HSTS обычно оказывается наполовину нерабочим:
+
+- `always` — без него nginx не ставит заголовок на ответы 3xx/4xx/5xx;
+- свой `add_header` внутри `location` **отменяет** наследование заголовков
+  сервера, поэтому HSTS повторён в `/static/` и `/assets/`. Забыть там — значит
+  раздавать половину сайта без политики и не заметить.
+
+`preload` не включаем: попадание в preload-список браузеров необратимо на
+месяцы, а поддомены (например, отдельный для бота) могут понадобиться.
+
+Если сайт стоит за Cloudflare в режиме proxy, тот же заголовок можно включить и
+в его панели (SSL/TLS → Edge Certificates → HSTS) — тогда он появится даже на
+ответах, которые Cloudflare отдаёт из кэша сам.
+
+---
+
+## Резервные копии
+
+База живёт в docker-томе `pgdata`, фото — на диске хоста (`/srv/chpucenter/media`).
+Копии снимает `deploy/backup.sh`: он забирает и базу, и фото.
+
+Установка (один раз):
+
+```bash
+sudo install -m 755 /opt/chpucenter/deploy/backup.sh /usr/local/bin/chpu-backup
+sudo mkdir -p /root/backups
+sudo /usr/local/bin/chpu-backup        # проверить руками, что копия снимается
+```
+
+Затем в `sudo crontab -e` — ежедневно в 3 ночи, хранить 14 дней:
 
 ```
-0 3 * * * cd /opt/chpucenter && docker compose -f docker-compose.prod.yml exec -T db pg_dump -U chpu chpu | gzip > /root/backups/db-$(date +\%F).sql.gz && find /root/backups -name 'db-*.sql.gz' -mtime +14 -delete
+0 3 * * * /usr/local/bin/chpu-backup >> /var/log/chpu-backup.log 2>&1
 ```
 
-Не забыть про загруженные фото — `/srv/chpucenter/media`.
+> **Почему скриптом, а не строкой в cron.** Однострочник
+> `pg_dump … | gzip > db-$(date +%F).sql.gz && find … -delete` ломается ровно
+> тогда, когда он нужнее всего: если `pg_dump` упал (контейнер не поднят, база
+> занята), `gzip` всё равно создаёт файл — пустой, — и следующая команда честно
+> удаляет старые копии. Через две недели таких ночей копий не остаётся вовсе, и
+> узнают об этом в тот день, когда данные понадобились. Скрипт пишет дамп во
+> временный файл, проверяет, что он не пуст, и только после этого запускает
+> ротацию; при любой ошибке выходит с ненулевым кодом и **не трогает старое**.
+
+Настройки — переменными окружения (`KEEP_DAYS`, `BACKUP_DIR`, `MEDIA_DIR`,
+`MIN_DUMP_BYTES`), значения по умолчанию в шапке скрипта.
+
+**Копию нужно хотя бы раз восстановить.** Непроверенная копия — это не копия:
+проверять её в день аварии поздно. Раз в пару месяцев:
+
+```bash
+gunzip -c /root/backups/db-2026-08-27.sql.gz | \
+  docker compose -f docker-compose.prod.yml exec -T db psql -U chpu -d postgres \
+    -c 'DROP DATABASE IF EXISTS chpu_check' -c 'CREATE DATABASE chpu_check'
+```
+
+и залить дамп в `chpu_check`, а не в боевую базу.
+
+**Копии лежат на том же сервере.** Диск умирает вместе с ними — раз в неделю
+забирайте архив к себе: `scp root@167.233.170.216:/root/backups/db-*.sql.gz .`
 
 Восстановление:
 
@@ -253,5 +321,6 @@ gunzip -c backup-2026-07-31.sql.gz | \
 - **Telegram-уведомления молчат**, пока не заполнены токены. После заполнения
   бот клиентов поднимается отдельно:
   `docker compose -f docker-compose.prod.yml --profile bot up -d`
-- **HSTS выключен** (`SECURE_HSTS_SECONDS=0`). Включать (`31536000`) после
-  того, как убедились, что https стабилен — браузеры запомнят это на год.
+- **HSTS включён в nginx** (`deploy/nginx/chpucenter.com`), см. раздел ниже.
+  В Django он остаётся выключенным (`SECURE_HSTS_SECONDS=0`) НАМЕРЕННО: иначе
+  на ответы `/api/` заголовок уйдёт дважды — от приложения и от nginx.

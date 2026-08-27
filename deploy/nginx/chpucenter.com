@@ -38,6 +38,8 @@ server {
     ssl_certificate     /etc/ssl/chpucenter/fullchain.pem;
     ssl_certificate_key /etc/ssl/chpucenter/privkey.pem;
 
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
     return 301 https://chpucenter.com$request_uri;
 }
 
@@ -55,6 +57,16 @@ server {
 
     # Фото материалов заливают с телефона — дефолтного лимита в 1 МБ мало.
     client_max_body_size 25m;
+
+    # HSTS: браузер запоминает «этот домен только по https» и больше не ходит
+    # по http вообще — даже по прямой ссылке. Ставится ЗДЕСЬ, а не только в
+    # Django: фронтенд и статику nginx отдаёт с диска, мимо приложения, и на
+    # самый частый ответ (index.html) заголовок Django просто не попадает.
+    #
+    # `always` обязателен — иначе заголовка нет на ответах 3xx/4xx/5xx.
+    # Год и includeSubDomains — то, что требует preload-список; сам preload не
+    # включаем: он необратим на месяцы, а поддомены могут понадобиться.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
     access_log /var/log/nginx/chpucenter.access.log;
     error_log  /var/log/nginx/chpucenter.error.log;
@@ -83,11 +95,15 @@ server {
     }
 
     # --- Файлы, которые Django отдавать не должен ---
+    # Свой add_header в location ОТМЕНЯЕТ наследование заголовков сервера —
+    # поэтому HSTS повторяется в каждой такой локации. Забыть здесь значит
+    # раздавать половину сайта без политики и не заметить этого.
     location /static/ {
         alias /srv/chpucenter/static/;
         access_log off;
         expires 30d;
         add_header Cache-Control "public, immutable";
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     }
 
     location /media/ {
@@ -106,5 +122,6 @@ server {
         access_log off;
         expires 1y;
         add_header Cache-Control "public, immutable";
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     }
 }
