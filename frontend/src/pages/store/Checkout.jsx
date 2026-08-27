@@ -151,10 +151,20 @@ function cartFromReceipt(items, materials, services, t) {
       // Работа реза без материала по площади (режут лист целиком или чужой
       // материал): только пог.м × ставка.
       if (s.uses_running_meter) {
+        // Из чего резали. У строки работы своего материала НЕТ (в базе она его
+        // не хранит — и не должна: отчёты относят резку к товарной строке
+        // чека), поэтому берём материал соседней строки этого же чека — так же,
+        // как это делает отчёт по материалам. Без этого подпись при повторе
+        // обрывалась: «Ставка реза 45 × 4.9 пог.м · » и пустота после точки.
+        const own = it.material ? matById[String(it.material)] : null;
+        const sibling = items.find(
+          (x) => x.type === "MATERIAL" && x.material && matById[String(x.material)]
+        );
+        const cutMat = own || (sibling ? matById[String(sibling.material)] : null);
         lines.push({
           key: `CW${s.id}-${i}`, kind: "cut-work",
           serviceId: s.id, name: s.name,
-          materialId: it.material || null, materialName: "",
+          materialId: it.material || null, materialName: cutMat?.name || "",
           rate: priceOrLast(s.rate_per_pm, it), rateEdited: fromLast(s.rate_per_pm, it), runM: qty, qty: 1,
         });
         return;
@@ -1065,7 +1075,10 @@ export default function Checkout() {
                     </div>
                   ) : l.kind === "cut-work" ? (
                     <div className="cl-sub">
-                      {t("checkout.rateWork")} {l.rate} × {l.runM} {t("checkout.pmShort")} · {l.materialName}
+                      {/* Материал в подписи есть не всегда (режут чужой) —
+                          тогда и точку-разделитель не рисуем. */}
+                      {t("checkout.rateWork")} {l.rate} × {l.runM} {t("checkout.pmShort")}
+                      {l.materialName ? ` · ${l.materialName}` : ""}
                       {!(Number(l.runM) > 0) && (
                         <span className="badge warn" style={{ marginLeft: 6 }}>{t("checkout.runMetersMissingLine")}</span>
                       )}

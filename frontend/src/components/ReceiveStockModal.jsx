@@ -20,7 +20,12 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
   // переключать вкладку.
   const [form, setForm] = useState(roll ? material.intake_form || "SHEET" : "QTY");
   const [v, setV] = useState({
-    width: "", length: "", height: "", sheet_count: "",
+    // Размер листа подставляется ИЗ КАРТОЧКИ — как ширина у рулона. Он у
+    // материала постоянный (акрил 1,22 × 2,44), и вбивать его заново на каждой
+    // поставке — лишняя работа и лишний повод ошибиться: партия с чужим
+    // размером молча уводит площадь и себестоимость.
+    width: material.sheet_width ?? "", height: material.sheet_height ?? "",
+    length: "", sheet_count: "",
     // unit_cost — цена за ОДИН лист (рулон), как её называет поставщик и как она
     // записана в накладной. Себестоимость партии считается из неё умножением:
     // раньше это умножение заказчик делал в уме до того, как открыть окно.
@@ -31,7 +36,10 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
     declared_length: "", cost_per_pm: "",
     // Дата поступления: заказчик вносит поставки задним числом, когда доходят
     // руки — в его Excel даты идут вразнобой. По ней же выстраивается FIFO.
-    received_on: new Date().toISOString().slice(0, 10),
+    // Местная дата, не UTC: `toISOString()` в Бишкеке после полуночи отдаёт
+    // ВЧЕРАШНИЙ день, и партия вставала в очередь FIFO не туда, а закуп падал
+    // в предыдущие сутки. Тот же приём, что в кассе (`todayStr`).
+    received_on: new Date().toLocaleDateString("sv-SE"),
   });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setV((s) => ({ ...s, [k]: e.target.value }));

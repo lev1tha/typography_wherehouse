@@ -249,6 +249,21 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     # целиком и с возвратом материала. И то и другое — админ.
     EDITABLE_FIELDS = {"title", "client", "order_date"}
 
+    def create(self, request, *args, **kwargs):
+        """Голый POST /receipts/ закрыт: чек продаётся только через /checkout/.
+
+        ModelViewSet давал create бесплатно, и API принимал чек БЕЗ ПОЗИЦИЙ, но
+        с «принятой» суммой: itemы у сериализатора read-only, а amount_paid —
+        нет. Итог 0, оплачено 4000 — заказ-призрак с номером, который портит
+        выручку «оплачено» и нумерацию. Интерфейс так не ходит, но токен
+        админа позволял. Checkout же считает итог сам, списывает склад и пишет
+        кассу — мимо него чекам появляться неоткуда.
+        """
+        return Response(
+            {"detail": "Заказ оформляется только кассой: POST /api/sales/receipts/checkout/."},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
+
     def update(self, request, *args, **kwargs):
         return self._edit_meta(request, partial=kwargs.get("partial", False))
 

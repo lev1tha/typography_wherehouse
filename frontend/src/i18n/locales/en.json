@@ -1009,7 +1009,9 @@
     "lineNeedsMaterial": "pick a material",
     "lineNeedsCost": "enter the line total",
     "linesIncomplete": "Rows {{rows}} are incomplete — the document is not posted until every started row has a material and a total (0 if free).",
-    "widthDiffers": "The material card says roll width {{width}} m — check it is not a typo"
+    "widthDiffers": "The material card says roll width {{width}} m — check it is not a typo",
+    "moveDate": "Move",
+    "dateMoved": "Date moved — lots and stock entries followed it"
   },
   "cash": {
     "title": "Cash and bank",

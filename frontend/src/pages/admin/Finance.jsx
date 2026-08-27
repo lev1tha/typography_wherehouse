@@ -323,15 +323,18 @@ export default function Finance() {
   };
   const otherMaterialRows = materialRows.filter((r) => !MATERIAL_BUILTINS.includes(r.code));
 
-  const addKindButton = (block) => (
-    <button
-      className="ghost"
-      style={{ marginTop: 6, color: "var(--accent-strong)", fontWeight: 600 }}
-      onClick={() => setEditKind({ block })}
-    >
-      + {t("kinds.add")}
-    </button>
-  );
+  // Бухгалтеру кнопку не показываем вовсе: вид расхода заводит админ, а
+  // кнопка, которая гарантированно ответит 403, хуже отсутствующей.
+  const addKindButton = (block) =>
+    readOnly ? null : (
+      <button
+        className="ghost"
+        style={{ marginTop: 6, color: "var(--accent-strong)", fontWeight: 600 }}
+        onClick={() => setEditKind({ block })}
+      >
+        + {t("kinds.add")}
+      </button>
+    );
 
   return (
     <>

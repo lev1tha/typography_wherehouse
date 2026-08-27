@@ -11,7 +11,8 @@ const qty = (v) => Number(v || 0).toLocaleString("ru-RU", { maximumFractionDigit
 // Толщина без хвостовых нулей и с запятой — «2,5 мм», как её пишет заказчик.
 const trim = (v) => String(v).replace(/\.?0+$/, "").replace(".", ",");
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const num = (n) => Math.round(Number(n) || 0).toLocaleString("ru-RU");
+const som = (n) => `${num(n)} сом`;
 
 export default function Warehouse() {
   const { t } = useTranslation();
@@ -140,9 +141,15 @@ export default function Warehouse() {
                 {/* Суммы — как везде в системе: «1 500 сом», а не сырые
                     «1500.00» из API. Один и тот же материал показывался
                     складовщику с копейками, а в кассе и каталоге — без. */}
+                {/* Единица приписывается К ЧИСЛУ, а не к «N сом»: `som()` уже
+                    добавляет слово, и вместе с шаблоном «сом/кв.м» выходило
+                    «0 сом сом/кв.м». Рулон при этом считается метрами — цену за
+                    квадрат ему показывать не о чем, он так не продаётся. */}
                 <span>
-                  {m.is_roll_material
-                    ? `${som(m.sqm_price)} ${t("warehouse.perUnitShort", { unit: t("unit.SQM") })}`
+                  {m.sells_by_metre
+                    ? `${num(m.price_per_pm)} ${t("warehouse.perMetreShort")}`
+                    : m.is_roll_material
+                    ? `${num(m.sqm_price)} ${t("warehouse.perUnitShort", { unit: t("unit.SQM") })}`
                     : som(m.price_per_unit)}
                 </span>
               </div>

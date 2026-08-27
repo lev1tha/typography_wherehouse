@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 
 import api from "../../api/api.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
+import AddToOrderModal from "../../components/AddToOrderModal.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import EditReceiptModal from "../../components/EditReceiptModal.jsx";
 import RefundModal from "../../components/RefundModal.jsx";
@@ -41,6 +42,7 @@ function ReceiptsTab() {
   const [paying, setPaying] = useState(null);
   const [givingChange, setGivingChange] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [adding, setAdding] = useState(null);
   const [refunding, setRefunding] = useState(null);
   // Заказ, по которому открыты печатные формы (чек / накладная / счёт).
   const [printing, setPrinting] = useState(null);
@@ -103,6 +105,10 @@ function ReceiptsTab() {
     !["REFUNDED", "CANCELLED"].includes(r.payment_status) &&
     r.status !== "CANCELLED" &&
     (r.items || []).some((i) => !i.is_returned);
+  // Дозаказ — то же правило, что у складовщика: нельзя в возвращённый и
+  // отменённый. Выданный отклоняет сервер («оформите новый»), и это правильное
+  // место: правило одно, а экранов с дозаказом теперь два.
+  const canAdd = (r) => r.payment_status !== "REFUNDED" && r.status !== "CANCELLED";
 
   async function removeReceipt(r, e) {
     e?.stopPropagation();
@@ -344,6 +350,17 @@ function ReceiptsTab() {
               >
                 <Icon name="pencil" size={14} /> {t("receipts.edit")}
               </button>
+              {/* Дозаказ. У складовщика он был с самого начала, у админа —
+                  нет: «клиент попросил ещё одну деталь к тому же заказу»
+                  админу приходилось делать чужими руками или новым чеком. */}
+              {canAdd(r) && (
+                <button
+                  className="secondary row-btn"
+                  onClick={(e) => { e.stopPropagation(); setAdding(r); }}
+                >
+                  <Icon name="plus" size={14} /> {t("receipts.addBtn")}
+                </button>
+              )}
               {/* Возврат — целиком или отдельными позициями. Раньше у админа
                   этой кнопки не было вовсе: возврат жил только в складском
                   разделе, и только целым чеком. */}
@@ -479,6 +496,14 @@ function ReceiptsTab() {
           receipt={editing}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); load(); }}
+        />
+      )}
+
+      {adding && (
+        <AddToOrderModal
+          receiptId={adding.id}
+          onClose={() => setAdding(null)}
+          onAdded={() => { setAdding(null); load(); }}
         />
       )}
 

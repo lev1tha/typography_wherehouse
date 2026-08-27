@@ -708,7 +708,14 @@ export default function Catalog({ embedded = false }) {
         <ReceiveStockModal
           material={receiving}
           onClose={() => setReceiving(null)}
-          onDone={load}
+          // Партии перечитываем вместе с материалами: без этого строка склада
+          // сравнивала НОВЫЙ остаток со СТАРЫМ списком партий и показывала
+          // несуществующий «хвост сверх партий» с кнопкой «Свести с рулонами».
+          // Ложная тревога уходила сама после F5 — то есть выглядела случайной.
+          onDone={() => {
+            loadRolls();
+            load();
+          }}
         />
       )}
 
@@ -716,7 +723,10 @@ export default function Catalog({ embedded = false }) {
         <AdjustStockModal
           material={adjusting}
           onClose={() => setAdjusting(null)}
-          onDone={load}
+          onDone={() => {
+            loadRolls();
+            load();
+          }}
         />
       )}
 

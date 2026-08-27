@@ -44,6 +44,12 @@ export default function Supplies({ embedded = false }) {
   const [suppliers, setSuppliers] = useState([]);
   const [materials, setMaterials] = useState([]);
   const [open, setOpen] = useState(null);   // просмотр накладной
+  // Перенос даты накладной. Механика на сервере была с 18.08 (партии и журнал
+  // едут за датой), но добраться до неё можно было только запросом в API:
+  // в окне документа дата стояла текстом. Поставка, внесённая не тем днём, —
+  // случай частый, а «отмените и заведите заново» стоит дороже.
+  const [movingDate, setMovingDate] = useState("");
+  const [movingBusy, setMovingBusy] = useState(false);
   const [draft, setDraft] = useState(null); // новая накладная
   const [printing, setPrinting] = useState(null); // печатная форма накладной
   const [busy, setBusy] = useState(false);
@@ -176,6 +182,22 @@ export default function Supplies({ embedded = false }) {
     }
   }
 
+  async function moveDate() {
+    if (!open || !movingDate || movingDate === open.received_on) return;
+    setMovingBusy(true);
+    try {
+      const { data } = await api.patch(`/warehouse/supplies/${open.id}/`, { received_on: movingDate });
+      setOpen(data);
+      setMovingDate("");
+      toast(t("supplies.dateMoved"));
+      load();
+    } catch (e) {
+      toast(apiError(e, t("common.error")), "error");
+    } finally {
+      setMovingBusy(false);
+    }
+  }
+
   async function cancelSupply(row) {
     if (!(await confirm(t("supplies.cancelConfirm", { n: row.number || `#${row.id}` })))) return;
     try {
@@ -292,7 +314,26 @@ export default function Supplies({ embedded = false }) {
             </>
           }
         >
-          <div className="crow"><span className="k">{t("supplies.date")}</span><span>{new Date(open.received_on).toLocaleDateString("ru-RU")}</span></div>
+          <div className="crow">
+            <span className="k">{t("supplies.date")}</span>
+            {isAdmin ? (
+              <span className="row" style={{ gap: 6, margin: 0, alignItems: "center" }}>
+                <input
+                  type="date"
+                  value={movingDate || open.received_on}
+                  onChange={(e) => setMovingDate(e.target.value)}
+                  style={{ width: 150 }}
+                />
+                {movingDate && movingDate !== open.received_on && (
+                  <button className="secondary row-btn" onClick={moveDate} disabled={movingBusy}>
+                    {t("supplies.moveDate")}
+                  </button>
+                )}
+              </span>
+            ) : (
+              <span>{new Date(open.received_on).toLocaleDateString("ru-RU")}</span>
+            )}
+          </div>
           <div className="crow"><span className="k">{t("supplies.supplier")}</span><span>{open.supplier_name || "—"}</span></div>
           <div className="crow"><span className="k">{t("supplies.total")}</span><strong>{som(open.total_cost)}</strong></div>
           {open.stated_total != null && (
