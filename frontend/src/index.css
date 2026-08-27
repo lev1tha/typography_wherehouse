@@ -1527,6 +1527,14 @@ label {
   border-radius: var(--r-lg);
   padding: 12px 14px;
   background: var(--surface);
+  /* Плитка товара — это <button>, а глобальное правило для кнопок ставит
+     `color: var(--on-primary)`: цвет текста ПО ОРАНЖЕВОЙ заливке. Фон здесь
+     переопределён на --surface, а цвет забыли — и в тёмной теме название
+     материала оказывалось #2a1c12 на фоне #201f1d, то есть невидимым. В
+     светлой это сходило с рук случайно: тот же тёмно-коричневый на белом
+     читается. Название и цена цвет не задавали и наследовали сломанный;
+     «Остаток» и категория задавали свой — потому и были видны. */
+  color: var(--ink);
   cursor: pointer;
   text-align: left;
   min-height: 104px;
@@ -1618,10 +1626,14 @@ label {
 .pos-product.is-low .p-stock {
   color: var(--amber-ink);
 }
-/* Out-of-stock card is not sellable — visibly inert. */
+/* Out-of-stock card is not sellable — visibly inert.
+   Гасим ЗАМЕТНО, но читаемо: 0.72 на тёмной теме доедало и без того слабый
+   контраст, и карточка «нет в наличии» переставала читаться совсем — а знать,
+   ЧЕГО именно нет, нужно ровно в этот момент. Неактивность и так видна по
+   курсору, красной рамке и бейджу. */
 .pos-product:disabled {
   cursor: not-allowed;
-  opacity: 0.72;
+  opacity: 0.85;
   box-shadow: none;
 }
 .pos-product:disabled:active {
@@ -1679,10 +1691,35 @@ label {
   background: var(--canvas);
 }
 
+/* Количество в строке чека — ПОЛЕ, а не подпись: 200 штук саморезов плюсом не
+   доклацаешь. Раздеваем его до вида обычного числа между кнопками, иначе
+   глобальные стили input'а (рамка, высота 38px, свой фон) разваливают степпер.
+   Ширины хватает на четырёхзначное количество. */
 .stepper .qty {
-  min-width: 30px;
+  min-width: 52px;
+  width: 52px;
+  height: auto;
+  padding: 0 2px;
+  border: none;
+  background: transparent;
+  color: var(--ink);
   text-align: center;
   font-weight: 700;
+  font-size: 15px;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+/* Стрелочки браузера рядом с кнопками «−/+» — третий способ менять то же
+   число, и он же съедает половину поля. */
+.stepper .qty::-webkit-outer-spin-button,
+.stepper .qty::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.stepper .qty:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+  border-radius: var(--r-sm);
 }
 
 .pos-total {

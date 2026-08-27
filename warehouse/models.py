@@ -603,22 +603,42 @@ class InventoryLog(models.Model):
 
 
 class Roll(models.Model):
-    """A received lot of an area-material, measured in кв.м.
+    """A received lot of a material.
 
-    A lot arrives either as a roll (width × length) or as a stack of sheets
-    (width × height × count). Either way `initial_area` (кв.м) is the source of
-    truth for stock. Each lot keeps its own cost and markup, so retail price per
-    кв.м is computed per lot. Sales consume area FIFO across lots.
+    A lot arrives either as a roll (width × length), a stack of sheets
+    (width × height × count) or a plain count of pieces. Either way
+    `initial_area` is the source of truth for stock. Each lot keeps its own
+    cost, so cost per unit is computed per lot. Sales consume FIFO across lots.
+
+    ШТУЧНАЯ партия (`Form.PIECE`, 2026-08-27, просьба владельца) хранится тем же
+    полем: у неё `initial_area` — это КОЛИЧЕСТВО ШТУК, а `cost_per_sqm` —
+    себестоимость одной штуки. Заводить рядом второй, почти такой же механизм
+    ради другой единицы значило бы удвоить всё, что вокруг партий уже написано:
+    FIFO, возврат в ту же партию, себестоимость снимком, журнал. Единица тут и
+    так живёт в материале (`Material.unit`), а не в партии.
     """
 
     class Form(models.TextChoices):
         ROLL = "ROLL", _("Рулон")
         SHEET = "SHEET", _("Лист")
+        PIECE = "PIECE", _("Штучный")
 
     material = models.ForeignKey(
         Material, on_delete=models.PROTECT, related_name="rolls"
     )
     code = models.CharField(_("маркировка партии"), max_length=120, blank=True)
+    # Откуда приехала ИМЕННО ЭТА партия. У материала производство тоже есть, но
+    # оно про «откуда возим обычно», а партии одного акрила приходят из разных
+    # мест — китайская и бишкекская лежат на складе одновременно и стоят
+    # по-разному. Раньше это писали словом в маркировку («бишкек»), то есть
+    # свободным текстом: ни отфильтровать, ни свести.
+    #
+    # Пустое значение — законное: старые партии его не знают, а у поставки
+    # «со склада» производства может не быть вовсе.
+    production = models.ForeignKey(
+        "ProductionSite", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="rolls", verbose_name=_("производство"),
+    )
     form = models.CharField(max_length=10, choices=Form.choices, default=Form.ROLL)
     # Raw dimensions as entered (for display / audit); area is the source of truth.
     width = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
@@ -707,7 +727,17 @@ class Roll(models.Model):
         def n(v):
             return "?" if v is None else format(Decimal(v).normalize(), "f")
 
+        if self.form == self.Form.PIECE:
+            # У штучной партии размеров нет вовсе — только количество. Единицу
+            # берём у материала: это могут быть штуки, килограммы или литры.
+            return f"{n(self.initial_area)} {self.material.get_unit_display()}"
         if self.form == self.Form.SHEET:
+            # Партию могли принять просто площадью — счёт поставщика был в
+            # квадратах, размеров никто не называл. Тогда «Лист ?×?» врёт
+            # вопросительными знаками там, где всё известно: площадь и есть
+            # то, что приняли.
+            if not self.width or not self.height:
+                return f"{n(self.initial_area)} кв.м"
             dims = f"{n(self.width)}×{n(self.height)}"
             return f"Лист {dims}" + (f" ×{n(self.sheet_count)}" if self.sheet_count else "")
         return f"Рулон {n(self.width)}×{n(self.length)}м"

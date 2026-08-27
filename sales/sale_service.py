@@ -16,6 +16,7 @@ from warehouse.models import InventoryLog, Material
 from warehouse.rolls import (
     consume_area,
     consume_metres,
+    has_lots,
     restore_area,
     restore_metres,
 )
@@ -63,7 +64,11 @@ def _deduct(material, qty, user, reason="", receipt=None, happened_at=None,
     """
     if qty <= 0:
         return Decimal("0")
-    if material.is_roll_material:
+    # ПАРТИИ теперь бывают и у штучного материала (2026-08-27): приход заводит
+    # партию со своей ценой за штуку, касса даёт выбрать, из какой берём.
+    # Материал БЕЗ партий (заведён до этой правки, остаток поднимали руками)
+    # работает как раньше — иначе старый запас нельзя было бы продать вовсе.
+    if material.is_roll_material or has_lots(material):
         # FIFO знает, из каких именно партий ушёл материал и почём.
         return consume_area(
             material, qty, user=user, reason=reason,
@@ -74,7 +79,7 @@ def _deduct(material, qty, user, reason="", receipt=None, happened_at=None,
         material, -qty, user=user, reason=reason,
         log_type=InventoryLog.Type.SALE, receipt=receipt, happened_at=happened_at,
     )
-    # У штучных материалов партий нет — берём текущую закупочную цену.
+    # Партий нет — берём текущую закупочную цену из карточки.
     return qty * (material.purchase_price or Decimal("0"))
 
 
@@ -87,7 +92,10 @@ def _restore(material, qty, user, reason="", receipt=None, happened_at=None,
     """
     if qty <= 0:
         return Decimal("0")
-    if material.is_roll_material:
+    # Возврат идёт тем же путём, что и списание: в партию, из которой брали.
+    # Иначе штучный возврат поднял бы только число остатка, и партии стали бы
+    # знать меньше материала, чем лежит на полке.
+    if material.is_roll_material or has_lots(material):
         restore_area(
             material, qty, user=user, reason=reason,
             log_type=InventoryLog.Type.RETURN, receipt=receipt,
@@ -263,7 +271,12 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> Non
         # ней обычным FIFO. Партию запоминаем в строке (как у рулона), иначе
         # возврат вернул бы листы не в ту пачку, а себестоимость строки
         # перестала бы сходиться с той, по которой продали.
-        if item.material.is_roll_material:
+        # Со штучным материалом ровно та же история (2026-08-27): у него теперь
+        # тоже бывают партии по разной цене, и выбранная в кассе обязана дойти
+        # до списания. Раньше проверка стояла по флагу «площадной», и партия
+        # штучной строки молча терялась: FIFO брал старейшую, а себестоимость
+        # выходила не та, что показали при продаже.
+        if item.material.is_roll_material or has_lots(item.material):
             if not restore and item.roll_id is None:
                 from warehouse.models import Roll
 
@@ -374,8 +387,11 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
             # Партию запоминаем на строке: из неё списывали, в неё же вернём
             # при возврате, и по ней в чеке пишется «списано с рулона №7».
             # Не только у рулона: у листа пачки тоже разные по цене закупки, и
-            # мастер может взять лист из той, что стоит ближе.
-            roll=entry.get("roll") if material.is_roll_material else None,
+            # мастер может взять лист из той, что стоит ближе. С 2026-08-27 —
+            # и у ШТУЧНОГО: у него тоже бывают поставки по разной цене, и
+            # выбранная в кассе партия должна дойти до списания, иначе FIFO
+            # молча возьмёт старейшую и себестоимость будет не та.
+            roll=entry.get("roll"),
             # Ширина изделия — чтобы посчитать обрезок. Полную ширину списали и
             # деньги за неё взяли; сколько из этого ушло в мусор, без неё не
             # узнать никак.

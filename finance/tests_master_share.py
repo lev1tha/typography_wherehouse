@@ -53,6 +53,11 @@ class MasterShareTests(APITestCase):
         self.assertEqual(Decimal(str(by_user["ms_admin"]["amount"])), Decimal("1000"))
         self.assertEqual(Decimal(str(by_user["ms_admin"]["master_share"])), Decimal("40"))
         self.assertEqual(Decimal(str(by_user["ms_store"]["master_share"])), Decimal("20"))
-        # Прибыль от этого не меняется: доля справочная.
+        # Прибыль от этого не меняется: доля справочная. Формула с 2026-08-27 —
+        # ВАЛОВАЯ прибыль минус расходы: себестоимость проданного вычитается
+        # сверху, а в расходах её нет (это оборот, а не трата).
         report = self.client.get("/api/finance/report/").data
-        self.assertEqual(Decimal(str(report["profit"])), Decimal(str(report["revenue"])) - Decimal(str(report["total_expenses"])))
+        self.assertEqual(
+            Decimal(str(report["profit"])),
+            Decimal(str(report["gross_margin"])) - Decimal(str(report["total_expenses"])),
+        )

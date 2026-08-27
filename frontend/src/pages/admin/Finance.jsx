@@ -369,6 +369,20 @@ export default function Finance() {
           value={som(report.revenue)}
           sub={`${t("finance.revenuePaid")}: ${som(report.revenue_paid)} · ${t("finance.revenueDebt")}: ${som(report.client_debt)}`}
         />
+        {/* Прибыль ДО расходов — между выручкой и расходами, потому что там она
+            и стоит в расчёте: выручка − себестоимость = она, дальше минус
+            аренда и зарплаты = итоговая прибыль. Раньше эта цифра была только
+            внизу, в карточке «Себестоимость и маржа», и наверху выручка
+            читалась как заработок. */}
+        <Stat
+          label={t("finance.profitBeforeExpenses")}
+          value={som(report.gross_margin)}
+          color={Number(report.gross_margin) >= 0 ? "ok" : "danger"}
+          sub={t("finance.profitBeforeExpensesFormula", {
+            revenue: som(report.revenue),
+            cogs: som(report.cogs),
+          })}
+        />
         <Stat label={t("finance.expenses")} value={som(report.total_expenses)} />
         <Stat
           label={t("finance.profit")}

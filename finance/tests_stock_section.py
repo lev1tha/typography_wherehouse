@@ -56,9 +56,11 @@ class StockSectionTests(APITestCase):
             amount_paid=Decimal("0"),
         )
         data = self._report()
-        # Продали 2 кв.м: себестоимость 400 ушла в расходы…
+        # Продали 2 кв.м: себестоимость 400 ушла со склада в оборот. В РАСХОДАХ
+        # её нет (решение владельца, 2026-08-27) — она вычитается сверху, при
+        # переходе от выручки к валовой прибыли.
         self.assertEqual(Decimal(str(data["materials"]["cogs"])), Decimal("400"))
-        self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("400"))
+        self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("0"))
         # …и ровно на неё похудел склад: 3500 − 400 = 3100.
         self.assertEqual(Decimal(str(data["stock"]["value_now"])), Decimal("3100.00"))
         # Прибыль = выручка (2 × 1000) − себестоимость.

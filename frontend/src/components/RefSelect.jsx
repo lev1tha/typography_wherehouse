@@ -15,6 +15,8 @@ import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
+import Icon from "./Icon.jsx";
+import RefManager from "./RefManager.jsx";
 import { useUI } from "./UIProvider.jsx";
 
 const ADD = "__add__";
@@ -25,6 +27,9 @@ export default function RefSelect({
   onChange,
   endpoint,
   onCreated,
+  // Показывать ли карандаш «править справочник» рядом с выпадашкой.
+  manageable = false,
+  manageTitle,
   ...rest
 }) {
   const { t } = useTranslation();
@@ -32,6 +37,7 @@ export default function RefSelect({
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [managing, setManaging] = useState(false);
 
   const current = value == null ? "" : String(value);
   // Значение, которого нет в справочнике (вставили название из буфера) —
@@ -95,7 +101,7 @@ export default function RefSelect({
     );
   }
 
-  return (
+  const select = (
     <select
       {...rest}
       value={current}
@@ -108,5 +114,37 @@ export default function RefSelect({
       {unknown && <option value={current}>{current} — ?</option>}
       <option value={ADD}>{t("warehouse.addRef")}</option>
     </select>
+  );
+
+  // Карандаш — только там, где его просили (карточка материала). В ячейке
+  // массового ввода он бы занял половину узкой колонки, а правят справочник
+  // не во время вставки полусотни строк из Excel.
+  if (!manageable) return select;
+
+  return (
+    <>
+      <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
+        <div className="grow">{select}</div>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => setManaging(true)}
+          title={t("warehouse.refManage")}
+          aria-label={t("warehouse.refManage")}
+          style={{ flex: "0 0 auto", width: 38, padding: 0 }}
+        >
+          <Icon name="pencil" size={15} />
+        </button>
+      </div>
+      {managing && (
+        <RefManager
+          title={manageTitle || t("warehouse.refManage")}
+          endpoint={endpoint}
+          options={options}
+          onDone={onCreated}
+          onClose={() => setManaging(false)}
+        />
+      )}
+    </>
   );
 }

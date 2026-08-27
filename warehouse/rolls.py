@@ -28,6 +28,10 @@ def compute_area(form: str, *, width=None, length=None, height=None, sheet_count
     не было (148.84 укладывается в два знака), поэтому на глаз проблема ловилась
     через раз.
     """
+    if form == Roll.Form.PIECE:
+        # Штучная партия: «площадь» — это количество штук (кг, литров), считать
+        # из размеров нечего. Единица живёт в материале, не в партии.
+        return Decimal(sheet_count).quantize(Decimal("0.0001"))
     if form == Roll.Form.SHEET:
         return (Decimal(width) * Decimal(height) * Decimal(sheet_count)).quantize(Decimal("0.0001"))
     return (Decimal(width) * Decimal(length)).quantize(Decimal("0.0001"))
@@ -49,6 +53,7 @@ def receive_lot(
     received_at=None,
     supply=None,
     declared_length=None,
+    production=None,
 ) -> Roll:
     """Receive a new lot (roll or sheets). Computes area from dimensions unless
     `area` is given directly; then creates the lot and refreshes material stock.
@@ -64,6 +69,10 @@ def receive_lot(
     roll = Roll(
         material=locked,
         code=code,
+        # Производство ПАРТИИ. Не указали — берём из карточки: обычно возят
+        # оттуда же, и заставлять выбирать одно и то же на каждой приёмке
+        # значит добавить ручного ввода там, где система знает ответ.
+        production=production if production is not None else locked.production,
         form=form,
         width=width,
         length=length,
@@ -80,10 +89,14 @@ def receive_lot(
     if received_at:
         roll.received_at = received_at
     roll.save()
-    # The material is a roll-material; stock is the sum of remaining roll areas.
-    locked.is_roll_material = True
-    if locked.unit != Material.Unit.SQM:
-        locked.unit = Material.Unit.SQM
+    # ШТУЧНАЯ партия материал не переделывает: у него своя единица (шт, кг, л)
+    # и своя цена за неё. Пометить его площадным значило бы молча перевести
+    # саморезы в квадратные метры — цены, остаток и вся касса поехали бы.
+    if form != Roll.Form.PIECE:
+        # The material is a roll-material; stock is the sum of remaining areas.
+        locked.is_roll_material = True
+        if locked.unit != Material.Unit.SQM:
+            locked.unit = Material.Unit.SQM
     locked.quantity = (locked.quantity or Decimal("0")) + Decimal(area)
     # Intake records cost only; the RETAIL price (price_per_sqm) is set by the
     # admin on the pricing page — the storekeeper never sets markup/retail.
@@ -592,6 +605,20 @@ def restore_area(
             created_by=user,
             **({"happened_at": happened_at} if happened_at else {}),
         )
+
+
+def has_lots(material: Material) -> bool:
+    """Есть ли у материала хоть одна НЕПУСТАЯ партия.
+
+    Развилка для ШТУЧНОГО материала: с 2026-08-27 приход заводит ему партию, и
+    продавать такой запас надо через FIFO — по цене той партии, из которой
+    берём. Но материалы, заведённые раньше, партий не имеют: их остаток
+    поднимали числом, и списывать его через FIFO не из чего. Поэтому решает не
+    флаг в карточке, а факт — лежит ли товар по партиям.
+
+    У площадного материала эта проверка не нужна: он партиями живёт всегда.
+    """
+    return material.rolls.filter(remaining_area__gt=0).exists()
 
 
 def lots_area(material: Material) -> Decimal:

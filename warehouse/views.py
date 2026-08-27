@@ -288,16 +288,31 @@ class MaterialViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        material = apply_stock_change(
+        # ШТУЧНЫЙ приход тоже заводит ПАРТИЮ (2026-08-27, просьба владельца).
+        # Раньше он поднимал только число остатка, и партий у штучных не было
+        # вовсе: новая закупочная цена молча переоценивала весь старый запас, а
+        # в кассе нельзя было выбрать, из какой поставки берём. Для саморезов
+        # это неважно, для дорогой смолы — уже нет.
+        #
+        # Цена за штуку обязательна: партия без неё дала бы себестоимость 0 и
+        # завысила прибыль. Не указали — берём последнюю закупочную из карточки.
+        qty = Decimal(data["quantity"])
+        unit_cost = data.get("actual_price")
+        if unit_cost in (None, ""):
+            unit_cost = data["material"].purchase_price or Decimal("0")
+        roll = receive_lot(
             data["material"],
-            Decimal(data["quantity"]),
-            log_type=InventoryLog.Type.SUPPLY,
-            actual_price=data.get("actual_price"),
-            reason=data.get("reason") or "Поступление от поставщика",
+            form=Roll.Form.PIECE,
+            sheet_count=qty,
+            purchase_cost=(Decimal(unit_cost) * qty).quantize(Decimal("0.01")),
+            code=data.get("reason", "") or "",
+            production=data["material"].production,
             user=request.user,
-            happened_at=_as_moment(data.get("happened_on")),
+            received_at=_as_moment(data.get("happened_on")),
         )
-        return Response(MaterialSerializer(material, context={"request": request}).data)
+        return Response(
+            MaterialSerializer(roll.material, context={"request": request}).data
+        )
 
     @action(detail=False, methods=["post"], permission_classes=[IsAdmin])
     def adjust(self, request):
@@ -409,9 +424,13 @@ class MaterialViewSet(viewsets.ModelViewSet):
             length=data.get("length"),
             height=data.get("height"),
             sheet_count=data.get("sheet_count"),
+            # Площадь пришла напрямую (приём квадратами) — не считаем её из
+            # размеров, их в этом способе и нет.
+            area=data.get("area"),
             purchase_cost=data["purchase_cost"],
             received_at=_as_moment(data.get("received_on")),
             code=data.get("code", ""),
+            production=data.get("production"),
             user=request.user,
             declared_length=data.get("declared_length"),
         )
@@ -698,7 +717,12 @@ class ProductionSiteViewSet(viewsets.ModelViewSet):
                 {"detail": "Встроенное производство удалить нельзя — его можно скрыть."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if site.materials.exists():
+        # Прячем, а не удаляем, если на производство кто-то ссылается. Партии
+        # проверяем НАРАВНЕ с материалами: у партии своё производство (эта пачка
+        # из Китая, хотя обычно возим из Бишкека), и производство, на которое не
+        # осталось материалов, вполне может держать историю приходов. Без этой
+        # половины проверки `PROTECT` отдавал бы пятисотку.
+        if site.materials.exists() or site.rolls.exists():
             site.is_archived = True
             site.save(update_fields=["is_archived"])
             return Response({"archived": True}, status=status.HTTP_200_OK)

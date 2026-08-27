@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
@@ -30,6 +30,13 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
     // записана в накладной. Себестоимость партии считается из неё умножением:
     // раньше это умножение заказчик делал в уме до того, как открыть окно.
     quantity: "", unit_cost: "", actual_price: "", code: "",
+    // Приём КВАДРАТАМИ: поставщик выставил счёт в кв.м, а не в листах. Так
+    // приходит обрез и остатки — «45,3 кв.м по 700», и пересчитывать это в
+    // листы, чтобы ввести, значит считать за систему то, что она посчитает сама.
+    area: "", cost_per_sqm: "",
+    // Производство ПАРТИИ: у материала оно тоже есть, но партии одного акрила
+    // приходят из разных мест и стоят по-разному. По умолчанию — как в карточке.
+    production: material.production ?? "",
     // Рулон принимают МЕТРАМИ: заявлено поставщиком и намерено по факту, плюс
     // цена за метр — ровно то, что стоит в накладной. Считать 12 000 ÷ 45 в
     // уме владелец не должен.
@@ -42,10 +49,26 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
     received_on: new Date().toLocaleDateString("sv-SE"),
   });
   const [busy, setBusy] = useState(false);
+  // Считаем размерами (ширина × высота × листы / метры) или сразу площадью.
+  // Это способ ВВОДА внутри выбранной формы, а не отдельная форма товара.
+  const [byArea, setByArea] = useState(false);
+  const [sites, setSites] = useState([]);
   const set = (k) => (e) => setV((s) => ({ ...s, [k]: e.target.value }));
+
+  useEffect(() => {
+    api.get("/warehouse/production-sites/")
+      .then((r) => setSites(r.data.results || r.data))
+      .catch(() => setSites([]));   // справочник не загрузился — приём не срываем
+  }, []);
+
+  // Ширина рулона — из карточки (в партии она замораживается). Нужна и для
+  // обычного приёма, и чтобы перевести введённую площадь в метры.
+  const rollWidth = Number(material.roll_width) || Number(v.width) || 0;
 
   const area = useMemo(() => {
     const w = Number(v.width);
+    // Площадью: её ввели руками, считать не из чего и незачем.
+    if (byArea) return Number(v.area) || 0;
     if (form === "ROLL") {
       const rw = Number(material.roll_width) || w;
       return rw && Number(v.length) ? rw * Number(v.length) : 0;
@@ -53,20 +76,38 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
     if (form === "SHEET")
       return w && Number(v.height) && Number(v.sheet_count) ? w * Number(v.height) * Number(v.sheet_count) : 0;
     return 0;
-  }, [form, v.width, v.length, v.height, v.sheet_count]);
+  }, [form, byArea, v.width, v.length, v.height, v.sheet_count, v.area]);
+
+  // Сколько метров получается из введённой площади. У РУЛОНА партия обязана
+  // знать свою ширину и длину: остаток в метрах считается делением площади на
+  // ширину партии, и рулон без ширины выпадает из продажи метрами совсем —
+  // площадь на складе числится, а продать её нечем. Поэтому площадь у рулона
+  // мы не храним «голой», а переводим в метры прямо здесь.
+  const areaAsLength = byArea && form === "ROLL" && rollWidth > 0
+    ? Number((area / rollWidth).toFixed(4))
+    : 0;
 
   // Партия = цена за штуку × сколько листов. В рулонной форме приходит один
   // рулон, поэтому его цена и есть себестоимость партии.
   const pieces = form === "SHEET" ? Number(v.sheet_count) || 0 : 1;
+  // До копеек — иначе сервер отбивает приход, а выглядит это как «кнопка не
+  // работает». 45.3 × 700 в JS даёт 31709.999999999996, а поле стоимости
+  // хранит 12 знаков: приход в квадратах не проходил ни разу. У рулона та же
+  // арифметика (цена за метр × метры) и та же мина.
+  const round2 = (n) => Math.round(n * 100) / 100;
   // У рулона партию считает цена за МЕТР × принятые метры.
-  const batchCost =
-    form === "ROLL"
+  const batchCost = round2(
+    // Площадью: партия = площадь × цена за кв.м, ровно как в счёте.
+    byArea
+      ? (Number(v.cost_per_sqm) > 0 && area > 0 ? Number(v.cost_per_sqm) * area : 0)
+      : form === "ROLL"
       ? (Number(v.cost_per_pm) > 0 && Number(v.length) > 0
           ? Number(v.cost_per_pm) * Number(v.length)
           : 0)
       : Number(v.unit_cost) > 0 && pieces > 0
       ? Number(v.unit_cost) * pieces
-      : 0;
+      : 0
+  );
   // Недолив: заявлено минус принято.
   const shortfall =
     Number(v.declared_length) > 0 && Number(v.length) > 0
@@ -97,7 +138,10 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
   const money = (n) => Number(n).toLocaleString("ru-RU");
 
   const valid = roll
-    ? (form === "ROLL"
+    ? (byArea
+        // У рулона площадь бесполезна без ширины: в метры её не перевести.
+        ? Number(v.area) > 0 && (form !== "ROLL" || rollWidth > 0)
+        : form === "ROLL"
         ? (material.roll_width || v.width) && v.length
         : v.width && v.height && v.sheet_count) && batchCost > 0
     : !!v.quantity;
@@ -108,18 +152,26 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
       if (roll) {
         await api.post("/warehouse/materials/receive-roll/", {
           material: material.id,
+          // Форма партии — та, что выбрана вкладкой. Площадь это лишь способ
+          // ввода: у ЛИСТА она уходит как есть (размеров в таком счёте нет), у
+          // РУЛОНА переводится в ширину × длину, иначе партия не знает своих
+          // метров и её нельзя продать.
           form,
           code: v.code,
-          width: Number(v.width),
-          length: form === "ROLL" ? Number(v.length) : null,
-          ...(form === "ROLL"
+          production: v.production || null,
+          width: byArea
+            ? (form === "ROLL" ? rollWidth : null)
+            : Number(v.width),
+          length: form === "ROLL" ? (byArea ? areaAsLength : Number(v.length)) : null,
+          ...(form === "ROLL" && !byArea
             ? {
                 cost_per_pm: Number(v.cost_per_pm) || null,
                 declared_length: Number(v.declared_length) || null,
               }
             : {}),
-          height: form === "SHEET" ? Number(v.height) : null,
-          sheet_count: form === "SHEET" ? Number(v.sheet_count) : null,
+          ...(byArea && form === "SHEET" ? { area: Number(v.area) } : {}),
+          height: form === "SHEET" && !byArea ? Number(v.height) : null,
+          sheet_count: form === "SHEET" && !byArea ? Number(v.sheet_count) : null,
           purchase_cost: batchCost,
           received_on: v.received_on || null,
         });
@@ -175,10 +227,28 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
             {t("supply.intakeFormHint")}
           </p>
+          {/* СПОСОБ ВВОДА, а не форма товара: материал всё равно лист или
+              рулон, меняется только то, чем его посчитал поставщик. Сначала
+              «кв.м» стояли третьей вкладкой рядом с «Лист» и «Рулон» — это
+              путало: выходило, будто бывает товар «квадратный метр». */}
+          <div className="row" style={{ gap: 8, alignItems: "center", margin: "10px 0 2px" }}>
+            <span className="muted" style={{ fontSize: 12 }}>{t("supply.countBy")}</span>
+            <div className="tabs" style={{ margin: 0 }}>
+              {[[false, t("supply.byDimensions")], [true, t("supply.byArea")]].map(([k, label]) => (
+                <button
+                  key={String(k)}
+                  className={byArea === k ? "active" : ""}
+                  onClick={() => setByArea(k)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
         </>
       )}
 
-      {roll && form === "ROLL" && (
+      {roll && form === "ROLL" && !byArea && (
         <>
           {/* Ширина берётся из карточки и ЗАМОРАЖИВАЕТСЯ в этой партии: правка
               опечатки в справочнике потом не должна пересчитывать уже принятые
@@ -203,14 +273,35 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           )}
         </>
       )}
-      {roll && form === "SHEET" && (
+      {roll && form === "SHEET" && !byArea && (
         <div className="row">
           {numField(t("supply.width"), "width", { autoFocus: true })}
           {numField(t("supply.height"), "height")}
           {numField(t("supply.sheets"), "sheet_count")}
         </div>
       )}
-      {roll && form === "ROLL" && (
+      {/* Квадратами: площадь и цена за квадрат — ровно две цифры из счёта.
+          Размеры и количество листов тут не спрашиваем: их в таком счёте нет,
+          а выдумывать их, чтобы система посчитала обратно ту же площадь, —
+          лишний ввод и лишний повод ошибиться. */}
+      {roll && byArea && (
+        <>
+          <div className="row">
+            {numField(t("supply.areaInput"), "area", { autoFocus: true })}
+            {numField(t("supply.costPerSqmInput"), "cost_per_sqm")}
+          </div>
+          <p className="muted" style={{ fontSize: 12, margin: "-4px 0 8px" }}>
+            {t("supply.areaHint")}
+            {oldPerSqm > 0 && (
+              <>
+                {" "}{t("supply.currentPrice")}: {money(oldPerSqm)}{" "}
+                {t("warehouse.perUnitShort", { unit: t("unit.SQM") })}.
+              </>
+            )}
+          </p>
+        </>
+      )}
+      {roll && form === "ROLL" && !byArea && (
         <div className="field" style={{ marginTop: 12 }}>
           <label>{t("supply.costPerPm")}</label>
           <input type="number" step="any" value={v.cost_per_pm} onChange={set("cost_per_pm")} />
@@ -222,7 +313,10 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           )}
         </div>
       )}
-      {roll && form !== "ROLL" && (
+      {/* Цена за лист — только в листовом приёме. В приёме квадратами цену
+          спрашивают за квадрат, и второе поле цены рядом сбивало бы: непонятно,
+          какое из них попадёт в партию. */}
+      {roll && form === "SHEET" && !byArea && (
         <div className="field" style={{ marginTop: 12 }}>
           <label>{t("supply.unitCost", { unit: wholeUnit })}</label>
           <input type="number" step="any" value={v.unit_cost} onChange={set("unit_cost")} />
@@ -268,9 +362,24 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
         </p>
       </div>
 
-      <div className="field">
-        <label>{t("supply.rollCode")}</label>
-        <input value={v.code} onChange={set("code")} placeholder={t("supply.batchPlaceholder")} />
+      {/* Маркировка и производство — рядом: это два ответа на один вопрос
+          «что за партия». Производство раньше писали словом в маркировку
+          («бишкек»), то есть свободным текстом — ни отфильтровать, ни свести.
+          Подставляется из карточки: обычно возят оттуда же. */}
+      <div className="row">
+        <div className="field grow" style={{ margin: 0 }}>
+          <label>{t("supply.rollCode")}</label>
+          <input value={v.code} onChange={set("code")} placeholder={t("supply.batchPlaceholder")} />
+        </div>
+        <div className="field grow" style={{ margin: 0 }}>
+          <label>{t("supply.production")}</label>
+          <select value={v.production ?? ""} onChange={set("production")}>
+            <option value="">—</option>
+            {sites.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {added > 0 && (

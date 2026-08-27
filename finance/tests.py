@@ -473,15 +473,26 @@ class CogsTests(APITestCase):
         # 2 кв.м × 200 сом/кв.м = 400.
         self.assertEqual(Decimal(str(item.cost_total)), Decimal("400"))
 
-    def test_profit_now_accounts_for_material_cost(self):
+    def test_cogs_is_not_an_expense_but_still_lowers_profit(self):
+        """Себестоимость вычитается ОДИН раз — при переходе к валовой прибыли.
+
+        Решение владельца (2026-08-27, четвёртая редакция): себестоимость
+        проданного — деньги ОБОРОТА, а не расход, и в «Расходах» её быть не
+        должно. Прибыль от этого не меняется: раньше её вычитали в составе
+        расходов, теперь — сверху, при переходе от выручки к валовой прибыли.
+        Изменилось то, из чего цифра складывается на экране, а не она сама.
+        """
         self._sell(area="2", price="1000")   # выручка 2000, себестоимость 400
         data = self._report()
         self.assertEqual(Decimal(str(data["revenue"])), Decimal("2000"))
         self.assertEqual(Decimal(str(data["cogs"])), Decimal("400"))
         self.assertEqual(Decimal(str(data["gross_margin"])), Decimal("1600"))
-        # Себестоимость проданного — расход блока «Материалы» (решение
-        # заказчика, 2026-08-24): продали на 2000, материал обошёлся в 400.
-        self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("400"))
+        # В расходах себестоимости НЕТ — других трат в этом тесте тоже нет.
+        self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("0"))
+        self.assertEqual(Decimal(str(data["materials"]["total"])), Decimal("0"))
+        # А справочной строкой она в блоке осталась.
+        self.assertEqual(Decimal(str(data["materials"]["cogs"])), Decimal("400"))
+        # Прибыль ТА ЖЕ, что и по прежней формуле: 2000 − 400 − 0.
         self.assertEqual(Decimal(str(data["profit"])), Decimal("1600"))
         # Закуп партии (2000) — не расход, а оборот: он в секции «Склад».
         self.assertEqual(Decimal(str(data["stock"]["purchases"])), Decimal("2000"))
@@ -517,26 +528,28 @@ class CogsTests(APITestCase):
     def test_daily_report_uses_the_same_profit_formula_as_the_tiles(self):
         """График по дням и плитки сверху должны считать ОДНО И ТО ЖЕ.
 
-        Правило заказчика (2026-08-24): прибыль = выручка − (себестоимость
-        проданного + транспорт и свои материалы + Переменные) − Постоянные.
-        Закуп — оборот, в расходы не входит ни в месяце, ни в дне. График
-        обязан жить по правилу плиток, иначе он не «второй взгляд», а второй
-        ответ на тот же вопрос.
+        Правило владельца (2026-08-27): прибыль = выручка − себестоимость
+        проданного − (транспорт и свои материалы + Переменные) − Постоянные.
+        Себестоимость идёт СВОЕЙ строкой, не в расходах: это оборот. Закуп не
+        входит никуда — деньги, переложенные в склад. График обязан жить по
+        правилу плиток, иначе он не «второй взгляд», а второй ответ на тот же
+        вопрос.
         """
         self._sell(area="2")  # выручка 2000, себестоимость 400
         today = timezone.localdate()
         r = self.client.get("/api/finance/daily/", {"year": today.year, "month": today.month})
         self.assertEqual(r.status_code, 200, r.data)
         row = next(x for x in r.data["rows"] if x["day"] == today.day)
-        # В расходах дня — себестоимость проданного (400). Закупа партии
-        # (2000, сегодня) там НЕТ: день прихода накладной — не провальный день.
-        self.assertEqual(Decimal(str(row["variable"])), Decimal("400"))
+        # Себестоимость дня — своей строкой, в «переменных» её нет.
+        self.assertEqual(Decimal(str(row["cogs"])), Decimal("400"))
+        self.assertEqual(Decimal(str(row["variable"])), Decimal("0"))
 
-        # Итог графика сходится с плитками месяца: те же расходы, та же прибыль.
+        # Итог графика сходится с плитками месяца: тот же состав, та же прибыль.
         report = self._report()
         totals = r.data["totals"]
         self.assertEqual(Decimal(str(totals["variable"])), Decimal(str(report["total_expenses"])))
-        self.assertEqual(Decimal(str(totals["variable"])), Decimal("400"))
+        self.assertEqual(Decimal(str(totals["cogs"])), Decimal(str(report["cogs"])))
+        self.assertEqual(Decimal(str(totals["profit"])), Decimal(str(report["profit"])))
         self.assertEqual(Decimal(str(totals["profit"])), Decimal(str(report["profit"])))
         self.assertEqual(Decimal(str(totals["revenue"])), Decimal(str(report["revenue"])))
 
@@ -967,3 +980,138 @@ class AutoComputedInputsTests(APITestCase):
         )
         self.assertEqual(Decimal(str(data["stock"]["purchases"])), Decimal("3000"))
         self.assertNotIn("stock_start", m)
+
+
+class ProfitBeforeExpensesTests(APITestCase):
+    """«Прибыль до расходов» — третья цифра между выручкой и прибылью.
+
+    Решение владельца (2026-08-27). Наверху стояла выручка, и «5 525» читалось
+    как заработок, хотя 2 955 из них — деньги, за которые материал купили.
+    Теперь показателя три, и каждый честно называется своим именем:
+
+        выручка              — сколько принесли клиенты (оборот)
+        прибыль до расходов  — выручка − себестоимость проданного
+        прибыль              — она же минус аренда, зарплаты и прочее
+
+    Себестоимость вычитается РОВНО ОДИН раз — на второй строке; в «Расходах»
+    её нет.
+    """
+
+    def setUp(self):
+        # Импорты локальные — как у соседних классов этого файла.
+        from warehouse.models import Material
+        from warehouse.rolls import receive_lot
+
+        self._receive_lot = receive_lot
+        self.admin = User.objects.create_user(
+            username="pbe_admin", password="x", role=User.Role.ADMIN
+        )
+        self.client.force_authenticate(self.admin)
+        self.mat = Material.objects.create(
+            name="Акрил", unit=Material.Unit.SQM, is_roll_material=True,
+            intake_form=Material.IntakeForm.SHEET,
+            price_per_sqm=Decimal("1000"),
+        )
+        self._receive_lot(
+            self.mat, form="SHEET", width=Decimal("1"), height=Decimal("1"),
+            sheet_count=10, purchase_cost=Decimal("2000"), code="п1",
+        )
+
+    def _sell(self, area="2"):
+        from sales.sale_service import create_sale
+
+        return create_sale(
+            client=None, cashier=self.admin, payment_method="CASH",
+            items_data=[{
+                "type": "MATERIAL", "material": self.mat,
+                "quantity": Decimal(area), "mode": "SQM",
+            }],
+            amount_paid=Decimal("0"),
+        )
+
+    def _report(self):
+        r = self.client.get("/api/finance/report/")
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.data
+
+    def test_three_figures_line_up(self):
+        self._sell(area="2")   # продали на 2000, материал стоил 400
+        d = self._report()
+        self.assertEqual(Decimal(str(d["revenue"])), Decimal("2000"))
+        self.assertEqual(Decimal(str(d["cogs"])), Decimal("400"))
+        # Прибыль до расходов = выручка − себестоимость.
+        self.assertEqual(Decimal(str(d["gross_margin"])), Decimal("1600"))
+        # Прибыль = прибыль до расходов − расходы.
+        self.assertEqual(
+            Decimal(str(d["profit"])),
+            Decimal(str(d["gross_margin"])) - Decimal(str(d["total_expenses"])),
+        )
+
+    def test_expenses_never_contain_the_cost_of_goods(self):
+        """Главное, ради чего менялось: себестоимости в расходах нет."""
+        self._sell(area="2")
+        d = self._report()
+        self.assertEqual(Decimal(str(d["total_expenses"])), Decimal("0"))
+        self.assertEqual(Decimal(str(d["materials"]["total"])), Decimal("0"))
+
+    def test_real_expenses_still_count(self):
+        """Транспорт и аренда — настоящие траты, их убирать не собирались."""
+        kind = ExpenseKind.objects.filter(block=ExpenseKind.Block.FIXED, in_profit=True).first()
+        ExpenseEntry.objects.create(
+            kind=kind, amount=Decimal("500"), spent_at=timezone.localdate(),
+        )
+        self._sell(area="2")
+        d = self._report()
+        self.assertEqual(Decimal(str(d["total_expenses"])), Decimal("500"))
+        # 2000 − 400 − 500 = 1100
+        self.assertEqual(Decimal(str(d["profit"])), Decimal("1100"))
+
+    def test_dashboard_shows_the_same_figure(self):
+        """«Обзор» и «Финансы» обязаны показывать одно число.
+
+        В заказе есть УСЛУГА со своей техкартой: она списывает клей, и его
+        себестоимость сидит в строке РАБОТЫ, а не материала. «Обзор» сначала
+        считал себестоимость только по материалу и расходился с «Финансами» на
+        стоимость этого клея — на живых данных 5,88 сом. Две цифры под одной
+        подписью на соседних экранах — ровно то, чего здесь быть не должно.
+        """
+        from services.models import PrintingService, ServiceRecipe
+        from warehouse.models import Material
+
+        glue = Material.objects.create(
+            name="Клей", unit=Material.Unit.PIECE, quantity=Decimal("100"),
+            purchase_price=Decimal("30"), price_per_unit=Decimal("50"),
+        )
+        service = PrintingService.objects.create(
+            name="Сборка", kind=PrintingService.Kind.OTHER, base_price=Decimal("300"),
+        )
+        ServiceRecipe.objects.create(
+            service=service, material=glue,
+            consumption_per_unit=Decimal("2"),
+            consumption_mode=ServiceRecipe.Mode.FIXED,
+        )
+        from sales.sale_service import create_sale
+        create_sale(
+            client=None, cashier=self.admin, payment_method="CASH",
+            items_data=[
+                {"type": "MATERIAL", "material": self.mat,
+                 "quantity": Decimal("2"), "mode": "SQM"},
+                {"type": "SERVICE", "service": service, "quantity": Decimal("1")},
+            ],
+            amount_paid=Decimal("0"),
+        )
+        d = self._report()
+        r = self.client.get("/api/audit/dashboard/")
+        self.assertEqual(r.status_code, 200, r.data)
+        # Клей действительно попал в себестоимость — иначе тест беззубый.
+        self.assertGreater(Decimal(str(d["cogs"])), Decimal("400"))
+        self.assertEqual(
+            Decimal(str(r.data["breakdown"]["profit_before_expenses"])),
+            Decimal(str(d["gross_margin"])),
+        )
+
+    def test_dashboard_revenue_stays_the_full_amount(self):
+        """Выручка остаётся выручкой: клиенты правда заплатили 2000."""
+        self._sell(area="2")
+        r = self.client.get("/api/audit/dashboard/")
+        self.assertEqual(Decimal(str(r.data["revenue"]["total"])), Decimal("2000"))

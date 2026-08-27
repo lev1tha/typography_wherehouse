@@ -489,9 +489,13 @@ class FinanceReportView(APIView):
         materials_spend = block_total(material_rows)
         materials = {
             "spend": materials_spend,            # ручные строки блока (транспорт + свои)
-            "cogs": cogs,                        # авто-строка: себестоимость проданного
+            "cogs": cogs,                        # СПРАВОЧНО: в итог блока не входит
             "rows": material_rows,               # виды расхода этого блока
-            "total": materials_spend + cogs,
+            # Себестоимость проданного в итог блока НЕ входит (решение
+            # владельца, 2026-08-27; ЧЕТВЁРТАЯ редакция формулы): это деньги
+            # ОБОРОТА — материал купили, материал продали. Расход блока —
+            # только транспорт и свои строки, они и правда уходят из кассы.
+            "total": materials_spend,
         }
 
         # --- Склад (оборот) --------------------------------------------------
@@ -532,6 +536,10 @@ class FinanceReportView(APIView):
             "value_now": (lots_value + pieces_value).quantize(Decimal("0.01")),
         }
 
+        # РАСХОДЫ — только то, что уходит из кассы насовсем: транспорт и свои
+        # строки блока «Материалы», постоянные, переменные. Себестоимости
+        # проданного здесь НЕТ: она вычитается выше, при переходе от выручки к
+        # валовой прибыли, и класть её ещё и сюда значило бы вычесть дважды.
         total_expenses = materials["total"] + total_fixed + operating_variable
 
         # Выручка = ВСЕ заказы периода, кроме отменённых, за вычетом возвратов.
@@ -779,6 +787,10 @@ class FinanceReportView(APIView):
                     "area": offcut_area.quantize(Decimal("0.01")),
                     "cost": offcut_cost.quantize(Decimal("0.01")),
                 },
+                # Валовая прибыль — то, с чего живёт цех: выручка минус то,
+                # почём материал достался нам самим. Именно она, а не выручка,
+                # стоит наверху расчёта прибыли: «выручка 5 525» при марже
+                # 2 570 читается как заработок, которого не было.
                 "gross_margin": revenue - cogs,
                 "investments": investments,
                 "total_expenses": total_expenses,
@@ -788,7 +800,11 @@ class FinanceReportView(APIView):
                 # долга и «выручка 300 000» деньгами это разные месяцы.
                 "revenue_paid": revenue_paid,
                 "client_debt": client_debt,
-                "profit": revenue - total_expenses,
+                # Прибыль = ВАЛОВАЯ ПРИБЫЛЬ − расходы. Цифра та же, что и по
+                # прежней формуле (выручка − расходы с себестоимостью внутри):
+                # алгебраически это одно и то же. Изменилось, из чего она
+                # складывается на экране — и это была вся суть просьбы.
+                "profit": (revenue - cogs) - total_expenses,
                 "cutting": cutting,
                 "period": {
                     "from": d_from.isoformat() if d_from else None,
@@ -867,14 +883,13 @@ class DailyReportView(APIView):
         for row in expense_rows:
             variable_by_day[row["spent_at"]] += row["v"]
 
-        # СЕБЕСТОИМОСТЬ ПРОДАННОГО — в расходы дня, той же формулой, что и
-        # плитки месяца (решение заказчика, 2026-08-24): прибыль = выручка −
-        # (себестоимость + транспорт и свои материалы + переменные) −
-        # постоянные. ЗАКУП сюда больше не входит — деньги, переложенные в
-        # склад, это оборот, а не расход дня: раньше день прихода партии
-        # выглядел провалом на всю накладную, хотя материал лежит на полке.
+        # СЕБЕСТОИМОСТЬ ПРОДАННОГО идёт СВОЕЙ строкой, не в «переменных»
+        # (решение владельца, 2026-08-27): это деньги оборота, а не расход.
+        # Прибыль дня = выручка − себестоимость − переменные − доля постоянных,
+        # то есть та же цифра, что и раньше, но разложенная как в плитках.
         # График обязан жить по правилу плиток, иначе он не «второй взгляд»,
         # а второй ответ на тот же вопрос.
+        cogs_by_day = defaultdict(lambda: Decimal("0"))
         cogs_rows = (
             TransactionItem.objects.filter(
                 is_returned=False,
@@ -887,13 +902,14 @@ class DailyReportView(APIView):
             .annotate(v=_SUM("cost_total"))
         )
         for row in cogs_rows:
-            variable_by_day[row["day"]] += row["v"]
+            cogs_by_day[row["day"]] += row["v"]
 
         rows = []
         for day_num in range(1, days_in_month + 1):
             d = date(year, month, day_num)
             revenue = revenue_by_day.get(d, Decimal("0"))
             variable = variable_by_day.get(d, Decimal("0"))
+            day_cogs = cogs_by_day.get(d, Decimal("0"))
             # A day that hasn't happened yet has no profit/loss to show — it
             # would otherwise always render "in the red" for its unearned share
             # of rent before any business was even done that day.
@@ -902,9 +918,10 @@ class DailyReportView(APIView):
                 "date": d.isoformat(),
                 "day": day_num,
                 "revenue": revenue,
+                "cogs": day_cogs,
                 "variable": variable,
                 "fixed_share": fixed_share,
-                "profit": None if future else revenue - variable - fixed_share,
+                "profit": None if future else revenue - day_cogs - variable - fixed_share,
             })
 
         # ИТОГ под графиком — за МЕСЯЦ ЦЕЛИКОМ, той же формулой, что плитки
@@ -916,11 +933,13 @@ class DailyReportView(APIView):
         # аренду оставшихся 14 дней.
         month_revenue = sum((r["revenue"] for r in rows), Decimal("0"))
         month_variable = sum((r["variable"] for r in rows), Decimal("0"))
+        month_cogs = sum((r["cogs"] for r in rows), Decimal("0"))
         totals = {
             "revenue": month_revenue,
+            "cogs": month_cogs,
             "variable": month_variable,
             "fixed": fixed_total,
-            "profit": month_revenue - month_variable - fixed_total,
+            "profit": month_revenue - month_cogs - month_variable - fixed_total,
         }
 
         return Response({

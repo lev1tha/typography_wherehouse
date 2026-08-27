@@ -780,6 +780,8 @@ export default function Catalog({ embedded = false }) {
                 value={editing.type}
                 options={types}
                 endpoint="/warehouse/material-types/"
+                manageable
+                manageTitle={t("warehouse.manageTypes")}
                 onCreated={loadRefs}
                 onChange={(v) => setEditing({ ...editing, type: v ? Number(v) : null })}
               />
@@ -863,6 +865,8 @@ export default function Catalog({ embedded = false }) {
               value={editing.production}
               options={sites}
               endpoint="/warehouse/production-sites/"
+              manageable
+              manageTitle={t("warehouse.manageSites")}
               onCreated={loadRefs}
               onChange={(v) => setEditing({ ...editing, production: v ? Number(v) : null })}
             />

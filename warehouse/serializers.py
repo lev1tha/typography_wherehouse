@@ -386,6 +386,9 @@ class RollSerializer(serializers.ModelSerializer):
     cost_per_pm = serializers.SerializerMethodField()
     purchase_cost = serializers.SerializerMethodField()
     material_name = serializers.CharField(source="material.name", read_only=True)
+    production_name = serializers.CharField(
+        source="production.name", read_only=True, default=None
+    )
     dimensions_label = serializers.CharField(read_only=True)
     metres_initial = serializers.DecimalField(
         max_digits=12, decimal_places=2, read_only=True, allow_null=True
@@ -413,6 +416,10 @@ class RollSerializer(serializers.ModelSerializer):
             "material",
             "material_name",
             "code",
+            # Производство партии — и id, и название: подпись партии в кассе
+            # («бишкек · 26,54 лист.») читает человек, а не машина.
+            "production",
+            "production_name",
             "form",
             "width",
             "length",
@@ -443,6 +450,12 @@ class RollIntakeSerializer(serializers.Serializer):
 
     material = serializers.PrimaryKeyRelatedField(queryset=Material.objects.all())
     code = serializers.CharField(required=False, allow_blank=True)
+    # Откуда приехала эта партия. Не прислали — `receive_lot` подставит
+    # производство из карточки материала. Раньше это писали словом в
+    # маркировку («бишкек»), и свести по производству было нельзя.
+    production = serializers.PrimaryKeyRelatedField(
+        queryset=ProductionSite.objects.all(), required=False, allow_null=True
+    )
     form = serializers.ChoiceField(choices=Roll.Form.values)
     width = serializers.DecimalField(max_digits=8, decimal_places=2, min_value=0, required=False, allow_null=True)
     length = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False, allow_null=True)
@@ -462,8 +475,47 @@ class RollIntakeSerializer(serializers.Serializer):
     )
     # Дата поступления партии — по ней же идёт FIFO.
     received_on = serializers.DateField(required=False, allow_null=True)
+    # Площадь ПРЯМО В КВ.М — когда поставщик выставил счёт квадратами, а не
+    # листами. Так приходит обрез и остатки: «45,3 кв.м по 700» и никаких
+    # «сколько это листов». Размеры и количество тогда не нужны, площадь берётся
+    # как есть, а не считается из них.
+    area = serializers.DecimalField(
+        max_digits=12, decimal_places=4, min_value=0, required=False, allow_null=True
+    )
+    # Цена за кв.м — вторая половина того же способа: партия = площадь × цена.
+    cost_per_sqm = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=0, required=False, allow_null=True
+    )
 
     def validate(self, attrs):
+        # Приём площадью: размеры не спрашиваем вовсе. Партия знает свою площадь,
+        # а этого хватает и для FIFO, и для себестоимости.
+        if attrs.get("area") not in (None, ""):
+            if attrs["area"] <= 0:
+                raise serializers.ValidationError({"area": "Площадь должна быть больше нуля."})
+            # У РУЛОНА площадь сама по себе бесполезна: остаток в метрах
+            # считается делением площади на ширину ПАРТИИ, и рулон без ширины
+            # выпадает из продажи метрами совсем — площадь на складе числится, а
+            # продать её нечем. Интерфейс переводит площадь в ширину × длину сам,
+            # но ручка обязана держаться и без него.
+            if attrs["form"] == Roll.Form.ROLL:
+                width = attrs.get("width") or attrs["material"].roll_width
+                if not width:
+                    raise serializers.ValidationError(
+                        {"width": "У рулона площадь принимается только с шириной: "
+                                  "из неё считаются метры."}
+                    )
+                attrs["width"] = width
+                attrs["length"] = (attrs["area"] / width).quantize(Decimal("0.01"))
+            if attrs.get("purchase_cost") in (None, ""):
+                per_sqm = attrs.get("cost_per_sqm")
+                if per_sqm in (None, ""):
+                    raise serializers.ValidationError(
+                        {"purchase_cost": "Укажите стоимость закупки или цену за кв.м."}
+                    )
+                attrs["purchase_cost"] = (per_sqm * attrs["area"]).quantize(Decimal("0.01"))
+            return attrs
+
         if attrs["form"] == Roll.Form.ROLL:
             # Ширину можно не вводить: она подставляется из карточки материала и
             # ЗАМОРАЖИВАЕТСЯ в партии. Правка опечатки в справочнике потом не

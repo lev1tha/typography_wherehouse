@@ -519,7 +519,24 @@ export default function Checkout() {
         });
         return;
       }
-      return addOrInc({ ...p, price: p.price, mode: "SQM" });
+      // ШТУЧНЫЙ материал тоже открывает окно (2026-08-27, просьба владельца):
+      // раньше нажатие просто клало в чек одну штуку, и ни количество, ни
+      // партию выбрать было негде — 200 саморезов набирались плюсиком, а из
+      // какой поставки они уходят, касса не спрашивала вовсе.
+      //
+      // Режим тот же «штучный», что у целого листа: количество × цена за штуку,
+      // опт включается сам, партия выбирается из непустых. Резки у него нет —
+      // саморез не режут, — поэтому вкладок режимов окно не показывает.
+      const m = materials.find((x) => x.id === p.id) || p;
+      setCut({
+        material: m,
+        mode: "PIECE",
+        qty: "1",
+        piecePrice: String(Number(p.price || 0)),
+        priceEdited: false,
+        running_meters: "",
+      });
+      return;
     }
     if (p.uses_area) {
       // Interior install configurator (area × work rate + material).
@@ -571,6 +588,16 @@ export default function Checkout() {
 
   // Партия ЛИСТА: остаток считаем в листах — пачками их и считают на стеллаже.
   const sheetLotLabel = (r, m) => {
+    // ШТУЧНАЯ партия: «площадь» в ней — это количество, а `cost_per_sqm` —
+    // цена одной штуки. Делить их не на что, единицу берём у материала.
+    if (r.form === "PIECE") {
+      const unit = t(`unit.${m?.unit || "PIECE"}`);
+      const left = `${Number(r.remaining_area)} ${unit}`;
+      const cost = isAdmin && r.cost_per_sqm != null
+        ? ` · ${Math.round(Number(r.cost_per_sqm))} ${t("checkout.perPieceShort", { unit })}`
+        : "";
+      return `${r.code || `№${r.id}`} · ${left}${cost}`;
+    }
     const area = Number(m?.piece_area) || 0;
     const left = area ? `${(Number(r.remaining_area) / area).toFixed(2)} ${t("warehouse.unitSheetShort")}`
                       : `${r.remaining_area} ${t("unit.SQM")}`;
@@ -600,10 +627,14 @@ export default function Checkout() {
           key: `M${m.id}-PIECE`, kind: "material", id: m.id, name: m.name,
           lotId: cutSheetLotPicked ? cutSheetLotPicked.id : null,
           lotName: cutSheetLotPicked ? (cutSheetLotPicked.code || `№${cutSheetLotPicked.id}`) : "",
-          price: edited ? Number(cut.piecePrice || 0) : Number(m.piece_price || 0),
+          // У ЛИСТА цена целой штуки лежит в `piece_price`, у штучного
+          // материала её там не бывает вовсе — там обычная розничная.
+          price: edited
+            ? Number(cut.piecePrice || 0)
+            : Number((m.is_roll_material ? m.piece_price : m.price_per_unit) || 0),
           mode: "PIECE",
           priceEdited: edited,
-          unitWord: wholeUnitOf(m),
+          unitWord: m.is_roll_material ? wholeUnitOf(m) : t(`unit.${m.unit || "PIECE"}`),
           wholesale_price: edited ? 0 : Number(m.wholesale_price || 0),
           wholesale_min_qty: edited ? 0 : Number(m.wholesale_min_qty || 0),
         });
@@ -710,6 +741,17 @@ export default function Checkout() {
 
   function changeQty(key, delta) {
     setCart((prev) => prev.map((l) => (l.key === key ? { ...l, qty: l.qty + delta } : l)).filter((l) => l.qty > 0));
+  }
+  // Количество можно ВПИСАТЬ, а не только доклацать плюсом. 200 штук саморезов
+  // это 200 нажатий, и на них уходит больше времени, чем на весь остальной чек.
+  //
+  // Пустую строку и ноль оставляем как есть, пока поле в работе: строка с нулём
+  // отсеивается только по `changeQty` (там `.filter(qty > 0)`), а здесь человек
+  // ещё печатает — стирать позицию из чека посреди набора нельзя. Дробные
+  // разрешены: кг и литры продаются на весах.
+  function setQty(key, raw) {
+    const qty = raw === "" ? "" : Math.max(0, Number(String(raw).replace(",", ".")) || 0);
+    setCart((prev) => prev.map((l) => (l.key === key ? { ...l, qty } : l)));
   }
   function removeLine(key) {
     setCart((prev) => prev.filter((l) => l.key !== key));
@@ -859,9 +901,12 @@ export default function Checkout() {
   // Партии ЛИСТА того же материала: пачки с разной ценой закупки. Выбор нужен
   // по той же причине, что и у рулона, — мастер берёт лист из конкретной пачки,
   // а не из той, которую первой посчитал бы FIFO.
-  const cutSheetLots = isMatModal && cutRollMat && !cutRoll && cutRollMat.is_roll_material
+  // Партии в окне: у листа — пачки, у штучного — поставки. Форма партии совпадает
+  // с формой материала, поэтому фильтр один, а не два разных.
+  const cutLotForm = cutRollMat && !cutRollMat.is_roll_material ? "PIECE" : "SHEET";
+  const cutSheetLots = isMatModal && cutRollMat && !cutRoll
     ? rolls
-        .filter((r) => r.material === cutRollMat.id && r.form === "SHEET" && Number(r.remaining_area) > 0)
+        .filter((r) => r.material === cutRollMat.id && r.form === cutLotForm && Number(r.remaining_area) > 0)
         .sort((a, b) => new Date(a.received_at) - new Date(b.received_at))
     : [];
   const cutSheetLotPicked =
@@ -962,7 +1007,12 @@ export default function Checkout() {
   const cutPriceMissing =
     isMatModal && !cutRoll && !cutPiece && !(cutMatSqm > 0) && !cut.matPriceEdited;
   // Слово для целой единицы в этом окне: лист или рулон.
-  const cutWholeUnit = wholeUnitOf(cutMat);
+  // Единица целой штуки в подписях окна. У ЛИСТОВОГО материала это лист или
+  // рулон, у штучного — его собственная (шт, кг, л): «Цена за лист» на
+  // саморезах отвечала не на тот вопрос.
+  const cutWholeUnit = cutMat && !cutMat.is_roll_material
+    ? t(`unit.${cutMat.unit || "PIECE"}`)
+    : wholeUnitOf(cutMat);
   // Итог = сумма округлённых вверх строк (как в чеке): лист/материал + работа.
   const cutTotal = cutRoll
     ? cutRollTotal + cutRollWork
@@ -1106,7 +1156,22 @@ export default function Checkout() {
                 {l.kind !== "cutting" && l.kind !== "material-area" && l.kind !== "material-metre" && l.kind !== "cut-work" && (
                   <div className="stepper">
                     <button onClick={() => changeQty(l.key, -1)}>−</button>
-                    <span className="qty">{l.qty}</span>
+                    {/* Поле, а не подпись: одну-две штуки удобнее доклацать
+                        кнопками, две сотни — вписать. */}
+                    <input
+                      className="qty"
+                      type="number"
+                      step="any"
+                      min="0"
+                      value={l.qty}
+                      onChange={(e) => setQty(l.key, e.target.value)}
+                      onBlur={(e) => {
+                        // Ушли из поля, а там пусто или ноль — позиции в чеке
+                        // нет смысла: убираем, как это делает минус до нуля.
+                        if (!(Number(e.target.value) > 0)) removeLine(l.key);
+                      }}
+                      aria-label={t("checkout.qty")}
+                    />
                     <button onClick={() => changeQty(l.key, 1)}>+</button>
                   </div>
                 )}
@@ -1429,7 +1494,11 @@ export default function Checkout() {
           {/* Вкладок у рулона нет: способ расчёта определяет ТОВАР, а не выбор
               мастера. Рулон продаётся длиной, и «квадратный метр» или «штучный»
               для него — не выбор, а ошибка. */}
-          {isMatModal && !cutRoll && (
+          {/* У ШТУЧНОГО материала способа продажи ровно один: саморез не режут
+              ни по стороне, ни по кривой, и «квадратный метр» у него не бывает.
+              Показывать четыре вкладки, из которых работает одна, — предлагать
+              выбор, которого нет. */}
+          {isMatModal && !cutRoll && cutRollMat?.is_roll_material && (
             <>
               <div className="tabs tabs-grid" style={{ marginTop: 0 }}>
                 {MODES.map((mode) => {
@@ -1707,15 +1776,20 @@ export default function Checkout() {
                   </div>
                 )}
               </div>
-              <label className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <input
-                  type="checkbox"
-                  style={{ width: 20, height: 20, minHeight: 0 }}
-                  checked={!!cut.pieceCut}
-                  onChange={(e) => setCut({ ...cut, pieceCut: e.target.checked })}
-                />
-                {t("checkout.addCutting")}
-              </label>
+              {/* Резка — только у ЛИСТОВОГО материала: саморез и банку клея не
+                  режут, и галочка «резать лист» на них предлагала работу,
+                  которой не бывает. */}
+              {cutMat?.is_roll_material && (
+                <label className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    style={{ width: 20, height: 20, minHeight: 0 }}
+                    checked={!!cut.pieceCut}
+                    onChange={(e) => setCut({ ...cut, pieceCut: e.target.checked })}
+                  />
+                  {t("checkout.addCutting")}
+                </label>
+              )}
               {cut.pieceCut && (
                 <>
                   <div className="field">

@@ -223,6 +223,19 @@ export default function Dashboard() {
       {data.breakdown && (
         <>
           <div className="stat-grid">
+            {/* Прибыль до расходов — работа плюс заработок на материале.
+                Выручка наверху осталась выручкой (клиенты правда заплатили
+                5 525), но читалась как заработок; здесь видно, сколько из неё
+                своё, а сколько — деньги, за которые материал куплен. */}
+            <Stat
+              label={t("dashboard.profitBeforeExpenses")}
+              value={som(data.breakdown.profit_before_expenses)}
+              color={Number(data.breakdown.profit_before_expenses) >= 0 ? "ok" : "danger"}
+              sub={t("dashboard.profitBeforeExpensesFormula", {
+                revenue: som(revTotal),
+                cogs: som(data.breakdown.cogs_total),
+              })}
+            />
             <Stat label={t("dashboard.workRevenue")} value={som(data.breakdown.work_revenue)} />
             <Stat
               label={t("dashboard.materialProfit")}
