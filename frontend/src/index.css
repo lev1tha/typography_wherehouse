@@ -29,8 +29,33 @@
   --warn-bg: #ff6b6b1f;
   --warn-ink: #c2410c;
   --danger: #d93535;
+  --danger-soft: rgba(217, 53, 53, 0.12);
+  --danger-line: rgba(217, 53, 53, 0.45);
+  --danger-tint: rgba(217, 53, 53, 0.05);
   --ok: #1aae39;
   --ok-bg: rgba(26, 174, 57, 0.12);
+  --amber-bg: rgba(221, 130, 0, 0.14);
+  --amber-ink: #b06a00;
+  --amber-line: rgba(221, 130, 0, 0.4);
+  --amber-tint: rgba(221, 130, 0, 0.05);
+  --on-danger: #fff;
+  --toast-ink: #fff;
+
+  /* Наведение, затемнение и полоса прокрутки — на светлом это лёгкая ЧЕРНОТА,
+     на тёмном обязана стать лёгкой БЕЛИЗНОЙ, иначе ховер в тёмной теме
+     невидим, а «затемнение» под окном — вторая чёрная дыра поверх чёрной. */
+  --hover: rgba(0, 0, 0, 0.05);
+  --hover-soft: rgba(0, 0, 0, 0.04);
+  --scrim: rgba(15, 15, 15, 0.4);
+  --scrollbar: rgba(0, 0, 0, 0.18);
+
+  /* Заливки складского листа и сетки ввода: группы шапки и колонка «остаток
+     на конец». В тёмной теме пастель заменяется тёмными оттенками того же
+     тона — иначе таблица светится белыми полосами. */
+  --sheet-group-alt: #fdf1e3;
+  --sheet-group-money: #eaf6ee;
+  --sheet-money-cell: #f5fbf7;
+  --sheet-end-cell: #eef3fb;
 
   /* Radius */
   --r-xs: 4px;
@@ -47,6 +72,129 @@
     0 6px 18px rgba(0, 0, 0, 0.05), 0 23px 52px rgba(0, 0, 0, 0.05);
 
   --font: "Inter", -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+
+/* --- Тёмная тема ---------------------------------------------------------
+ *
+ * Переопределяем ТОЛЬКО цвета: радиусы, тени и шрифт общие. Два селектора,
+ * потому что тем три состояния: «как в системе» (по умолчанию, ничего не
+ * проставлено), «светлая» и «тёмная» — выбор человека всегда сильнее системы.
+ *
+ * Тёмная здесь не «инверсия светлой»: чистый чёрный и полная белизна текста на
+ * складском экране с сотней строк режут глаз, поэтому фон — тёплый угольный, а
+ * текст — не #fff. Персиковый акцент на тёмном становится ярче (тёмный фон
+ * съедает насыщенность), но кнопки с ним по-прежнему с ТЁМНЫМ текстом.
+ *
+ * Печатные формы (.print-sheet) сюда НЕ входят: у них свои явные чёрным по
+ * белому цвета — документ уходит на бумагу и от темы приложения не зависит.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --primary: #f0a868;
+    --primary-active: #ffc592;
+    --primary-soft: rgba(240, 168, 104, 0.22);
+    --on-primary: #2a1c12;
+    --accent-strong: #f0a868;
+    --secondary: #d99b5f;
+
+    --canvas: #171615;
+    --surface: #201f1d;
+    --hairline: #35332f;
+
+    --ink: rgba(255, 255, 255, 0.92);
+    --ink-secondary: #e8e5e0;
+    --ink-muted: #a8a29a;
+    --ink-faint: #7a746c;
+
+    --warn-bg: rgba(255, 107, 107, 0.16);
+    --warn-ink: #ff9a6b;
+    --danger: #ff6b6b;
+    --danger-soft: rgba(255, 107, 107, 0.18);
+    --danger-line: rgba(255, 107, 107, 0.5);
+    --danger-tint: rgba(255, 107, 107, 0.08);
+    --ok: #4ade80;
+    --ok-bg: rgba(74, 222, 128, 0.16);
+    --amber-bg: rgba(251, 191, 36, 0.18);
+    --amber-ink: #fbbf24;
+    --amber-line: rgba(251, 191, 36, 0.45);
+    --amber-tint: rgba(251, 191, 36, 0.08);
+    --on-danger: #2a1010;
+    --toast-ink: #171615;
+
+    --hover: rgba(255, 255, 255, 0.07);
+    --hover-soft: rgba(255, 255, 255, 0.05);
+    --scrim: rgba(0, 0, 0, 0.62);
+    --scrollbar: rgba(255, 255, 255, 0.22);
+
+    --sheet-group-alt: #33291d;
+    --sheet-group-money: #1e2f24;
+    --sheet-money-cell: #1b2620;
+    --sheet-end-cell: #1e2432;
+
+    /* Тени на тёмном почти не читаются — оставляем их слабыми и добираем
+       разделение hairline-границами, которые здесь светлее фона. */
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 8px 28px rgba(0, 0, 0, 0.55);
+  }
+}
+
+:root[data-theme="dark"] {
+  --primary: #f0a868;
+  --primary-active: #ffc592;
+  --primary-soft: rgba(240, 168, 104, 0.22);
+  --on-primary: #2a1c12;
+  --accent-strong: #f0a868;
+  --secondary: #d99b5f;
+
+  --canvas: #171615;
+  --surface: #201f1d;
+  --hairline: #35332f;
+
+  --ink: rgba(255, 255, 255, 0.92);
+  --ink-secondary: #e8e5e0;
+  --ink-muted: #a8a29a;
+  --ink-faint: #7a746c;
+
+  --warn-bg: rgba(255, 107, 107, 0.16);
+  --warn-ink: #ff9a6b;
+  --danger: #ff6b6b;
+  --danger-soft: rgba(255, 107, 107, 0.18);
+  --danger-line: rgba(255, 107, 107, 0.5);
+  --danger-tint: rgba(255, 107, 107, 0.08);
+  --ok: #4ade80;
+  --ok-bg: rgba(74, 222, 128, 0.16);
+  --amber-bg: rgba(251, 191, 36, 0.18);
+  --amber-ink: #fbbf24;
+  --amber-line: rgba(251, 191, 36, 0.45);
+  --amber-tint: rgba(251, 191, 36, 0.08);
+  --on-danger: #2a1010;
+  --toast-ink: #171615;
+
+  --hover: rgba(255, 255, 255, 0.07);
+  --hover-soft: rgba(255, 255, 255, 0.05);
+  --scrim: rgba(0, 0, 0, 0.62);
+  --scrollbar: rgba(255, 255, 255, 0.22);
+
+  --sheet-group-alt: #33291d;
+  --sheet-group-money: #1e2f24;
+  --sheet-money-cell: #1b2620;
+  --sheet-end-cell: #1e2432;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+/* Браузерные виджеты (календарь в поле даты, стрелки выпадающих списков)
+   рисуются системой: без этого в тёмной теме календарь остаётся белым и
+   слепит на весь экран. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+  }
 }
 
 * {
@@ -207,7 +355,7 @@ button.ghost {
 }
 
 button.ghost:hover {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--hover);
   color: var(--ink);
 }
 
@@ -255,17 +403,17 @@ button.ghost:hover {
 }
 
 .sheet-table th.sheet-group-alt {
-  background: #fdf1e3;
+  background: var(--sheet-group-alt);
 }
 
 /* Деньги по материалу — своим цветом: количества и суммы в одной таблице иначе
    сливаются, и «50» из колонки листов читается как сомы. */
 .sheet-table th.sheet-group-money {
-  background: #eaf6ee;
+  background: var(--sheet-group-money);
 }
 
 .sheet-table td.sheet-money {
-  background: #f5fbf7;
+  background: var(--sheet-money-cell);
 }
 
 /* Числовые колонки — вправо и моноширинно, чтобы разряды читались столбиком. */
@@ -293,7 +441,7 @@ button.ghost:hover {
 }
 
 .sheet-table td.sheet-end {
-  background: #eef3fb; /* «остаток в конце месяца» выделен, как в исходном листе */
+  background: var(--sheet-end-cell); /* «остаток в конце месяца» выделен, как в исходном листе */
 }
 
 .sheet-input {
@@ -336,7 +484,7 @@ button.ghost.kind-row .k {
 
 button.danger {
   background: var(--danger);
-  color: #fff;
+  color: var(--on-danger);
 }
 
 button.danger:hover {
@@ -443,13 +591,13 @@ label {
 }
 
 .badge.amber {
-  background: rgba(221, 130, 0, 0.14);
-  color: #b06a00;
+  background: var(--amber-bg);
+  color: var(--amber-ink);
   border-color: transparent;
 }
 
 .badge.red {
-  background: rgba(217, 53, 53, 0.12);
+  background: var(--danger-soft);
   color: var(--danger);
   border-color: transparent;
 }
@@ -529,7 +677,7 @@ label {
 }
 
 .sidebar a:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--hover-soft);
 }
 
 .sidebar a.active {
@@ -594,6 +742,30 @@ label {
     flex: 0 0 auto;
     min-width: 0;
   }
+
+  /* Переключатель темы добавил в шапку три кнопки, и на 375px строка вылезла
+     за экран на 14px — вся страница поехала вбок. Прятать его нельзя (в цеху
+     тему меняют руками), поэтому ужимаем сам ряд: иконки без лишних полей,
+     язык — короче. Считается так: 38 бургер + 3×28 тема + 92 язык + 81 выход
+     + отступы < 375. */
+  .topbar .lang {
+    padding: 2px;
+    gap: 0;
+  }
+
+  .topbar .lang button {
+    padding: 0 4px;
+  }
+
+  /* Список языков — по содержимому, а не по min-width: «Кыргызча» шире 92px,
+     и поле распирало строку даже с заданным минимумом. */
+  .topbar .lang-select {
+    min-width: 0;
+    width: auto;
+    max-width: 104px;
+    padding: 0 6px;
+    font-size: 12px;
+  }
 }
 
 .burger {
@@ -607,7 +779,7 @@ label {
 }
 
 .burger:hover {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--hover);
 }
 
 /* Контент занимает ВСЮ ширину под шапкой. Раньше он был колонкой в 1200px по
@@ -677,7 +849,7 @@ label {
 }
 
 .table-wrap::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--scrollbar);
   border-radius: 5px;
   border: 2px solid var(--canvas);
 }
@@ -878,7 +1050,7 @@ label {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(15, 15, 15, 0.4);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -995,7 +1167,13 @@ label {
 }
 
 .grid-table thead tr.grid-groups th.grid-group-sheet {
-  background: #fdf1e3;
+  background: var(--sheet-group-alt);
+}
+
+/* Рулонные колонки — своим оттенком: у листа и рулона заполняют РАЗНЫЕ
+   столбцы, и группы должны отличаться с одного взгляда, а не вчитыванием. */
+.grid-table thead tr.grid-groups th.grid-group-roll {
+  background: var(--sheet-group-money);
 }
 
 /* Номер строки — только чтобы сослаться на неё в ошибке. */
@@ -1421,12 +1599,12 @@ label {
 
 /* Low / out-of-stock material cards stand out at a glance. */
 .pos-product.is-out {
-  border-color: rgba(217, 53, 53, 0.45);
-  background: rgba(217, 53, 53, 0.05);
+  border-color: var(--danger-line);
+  background: var(--danger-tint);
 }
 .pos-product.is-low {
-  border-color: rgba(221, 130, 0, 0.4);
-  background: rgba(221, 130, 0, 0.05);
+  border-color: var(--amber-line);
+  background: var(--amber-tint);
 }
 .pos-product .p-stock {
   font-size: 12px;
@@ -1438,7 +1616,7 @@ label {
   color: var(--danger);
 }
 .pos-product.is-low .p-stock {
-  color: #b06a00;
+  color: var(--amber-ink);
 }
 /* Out-of-stock card is not sellable — visibly inert. */
 .pos-product:disabled {
@@ -1559,7 +1737,7 @@ label {
 
 .toast {
   background: var(--ink-secondary);
-  color: #fff;
+  color: var(--toast-ink);
   padding: 12px 16px;
   border-radius: var(--r-md);
   box-shadow: var(--shadow-2);
@@ -2083,7 +2261,7 @@ label {
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.3);
+    background: var(--scrim);
     z-index: 55;
   }
 }

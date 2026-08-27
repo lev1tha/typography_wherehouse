@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 
 import LanguageSwitcher from "../components/LanguageSwitcher.jsx";
+import ThemeSwitcher from "../components/ThemeSwitcher.jsx";
 import { useAuth } from "../auth/AuthContext.jsx";
 
 export default function Login() {
@@ -93,7 +94,10 @@ export default function Login() {
       <div className="card login-card">
         {/* Язык переключался только в шапке, доступной вошедшему: для
             кыргызоязычного сотрудника первый экран системы был на чужом языке. */}
-        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}>
+        {/* Тема — здесь же: экран входа человек видит первым, и если система
+            тёмная, а вход белый, это выглядит как чужое приложение. */}
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+          <ThemeSwitcher />
           <LanguageSwitcher />
         </div>
         <h1 style={{ color: "var(--accent-strong)" }}>{t("app.title")}</h1>

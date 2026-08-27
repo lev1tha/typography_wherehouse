@@ -4,6 +4,7 @@ import { NavLink, Outlet } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext.jsx";
 import Icon from "./Icon.jsx";
+import ThemeSwitcher from "./ThemeSwitcher.jsx";
 import LanguageSwitcher from "./LanguageSwitcher.jsx";
 
 export default function Layout({ nav }) {
@@ -50,6 +51,7 @@ export default function Layout({ nav }) {
               : t("roles.storekeeper")}
           </strong>
           <div className="spacer" />
+          <ThemeSwitcher />
           <LanguageSwitcher />
           <span className="muted" style={{ marginLeft: 4 }}>
             {user?.username || user?.name}

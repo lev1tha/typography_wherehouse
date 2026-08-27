@@ -205,18 +205,35 @@ class MaterialBulkRowSerializer(serializers.ModelSerializer):
         fields = [
             "name", "type", "thickness_mm", "color", "article",
             "sheet_width", "sheet_height", "unit", "is_roll_material",
+            "intake_form", "roll_width", "price_per_pm",
             "critical_balance", "purchase_price", "price_per_unit",
             "price_per_sqm", "piece_price", "cut_rate_per_pm",
             "wholesale_price", "wholesale_min_qty", "production",
         ]
 
     def validate(self, attrs):
-        # Задан размер листа — значит материал листовой: учёт в кв.м, приход
-        # партиями, продажа и листом, и площадью. Отдельной галкой этот выбор
-        # ничего не добавляет, система его уже знает. Явно переданное значение
-        # (ячейка «Учёт» в сетке) побеждает расчёт.
+        # Форму выводим из ЗАПОЛНЕННЫХ полей, без отдельной колонки «форма»:
+        # ширина рулона стоит — значит рулон, размер листа — значит лист. Это
+        # тот же приём, которым лист уже определялся, и он экономит колонку в
+        # сетке, где их и так одиннадцать.
         has_sheet = attrs.get("sheet_width") and attrs.get("sheet_height")
-        if has_sheet and "is_roll_material" not in self.initial_data:
+        has_roll = attrs.get("roll_width")
+        if has_roll and has_sheet:
+            raise serializers.ValidationError(
+                {"roll_width": "У рулона размера листа не бывает: оставьте "
+                               "что-то одно — размер листа или ширину рулона."}
+            )
+        if has_roll:
+            # Рулон продаётся ДЛИНОЙ, и цена за метр — единственная, по которой
+            # его можно продать: без неё касса откажет уже на первой продаже.
+            if not attrs.get("price_per_pm"):
+                raise serializers.ValidationError(
+                    {"price_per_pm": "У рулона нужна цена за пог.м — по ней он и продаётся."}
+                )
+            attrs["is_roll_material"] = True
+            attrs["intake_form"] = Material.IntakeForm.ROLL
+            attrs["unit"] = Material.Unit.SQM
+        elif has_sheet and "is_roll_material" not in self.initial_data:
             attrs["is_roll_material"] = True
         if attrs.get("is_roll_material") and "unit" not in self.initial_data:
             attrs["unit"] = Material.Unit.SQM

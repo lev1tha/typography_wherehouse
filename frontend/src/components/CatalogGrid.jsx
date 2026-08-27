@@ -39,6 +39,10 @@ const BLANK = {
   name: "", type: "", color: "", thickness_mm: "", article: "",
   sheet_width: "", sheet_height: "", production: "", piece_price: "",
   price_per_sqm: "", cut_rate_per_pm: "",
+  // Рулон: ширина полотна и цена за погонный метр. Отдельной колонки «форма»
+  // нет намеренно — заполненная ширина рулона И ЕСТЬ признак рулона, ровно
+  // так же, как размер листа означает лист.
+  roll_width: "", price_per_pm: "",
 };
 
 const isEmptyRow = (row) => Object.values(row).every((v) => String(v ?? "").trim() === "");
@@ -83,6 +87,11 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
     { key: "piece_price", label: t("grid.piecePrice"), width: 86, num: true, group: "price" },
     { key: "price_per_sqm", label: t("grid.sqmPrice"), width: 86, num: true, group: "price" },
     { key: "cut_rate_per_pm", label: t("grid.cutRate"), width: 86, num: true, group: "price" },
+    // Рулонные колонки идут ПОСЛЕДНИМИ: порядок колонок здесь — это порядок
+    // столбцов при вставке из Excel, и новый столбец в середине сдвинул бы все
+    // цены в готовых таблицах заказчика.
+    { key: "roll_width", label: t("grid.rollWidth"), width: 80, num: true, group: "roll" },
+    { key: "price_per_pm", label: t("grid.rollPrice"), width: 92, num: true, group: "roll" },
   ], [types, sites, t]);
 
   // Шапка первого яруса: подряд идущие колонки одной группы под общим заголовком.
@@ -91,6 +100,7 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
       material: t("grid.groupMaterial"),
       sheet: t("grid.groupSheet"),
       price: t("grid.groupPrice"),
+      roll: t("grid.groupRoll"),
     };
     const out = [];
     COLS.forEach((col) => {
@@ -178,6 +188,13 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
         // обычная розничная цена. Колонка одна: смысл у неё один и тот же.
         if (sheet) out.piece_price = row.piece_price || 0;
         else out.price_per_unit = row.piece_price || 0;
+        // Рулон: ширину полотна и цену за метр шлём, только когда ширина
+        // заполнена — по ней сервер и понимает, что это рулон. Пустые поля не
+        // отправляем вовсе, иначе каждый лист приезжал бы с «рулонными» нулями.
+        if (row.roll_width) {
+          out.roll_width = row.roll_width;
+          out.price_per_pm = row.price_per_pm || 0;
+        }
         return out;
       });
       const r = await api.post("/warehouse/materials/bulk/", { rows: payload });

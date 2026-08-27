@@ -15,6 +15,14 @@
     />
   </head>
   <body>
+    <!-- Тема ставится ДО отрисовки: если делать это в React, страница успевает
+         мигнуть белым на каждой загрузке — в тёмном цеху это заметно. -->
+    <script>
+      try {
+        var t = localStorage.getItem("cloude-theme");
+        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>

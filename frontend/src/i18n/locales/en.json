@@ -634,7 +634,10 @@
     "save": "Save {{count}}",
     "saved": "Materials added: {{count}}",
     "hasErrors": "Not saved: {{count}} rows have errors. Nothing was added — fix them and submit again.",
-    "rowNo": "Row {{row}}"
+    "rowNo": "Row {{row}}",
+    "groupRoll": "Roll",
+    "rollWidth": "width, m",
+    "rollPrice": "per running m"
   },
   "writeoffReason": {
     "DAMAGE": "Damage",
@@ -1085,5 +1088,31 @@
   "machine": {
     "CNC": "CNC",
     "LASER": "Laser"
+  },
+  "recipes": {
+    "edit": "Set up consumption",
+    "hint": "What the service consumes on top of the main material: glue, fasteners, solvent. It is deducted from stock automatically on sale and counts into the line's cost.",
+    "material": "Consumable",
+    "rate": "Consumption rate",
+    "mode": "How to count",
+    "modePerSqm": "Per sq.m",
+    "modeFixed": "Fixed per order",
+    "modePerSqmHint": "Counted from the piece area: 0.05 per sq.m on a 0.5 sq.m piece is 0.025, no matter how many metres are cut.",
+    "modeFixedHint": "The same amount for every service line, whatever the size.",
+    "perSqm": "per sq.m",
+    "perOrder": "per order",
+    "add": "Add consumable",
+    "added": "Consumable added",
+    "removed": "Consumable removed",
+    "empty": "No consumables — the service deducts nothing beyond the material.",
+    "needMaterial": "Pick a consumable",
+    "needRate": "Enter the consumption rate",
+    "confirmDelete": "Remove “{{name}}” from the card? It will no longer be deducted."
+  },
+  "theme": {
+    "label": "Appearance",
+    "system": "System",
+    "light": "Light",
+    "dark": "Dark"
   }
 }

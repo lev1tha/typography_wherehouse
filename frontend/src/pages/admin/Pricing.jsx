@@ -5,6 +5,7 @@ import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
 import Icon from "../../components/Icon.jsx";
 import ServiceFormModal from "../../components/ServiceFormModal.jsx";
+import ServiceRecipeModal from "../../components/ServiceRecipeModal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
 // Which price fields drive each service kind's billing (mirrors the backend):
@@ -19,7 +20,7 @@ function rateFields(service, t) {
   return [["base_price", t("pricing.basePrice")]];
 }
 
-function ServiceCard({ service, onSaved }) {
+function ServiceCard({ service, materials, onSaved }) {
   const { t } = useTranslation();
   const { toast } = useUI();
   const fields = rateFields(service, t);
@@ -31,6 +32,7 @@ function ServiceCard({ service, onSaved }) {
     ...Object.fromEntries(fields.map(([key]) => [key, service[key]])),
   });
   const [busy, setBusy] = useState(false);
+  const [recipes, setRecipes] = useState(false);
 
   async function save() {
     setBusy(true);
@@ -91,7 +93,26 @@ function ServiceCard({ service, onSaved }) {
         ) : (
           <span className="muted">{t("common.empty")}</span>
         )}
+        {/* Карта правится здесь же. Раньше строку расхода можно было завести
+            только через Django-админку, и «клей списывается сам» оставалось
+            обещанием: на складе он таял, а в системе стоял нетронутым. */}
+        <button
+          className="ghost"
+          style={{ marginTop: 4, padding: 0, height: "auto", color: "var(--accent-strong)", fontWeight: 600 }}
+          onClick={() => setRecipes(true)}
+        >
+          {t("recipes.edit")}
+        </button>
       </div>
+
+      {recipes && (
+        <ServiceRecipeModal
+          service={service}
+          materials={materials}
+          onClose={() => setRecipes(false)}
+          onSaved={onSaved}
+        />
+      )}
       <button onClick={save} disabled={busy}>
         {t("common.save")}
       </button>
@@ -106,12 +127,20 @@ export default function Pricing() {
   const { t } = useTranslation();
   const { toast } = useUI();
   const [services, setServices] = useState([]);
+  // Каталог нужен техкарте — выбрать расходник. page_size: без него приезжает
+  // первая страница из 25, и клея в списке может не оказаться вовсе.
+  const [materials, setMaterials] = useState([]);
   const [commission, setCommission] = useState("");
   const [savingC, setSavingC] = useState(false);
   const [creating, setCreating] = useState(false);
 
   function loadServices() {
     api.get("/services/services/").then((r) => setServices(r.data.results));
+  }
+  function loadMaterials() {
+    api
+      .get("/warehouse/materials/", { params: { ordering: "name", page_size: 500 } })
+      .then((r) => setMaterials(r.data.results || []));
   }
   function loadSettings() {
     api.get("/services/settings/").then((r) => setCommission(r.data.master_commission_percent));
@@ -120,6 +149,7 @@ export default function Pricing() {
   useEffect(() => {
     loadServices();
     loadSettings();
+    loadMaterials();
   }, []);
 
   async function saveCommission() {
@@ -159,7 +189,7 @@ export default function Pricing() {
       {services
         .filter((s) => s.is_active !== false)
         .map((s) => (
-          <ServiceCard key={s.id} service={s} onSaved={loadServices} />
+          <ServiceCard key={s.id} service={s} materials={materials} onSaved={loadServices} />
         ))}
 
       {services.filter((s) => s.is_active !== false).length === 0 && (
