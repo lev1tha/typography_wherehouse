@@ -238,3 +238,121 @@ class CustomerPortalPayloadTests(APITestCase):
         order = self._my_orders()[0]
         self.assertTrue(order["has_service"])
         self.assertEqual(order["fulfillment_status"], "PROCESSING")
+
+
+class CustomerOrderIsolationTests(APITestCase):
+    """Кабинет отдаёт ТОЛЬКО свои заказы.
+
+    Изоляция держится на одной строке во вьюхе (`filter(client=...)`), а цена
+    ошибки здесь выше, чем везде: клиенты в Бишкеке друг друга знают, и чужой
+    заказ в списке — это не «неудобство интерфейса», а утечка. Строку без теста
+    может снять любая последующая правка — например, «показывать заказы всей
+    организации», — и никто этого не заметит.
+    """
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="iso_admin", password="x", role=User.Role.ADMIN
+        )
+        self.material = Material.objects.create(
+            name="Плёнка", unit=Material.Unit.PIECE, quantity=Decimal("100"),
+            price_per_unit=Decimal("50"), purchase_price=Decimal("30"),
+        )
+        self.mine = self._customer("Айбек", "+996700777111", "mine99")
+        self.stranger = self._customer("Чужой", "+996700777222", "hers99")
+
+    def _customer(self, name, phone, password):
+        c = Client.objects.create(
+            type=Client.Type.PHYSICAL, full_name=name, phone=phone
+        )
+        c.set_password(password)
+        c.save()
+        return c
+
+    def _order(self, customer, quantity):
+        """Заказ на клиента; количество разное, чтобы отличать заказы в выдаче."""
+        self.client.force_authenticate(self.admin)
+        r = self.client.post("/api/sales/receipts/checkout/", {
+            "payment_method": "CASH", "pay_full": True, "client_id": customer.id,
+            "items": [{
+                "type": "MATERIAL", "material": self.material.id,
+                "quantity": quantity,
+            }],
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.client.force_authenticate(None)
+        return r.data["id"]
+
+    def _token(self, phone, password):
+        r = self.client.post(
+            LOGIN, {"phone": phone, "password": password}, format="json"
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.data["access"]
+
+    def _orders_of(self, phone, password):
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {self._token(phone, password)}"
+        )
+        r = self.client.get("/api/customer/orders/")
+        self.client.credentials()
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.data
+
+    def test_customer_sees_only_own_orders(self):
+        mine = self._order(self.mine, 1)
+        hers = self._order(self.stranger, 2)
+
+        ids = {o["id"] for o in self._orders_of("+996700777111", "mine99")}
+        self.assertIn(mine, ids)
+        self.assertNotIn(hers, ids, "в кабинете виден ЧУЖОЙ заказ — утечка")
+
+    def test_isolation_holds_in_both_directions(self):
+        """Не «первый клиент видит всё, второй ничего», а каждый — своё."""
+        mine = self._order(self.mine, 1)
+        hers = self._order(self.stranger, 2)
+
+        self.assertEqual(
+            [o["id"] for o in self._orders_of("+996700777111", "mine99")], [mine]
+        )
+        self.assertEqual(
+            [o["id"] for o in self._orders_of("+996700777222", "hers99")], [hers]
+        )
+
+    def test_customer_without_orders_sees_an_empty_list(self):
+        """Пустой список, а не чужие заказы и не ошибка."""
+        self._order(self.stranger, 2)
+        self.assertEqual(self._orders_of("+996700777111", "mine99"), [])
+
+    def test_orders_of_a_deleted_link_do_not_leak(self):
+        """Заказ без клиента (розница «без имени») не принадлежит никому."""
+        self.client.force_authenticate(self.admin)
+        r = self.client.post("/api/sales/receipts/checkout/", {
+            "payment_method": "CASH", "pay_full": True,
+            "items": [{
+                "type": "MATERIAL", "material": self.material.id, "quantity": 1,
+            }],
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.client.force_authenticate(None)
+
+        self.assertEqual(self._orders_of("+996700777111", "mine99"), [])
+
+    def test_customer_token_does_not_open_the_staff_api(self):
+        """Токен кабинета — не пропуск в чеки цеха с себестоимостью и маржой."""
+        self._order(self.mine, 1)
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {self._token('+996700777111', 'mine99')}"
+        )
+        for url in (
+            "/api/sales/receipts/",
+            "/api/warehouse/materials/",
+            "/api/clients/",
+            "/api/finance/report/",
+        ):
+            r = self.client.get(url)
+            self.assertIn(
+                r.status_code, (401, 403),
+                f"клиентский токен пустили в {url} — {r.status_code}",
+            )
+        self.client.credentials()

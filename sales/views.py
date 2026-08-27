@@ -43,6 +43,42 @@ from .serializers import (
     SaleItemInputSerializer,
 )
 
+# Порядок производства. Нужен ровно для одного: понять, поехал заказ вперёд или
+# его вернули назад, — от этого зависит, что написать клиенту.
+_FULFILLMENT_ORDER = {
+    Receipt.FulfillmentStatus.PROCESSING: 0,
+    Receipt.FulfillmentStatus.READY: 1,
+    Receipt.FulfillmentStatus.ISSUED: 2,
+}
+
+
+def _is_rollback(was: str, now: str) -> bool:
+    return _FULFILLMENT_ORDER[now] < _FULFILLMENT_ORDER[was]
+
+
+_READY = "✅ Ваш заказ по резке букв успешно выполнен и ждёт вас на складе!"
+_ISSUED = "📦 Ваш заказ выдан. Спасибо, что выбрали нас!"
+
+# Что уходит клиенту на каждый переход. Ключ — пара «откуда, куда», а не просто
+# «куда»: клиенту, которому уже написали «заказ готов», второе такое же
+# сообщение ничего не объясняет. Назад заказ едет только из-за ошибки цеха, и
+# сказать об этом должен сам текст — иначе клиент выйдет из дома зря.
+FULFILLMENT_MESSAGES = {
+    (Receipt.FulfillmentStatus.PROCESSING, Receipt.FulfillmentStatus.READY): _READY,
+    (Receipt.FulfillmentStatus.PROCESSING, Receipt.FulfillmentStatus.ISSUED): _ISSUED,
+    (Receipt.FulfillmentStatus.READY, Receipt.FulfillmentStatus.ISSUED): _ISSUED,
+    (Receipt.FulfillmentStatus.READY, Receipt.FulfillmentStatus.PROCESSING): (
+        "🔧 Мы поторопились: заказ ещё в работе. Сообщим, когда он будет готов."
+    ),
+    (Receipt.FulfillmentStatus.ISSUED, Receipt.FulfillmentStatus.PROCESSING): (
+        "🔧 Отметка о выдаче была ошибкой — заказ ещё в работе. "
+        "Сообщим, когда он будет готов."
+    ),
+    (Receipt.FulfillmentStatus.ISSUED, Receipt.FulfillmentStatus.READY): (
+        "✅ Отметка о выдаче была ошибкой — заказ ждёт вас на складе."
+    ),
+}
+
 
 def _receipt_lines_text(receipt: Receipt) -> str:
     lines = []
@@ -752,59 +788,78 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 "Заказ отменён и возвращён — статус выполнения не меняется."
             )
 
-    def _set_fulfillment(self, request, receipt, status_value, message, log_text):
+    def _set_fulfillment(self, request, receipt, status_value):
         """Проставить статус, уведомить клиента и записать в журнал — один раз.
 
         Повторный вызов возвращает 200 и НЕ шлёт уведомление второй раз: статус
         уже такой, менять нечего, а клиент не должен получать «ваш заказ готов»
         на каждое нажатие кнопки.
+
+        Ход разрешён в любую сторону: кнопку нажимают руками и промахиваются по
+        ней так же, как по любой другой. Раньше «Выдан» был тупиком — промах по
+        нему нельзя было исправить ничем, кроме удаления заказа, и цех оставался
+        с заказом, который числится у клиента, а лежит на полке.
         """
-        if receipt.fulfillment_status == status_value:
+        was = receipt.fulfillment_status
+        if was == status_value:
             return self._fresh_response(receipt)
         receipt.fulfillment_status = status_value
         receipt.save(update_fields=["fulfillment_status", "updated_at"])
         if receipt.client:
-            notify_customer(receipt.client, message)
-        AuditLog.record(request.user, log_text.format(n=receipt.order_number))
+            notify_customer(receipt.client, FULFILLMENT_MESSAGES[was, status_value])
+        AuditLog.record(
+            request.user,
+            f"Заказ по чеку {receipt.order_number}: "
+            f"«{Receipt.FulfillmentStatus(was).label}» → "
+            f"«{Receipt.FulfillmentStatus(status_value).label}»"
+            + (" (откат)" if _is_rollback(was, status_value) else ""),
+        )
         return self._fresh_response(receipt)
+
+    def _fulfillment_action(self, request, status_value):
+        """Общее начало всех трёх ручек: заказ жив — двигаем, отменён — отказ."""
+        receipt = self.get_object()
+        try:
+            self._ensure_fulfillable(receipt)
+        except ItemEditRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return self._set_fulfillment(request, receipt, status_value)
 
     @action(detail=True, methods=["post"], url_path="mark-ready")
     def mark_ready(self, request, pk=None):
         """POST /receipts/<id>/mark-ready/ — service ready, notify customer."""
-        receipt = self.get_object()
-        try:
-            self._ensure_fulfillable(receipt)
-        except ItemEditRejected as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        # Назад из «выдан» хода нет: товар у клиента, и «готовится» после этого
-        # означало бы, что он всё ещё в цехе.
-        if receipt.fulfillment_status == Receipt.FulfillmentStatus.ISSUED:
-            return Response(
-                {"detail": "Заказ уже выдан клиенту — вернуть его в «готов» нельзя."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        return self._set_fulfillment(
-            request,
-            receipt,
-            Receipt.FulfillmentStatus.READY,
-            "✅ Ваш заказ по резке букв успешно выполнен и ждёт вас на складе!",
-            "Заказ по чеку {n} готов к выдаче",
-        )
+        return self._fulfillment_action(request, Receipt.FulfillmentStatus.READY)
 
     @action(detail=True, methods=["post"], url_path="mark-issued")
     def mark_issued(self, request, pk=None):
-        """POST /receipts/<id>/mark-issued/ — order handed to the customer."""
-        receipt = self.get_object()
-        try:
-            self._ensure_fulfillable(receipt)
-        except ItemEditRejected as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        # Выдать можно и из «готовится»: мелкий заказ отдают сразу, не отмечая
-        # готовность отдельным нажатием.
-        return self._set_fulfillment(
-            request,
-            receipt,
-            Receipt.FulfillmentStatus.ISSUED,
-            "📦 Ваш заказ выдан. Спасибо, что выбрали нас!",
-            "Заказ по чеку {n} выдан клиенту",
-        )
+        """POST /receipts/<id>/mark-issued/ — order handed to the customer.
+
+        Выдать можно и из «готовится»: мелкий заказ отдают сразу, не отмечая
+        готовность отдельным нажатием.
+        """
+        return self._fulfillment_action(request, Receipt.FulfillmentStatus.ISSUED)
+
+    @action(detail=True, methods=["post"], url_path="mark-processing")
+    def mark_processing(self, request, pk=None):
+        """POST /receipts/<id>/mark-processing/ — вернуть заказ в работу.
+
+        Ручка появилась только ради ошибочного нажатия: «вперёд» заказ идёт сам
+        по себе, а назад его двигают, когда готовность отметили раньше времени.
+        """
+        return self._fulfillment_action(request, Receipt.FulfillmentStatus.PROCESSING)
+
+    @action(detail=True, methods=["post"], url_path="set-fulfillment")
+    def set_fulfillment(self, request, pk=None):
+        """POST /receipts/<id>/set-fulfillment/ {"status": "..."} — любой статус.
+
+        Одна ручка вместо трёх для интерфейса, где статус выбирают списком, а не
+        тремя кнопками. Проверки те же самые.
+        """
+        wanted = request.data.get("status")
+        if wanted not in Receipt.FulfillmentStatus.values:
+            allowed = ", ".join(Receipt.FulfillmentStatus.values)
+            return Response(
+                {"detail": f"Неизвестный статус выполнения. Ожидается один из: {allowed}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return self._fulfillment_action(request, wanted)

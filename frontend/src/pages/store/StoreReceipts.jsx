@@ -44,20 +44,30 @@ export default function StoreReceipts() {
 
   const nextShort = (s) => (s === "PROCESSING" ? t("receipts.toReady") : t("receipts.toIssued"));
 
-  async function advance(r, e) {
+  // Шаг назад по производству. Нужен только для ошибочного нажатия: вперёд
+  // заказ идёт сам, а назад его возвращают, когда готовность или выдачу
+  // отметили раньше времени. Из «Готовится» назад некуда — кнопки там нет.
+  const PREV = { ISSUED: "READY", READY: "PROCESSING" };
+  const backShort = (s) =>
+    PREV[s] === "READY" ? t("receipts.toReady") : t("receipts.toProcessing");
+
+  async function move(r, status, e) {
     e?.stopPropagation();
-    const action = r.fulfillment_status === "PROCESSING" ? "mark-ready" : "mark-issued";
     setAdvancingId(r.id);
     try {
-      await api.post(`/sales/receipts/${r.id}/${action}/`, {});
+      await api.post(`/sales/receipts/${r.id}/set-fulfillment/`, { status });
       load();
       toast(t("receipts.statusUpdated"));
-    } catch {
-      toast(t("common.error"), "error");
+    } catch (err) {
+      toast(err?.response?.data?.detail || t("common.error"), "error");
     } finally {
       setAdvancingId(null);
     }
   }
+
+  const advance = (r, e) =>
+    move(r, r.fulfillment_status === "PROCESSING" ? "READY" : "ISSUED", e);
+  const rollback = (r, e) => move(r, PREV[r.fulfillment_status], e);
 
   async function undoPay(r, e) {
     e?.stopPropagation();
@@ -87,15 +97,17 @@ export default function StoreReceipts() {
   // раньше здесь был только возврат всего чека одним подтверждением.
   const [refunding, setRefunding] = useState(false);
 
-  async function setFulfillment(action) {
+  async function setFulfillment(status) {
     setBusy(true);
     try {
-      const { data } = await api.post(`/sales/receipts/${open.id}/${action}/`, {});
+      const { data } = await api.post(
+        `/sales/receipts/${open.id}/set-fulfillment/`, { status }
+      );
       setOpen(data);
       load();
       toast(t("receipts.statusUpdated"));
-    } catch {
-      toast(t("common.error"), "error");
+    } catch (err) {
+      toast(err?.response?.data?.detail || t("common.error"), "error");
     } finally {
       setBusy(false);
     }
@@ -129,6 +141,17 @@ export default function StoreReceipts() {
         r.has_service ? (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
             <FulfillmentBadge status={r.fulfillment_status} />
+            {PREV[r.fulfillment_status] && (
+              <button
+                className="secondary"
+                style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
+                disabled={advancingId === r.id}
+                onClick={(e) => rollback(r, e)}
+                title={t("receipts.rollbackTitle")}
+              >
+                ← {backShort(r.fulfillment_status)}
+              </button>
+            )}
             {r.fulfillment_status !== "ISSUED" && (
               <button
                 className="secondary"
@@ -281,13 +304,25 @@ export default function StoreReceipts() {
                 </button>
               )}
               {open.has_service && open.fulfillment_status === "PROCESSING" && (
-                <button className="secondary" onClick={() => setFulfillment("mark-ready")} disabled={busy}>
+                <button className="secondary" onClick={() => setFulfillment("READY")} disabled={busy}>
                   {t("receipts.markReady")}
                 </button>
               )}
               {open.has_service && open.fulfillment_status === "READY" && (
-                <button className="secondary" onClick={() => setFulfillment("mark-issued")} disabled={busy}>
+                <button className="secondary" onClick={() => setFulfillment("ISSUED")} disabled={busy}>
                   {t("receipts.markIssued")}
+                </button>
+              )}
+              {/* Откат прямо в окне чека: сюда заходят разбираться с заказом,
+                  а промах по «Готово» замечают чаще всего именно здесь. */}
+              {open.has_service && open.fulfillment_status !== "PROCESSING" && (
+                <button
+                  className="secondary"
+                  onClick={() => setFulfillment("PROCESSING")}
+                  disabled={busy}
+                  title={t("receipts.rollbackTitle")}
+                >
+                  ← {t("receipts.markProcessing")}
                 </button>
               )}
               {canRefund && (

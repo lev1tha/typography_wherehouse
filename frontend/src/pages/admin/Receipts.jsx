@@ -82,20 +82,30 @@ function ReceiptsTab() {
 
   const nextShort = (s) => (s === "PROCESSING" ? t("receipts.toReady") : t("receipts.toIssued"));
 
-  async function advance(r, e) {
+  // Шаг назад по производству. Нужен только для ошибочного нажатия: вперёд
+  // заказ идёт сам, а назад его возвращают, когда готовность или выдачу
+  // отметили раньше времени. Из «Готовится» назад некуда — кнопки там нет.
+  const PREV = { ISSUED: "READY", READY: "PROCESSING" };
+  const backShort = (s) =>
+    PREV[s] === "READY" ? t("receipts.toReady") : t("receipts.toProcessing");
+
+  async function move(r, status, e) {
     e?.stopPropagation();
-    const action = r.fulfillment_status === "PROCESSING" ? "mark-ready" : "mark-issued";
     setAdvancingId(r.id);
     try {
-      await api.post(`/sales/receipts/${r.id}/${action}/`, {});
+      await api.post(`/sales/receipts/${r.id}/set-fulfillment/`, { status });
       load();
       toast(t("receipts.statusUpdated"));
-    } catch {
-      toast(t("common.error"), "error");
+    } catch (err) {
+      toast(err?.response?.data?.detail || t("common.error"), "error");
     } finally {
       setAdvancingId(null);
     }
   }
+
+  const advance = (r, e) =>
+    move(r, r.fulfillment_status === "PROCESSING" ? "READY" : "ISSUED", e);
+  const rollback = (r, e) => move(r, PREV[r.fulfillment_status], e);
 
   // Удаление — не возврат: возврат клиент принёс обратно, и в отчётах он обязан
   // остаться; удаление — это «такого заказа не было». Поэтому и текст
@@ -197,6 +207,17 @@ function ReceiptsTab() {
         r.has_service ? (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
             <FulfillmentBadge status={r.fulfillment_status} />
+            {PREV[r.fulfillment_status] && !readOnly && (
+              <button
+                className="secondary"
+                style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
+                disabled={advancingId === r.id}
+                onClick={(e) => rollback(r, e)}
+                title={t("receipts.rollbackTitle")}
+              >
+                ← {backShort(r.fulfillment_status)}
+              </button>
+            )}
             {r.fulfillment_status !== "ISSUED" && !readOnly && (
               <button
                 className="secondary"
