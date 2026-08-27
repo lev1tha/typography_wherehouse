@@ -86,7 +86,10 @@ function withNumbersFixed(material) {
 // вообще — ни закупочную, ни за лист, ни у одного материала.
 // На выходе из поля показываем сохранённое значение: оно может отличаться на
 // копейку, потому что за кв.м в базе лежит с двумя знаками.
-const NumField = ({ label, value, onChange, grow }) => {
+// `disabled` + `placeholder` — чтобы поле, которое пока нечем заполнить, стояло
+// на месте серым и с объяснением, а не исчезало. Исчезнувшее поле читается как
+// «такого в системе нет», и заказчик приходит спрашивать, где оно.
+const NumField = ({ label, value, onChange, grow, disabled, placeholder }) => {
   const [draft, setDraft] = useState(null);
   return (
     <div className={grow ? "field grow" : "field"} style={grow ? { margin: 0 } : undefined}>
@@ -94,6 +97,8 @@ const NumField = ({ label, value, onChange, grow }) => {
       <input
         type="number"
         step="any"
+        disabled={disabled}
+        placeholder={placeholder}
         value={draft ?? value ?? ""}
         onChange={(e) => {
           setDraft(e.target.value);
@@ -930,23 +935,34 @@ export default function Catalog({ embedded = false }) {
                     длины. Раньше у рулона стояло «Закупка, сом/рулон», а
                     считалось оно по площади ЛИСТА (у плёнки она осталась от
                     карточки листа) — цифра не значила ничего. */}
-                {matForm === "ROLL"
-                  ? rollWidth > 0 && (
-                      <NumField
-                        grow
-                        label={t("warehouse.purchasePerPm")}
-                        value={prettify(toPm(editing.purchase_price), fromPm, editing.purchase_price)}
-                        onChange={(v) => setF("purchase_price")(fromPm(v))}
-                      />
-                    )
-                  : sheetArea > 0 && (
-                      <NumField
-                        grow
-                        label={t("warehouse.purchasePerSheet", { unit: wholeUnit })}
-                        value={prettify(toSheet(editing.purchase_price), toSqm, editing.purchase_price)}
-                        onChange={(v) => setF("purchase_price")(toSqm(v))}
-                      />
-                    )}
+                {/* Поле стоит ВСЕГДА, даже когда пересчитывать не из чего:
+                    размер листа (ширину рулона) ещё не ввели. Раньше оно просто
+                    не рисовалось, и в «Новом материале» закупки за лист не было
+                    вовсе — заказчик решал, что система её не умеет, хотя не
+                    хватало одной цифры выше по форме. */}
+                {matForm === "ROLL" ? (
+                  <NumField
+                    grow
+                    disabled={!(rollWidth > 0)}
+                    placeholder={t("warehouse.needRollWidth")}
+                    label={t("warehouse.purchasePerPm")}
+                    value={rollWidth > 0
+                      ? prettify(toPm(editing.purchase_price), fromPm, editing.purchase_price)
+                      : ""}
+                    onChange={(v) => setF("purchase_price")(fromPm(v))}
+                  />
+                ) : (
+                  <NumField
+                    grow
+                    disabled={!(sheetArea > 0)}
+                    placeholder={t("warehouse.needSheetSize")}
+                    label={t("warehouse.purchasePerSheet", { unit: wholeUnit })}
+                    value={sheetArea > 0
+                      ? prettify(toSheet(editing.purchase_price), toSqm, editing.purchase_price)
+                      : ""}
+                    onChange={(v) => setF("purchase_price")(toSqm(v))}
+                  />
+                )}
               </div>
               {/* Рулон продаётся ДЛИНОЙ: ширина у него не выбор клиента, а
                   свойство товара (ткань 0.9 м режут поперёк на всю ширину).
@@ -976,10 +992,36 @@ export default function Catalog({ embedded = false }) {
                   </div>
                 </>
               ) : (
-                <div className="row">
-                  <NumField grow label={t("warehouse.retailPerSqm")} value={editing.price_per_sqm} onChange={setSqmPrice} />
-                  <NumField grow label={t("pricing.cutRatePm")} value={editing.cut_rate_per_pm} onChange={setF("cut_rate_per_pm")} />
-                </div>
+                <>
+                  {/* Две цены продажи стоят ПАРОЙ — ровно как две закупочные
+                      строкой выше. Раньше «сом/кв.м» соседствовала со ставкой
+                      резки, а «сом/лист» жила отдельным блоком ниже, и в форме
+                      получалось две разные «Цены продажи», разнесённые
+                      подзаголовком: заказчик находил одну и решал, что второй
+                      нет. Величины парные — пусть и стоят парой. */}
+                  <div className="row">
+                    <NumField grow label={t("warehouse.retailPerSqm")} value={editing.price_per_sqm} onChange={setSqmPrice} />
+                    <NumField grow label={t("warehouse.retailPerSheet", { unit: wholeUnit })} value={editing.piece_price} onChange={setPiecePrice} />
+                  </div>
+                  <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
+                    {t("warehouse.piecePriceHint", { unit: wholeUnit })}
+                  </p>
+                  {/* Цены назначены порознь — показываем, во что лист обходится
+                      по метражу. Это ответ на «а не продаю ли я лист дешевле,
+                      чем тот же метраж кусками»: сравнивать 4376 сом/лист и
+                      1700 сом/кв.м в уме, деля на 2,9768, никто не станет. */}
+                  {sheetArea > 0 && retailPairDiverged() && (
+                    <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
+                      {t("warehouse.piecePriceDiverged", {
+                        perSqm: toSqm(editing.piece_price),
+                        unit: wholeUnit,
+                      })}
+                    </p>
+                  )}
+                  <div className="row">
+                    <NumField grow label={t("pricing.cutRatePm")} value={editing.cut_rate_per_pm} onChange={setF("cut_rate_per_pm")} />
+                  </div>
+                </>
               )}
               {/* Подсказка про пересчёт по площади ЛИСТА — только у листа.
                   У рулона пара считается по ширине, и площадь листа, оставшаяся
@@ -989,31 +1031,24 @@ export default function Catalog({ embedded = false }) {
                   {t("warehouse.sheetAreaHint", { area: round2(sheetArea) })}
                 </p>
               )}
-              <NumField label={`${t("warehouse.critical")} (кв.м)`} value={editing.critical_balance} onChange={setF("critical_balance")} />
-
-              {/* «Продажа листом» рулону не нужна: его единица продажи —
-                  погонный метр, отдельной цены «за рулон целиком» не бывает. */}
-              {matForm !== "ROLL" && (
-                <>
-              <SectionLabel>{t("warehouse.sheetSale", { unit: wholeUnit })}</SectionLabel>
-              <div className="row">
-                <NumField grow label={t("warehouse.retailPerSheet", { unit: wholeUnit })} value={editing.piece_price} onChange={setPiecePrice} />
-              </div>
-              <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
-                {t("warehouse.piecePriceHint", { unit: wholeUnit })}
-              </p>
-              {/* Цены назначены порознь — показываем, во что лист обходится по
-                  метражу. Это ответ на «а не продаю ли я лист дешевле, чем тот
-                  же метраж кусками»: сравнивать 4376 сом/лист и 1700 сом/кв.м
-                  в уме, деля на 2,9768, никто не станет. */}
-              {sheetArea > 0 && retailPairDiverged() && (
-                <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
-                  {t("warehouse.piecePriceDiverged", {
-                    perSqm: toSqm(editing.piece_price),
-                    unit: wholeUnit,
-                  })}
+              {/* Размер листа обязателен — сервер без него карточку не сохранит,
+                  как и рулон без ширины. Говорим здесь, до кнопки, а не тостом
+                  после. Из размера считается и остаток в листах, и закупка за
+                  лист: без него обе строки в каталоге просто не показывались. */}
+              {matForm === "SHEET" && !(sheetArea > 0) && (
+                <p style={{ color: "var(--danger)", fontSize: 12, marginTop: -2 }}>
+                  {t("warehouse.sheetSizeRequired")}
                 </p>
               )}
+              <NumField label={`${t("warehouse.critical")} (кв.м)`} value={editing.critical_balance} onChange={setF("critical_balance")} />
+
+              {/* Опт рулону не нужен: его единица продажи — погонный метр, а
+                  «оптом от 5 рулонов» никто не считает. Сама цена за лист
+                  переехала наверх, к цене за кв.м: они парные. Здесь остался
+                  опт — он про КОЛИЧЕСТВО листов, а не про способ продажи. */}
+              {matForm !== "ROLL" && (
+                <>
+              <SectionLabel>{t("warehouse.wholesaleSection", { unit: wholeUnit })}</SectionLabel>
               <div className="row">
                 <NumField grow label={t("warehouse.wholesalePrice", { unit: wholeUnit })} value={editing.wholesale_price} onChange={setF("wholesale_price")} />
                 <NumField grow label={t("warehouse.wholesaleMin", { unit: wholeUnit })} value={editing.wholesale_min_qty} onChange={setF("wholesale_min_qty")} />
