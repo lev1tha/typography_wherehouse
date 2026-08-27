@@ -772,7 +772,8 @@
     "stockTitle": "Stock (working capital)",
     "stockHint": "Money invested in material. Not an expense: the material sits on the shelf and reduces profit as it is sold — via “Cost of materials sold”.",
     "stockPurchases": "Material purchased this period",
-    "stockValueNow": "Material in stock now"
+    "stockValueNow": "Material in stock now",
+    "investmentTileSub": "not part of profit or “Expenses”"
   },
   "expenses": {
     "amount": "Amount",

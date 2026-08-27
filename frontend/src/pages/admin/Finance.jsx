@@ -373,6 +373,25 @@ export default function Finance() {
           color={Number(report.profit) >= 0 ? "ok" : "danger"}
         />
         <Stat label={t("finance.clientDebt")} value={som(report.client_debt)} color="accent-strong" />
+        {/* Оборот — на первом экране, а не под сгибом: «где мои деньги в
+            складе» — первый вопрос владельца, ответ не должен требовать
+            прокрутки. Подробности — в карточке «Склад (оборот)» ниже. */}
+        {report.stock && (
+          <Stat
+            label={t("finance.stockTitle")}
+            value={som(report.stock.value_now)}
+            sub={`${t("finance.stockPurchases")}: ${som(report.stock.purchases)}`}
+          />
+        )}
+        {/* Инвестиции наверху показываем, только когда они есть: плитка с
+            вечным нулём — шум. Свой блок ниже виден всегда. */}
+        {Number(report.investments?.total) > 0 && (
+          <Stat
+            label={t("finance.blockInvestment")}
+            value={som(report.investments.total)}
+            sub={t("finance.investmentTileSub")}
+          />
+        )}
       </div>
 
       <DailyProfitChart year={period.year} month={period.month} reloadKey={revision} />
