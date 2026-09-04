@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import api from "../api/api.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { itemTitle } from "../utils/itemLabel.js";
 
 const dayOf = (iso) => (iso ? new Date(iso).toLocaleDateString("sv-SE") : "");
 const today = () => new Date().toLocaleDateString("sv-SE");
@@ -38,7 +39,7 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
       .filter((i) => !i.is_returned)
       .map((i) => ({
         id: i.id,
-        name: i.material_name || i.service_name || "—",
+        name: itemTitle(i),
         quantity: String(+Number(i.quantity).toFixed(4)),
         price: String(+Number(i.price_per_item).toFixed(2)),
         remove: false,

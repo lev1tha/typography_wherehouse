@@ -10,6 +10,7 @@ import Modal from "../../components/Modal.jsx";
 import PrintSupply from "../../components/PrintSupply.jsx";
 import RefSelect from "../../components/RefSelect.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
+import WasteModal from "../../components/WasteModal.jsx";
 
 // Приходные накладные — поставка целиком, одним документом.
 //
@@ -39,8 +40,14 @@ function lineQuantity(line, material) {
 export default function Supplies({ embedded = false }) {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
-  const { isAdmin } = useAuth();
+  const { isAdmin, seesMoney } = useAuth();
   const [rows, setRows] = useState([]);
+  // Второй раздел экрана — ОТХОД (брак): те же мерки, что у прихода, но в
+  // минус. Стоит рядом с приёмкой, потому что брак видит тот, кто принимает
+  // товар и стоит у станка, — складовщик.
+  const [section, setSection] = useState("intake");
+  const [waste, setWaste] = useState([]);
+  const [wasteOpen, setWasteOpen] = useState(false);
   const [suppliers, setSuppliers] = useState([]);
   const [materials, setMaterials] = useState([]);
   const [open, setOpen] = useState(null);   // просмотр накладной
@@ -62,9 +69,17 @@ export default function Supplies({ embedded = false }) {
   function loadSuppliers() {
     return api.get("/warehouse/suppliers/").then((r) => setSuppliers(r.data.results || r.data));
   }
+  // Отходы — записи журнала «Списание»: отход и есть списание, только со
+  // своей причиной и мерками ввода. Отдельного документа у него нет.
+  function loadWaste() {
+    api.get("/warehouse/inventory-logs/", { params: { type: "WRITE_OFF", page_size: 100 } })
+      .then((r) => setWaste(r.data.results || r.data))
+      .catch(() => {});
+  }
   useEffect(() => {
     load();
     loadSuppliers();
+    loadWaste();
     api
       .get("/warehouse/materials/", { params: { ordering: "name", page_size: 500 } })
       .then((r) => setMaterials(r.data.results));
@@ -263,37 +278,123 @@ export default function Supplies({ embedded = false }) {
 
   const totalDebt = rows.reduce((s, r) => s + Number(r.debt || 0), 0);
 
+  // --- отходы ----------------------------------------------------------------
+  // Сколько ушло со склада — метрами у рулона (так операцию мерили), иначе
+  // в единице материала: кв.м у листа, своя у штучного.
+  const wasteAmount = (r) => {
+    if (r.metres_changed != null) return `${q2(-Number(r.metres_changed))} ${t("unit.METER")}`;
+    const unit = r.material_is_roll ? t("unit.SQM") : t(`unit.${r.material_unit}`);
+    return `${q2(-Number(r.quantity_changed))} ${unit}`;
+  };
+  const fmtDay = (iso) => new Date(iso).toLocaleDateString("ru-RU");
+  const monthKey = today().slice(0, 7);
+  const wasteMonth = waste.filter((r) => new Date(r.happened_at).toLocaleDateString("sv-SE").slice(0, 7) === monthKey);
+  const wasteMonthCost = wasteMonth.reduce((s, r) => s + Number(r.cost || 0), 0);
+  const wasteColumns = [
+    { key: "happened_at", label: t("waste.date"), render: (r) => fmtDay(r.happened_at) },
+    { key: "material_name", label: t("checkout.material"), render: (r) => <strong>{r.material_name}</strong> },
+    {
+      key: "quantity_changed",
+      label: t("waste.amount"),
+      render: (r) => <span style={{ color: "var(--danger)", fontWeight: 600, whiteSpace: "nowrap" }}>−{wasteAmount(r)}</span>,
+    },
+    // Себестоимость — только тем, кто видит деньги: складовщик записывает
+    // брак, но почём цех его купил, ему знать незачем.
+    ...(seesMoney
+      ? [{ key: "cost", label: t("waste.cost"), render: (r) => (r.cost == null ? <span className="muted">—</span> : som(r.cost)) }]
+      : []),
+    { key: "reason", label: t("waste.reason"), render: (r) => <span className="muted journal-reason" title={r.reason || ""}>{r.reason || "—"}</span> },
+    { key: "created_by_username", label: t("waste.who"), render: (r) => r.created_by_username || "—" },
+  ];
+
   return (
     <>
       {/* В складском разделе страница стоит сама по себе (не вкладкой «Склада»)
           и получает свой заголовок. Приход вводит тот, кто принимает товар, —
           складовщик; раньше у него этого экрана не было вовсе. */}
       {!embedded && <h1>{t("nav.supply")}</h1>}
-      <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
-        <p className="muted" style={{ fontSize: 13, margin: 0, maxWidth: "60ch" }}>
-          {t("supplies.hint")}
-        </p>
-        <button onClick={startDraft}>+ {t("supplies.newDoc")}</button>
+      {/* Приход и отход — два раздела одного экрана: мерки одни, знак разный. */}
+      <div className="tabs" style={{ marginTop: 0 }}>
+        {[["intake", t("waste.tabIntake")], ["waste", t("waste.tabWaste")]].map(([key, label]) => (
+          <button key={key} className={section === key ? "active" : ""} onClick={() => setSection(key)}>
+            {label}
+          </button>
+        ))}
       </div>
 
-      <div className="stat-grid" style={{ margin: "14px 0" }}>
-        <div className="stat">
-          <div className="label">{t("supplies.statDocs")}</div>
-          <div className="value">{rows.length}</div>
-        </div>
-        <div className="stat">
-          <div className="label">{t("supplies.statSum")}</div>
-          <div className="value">{som(rows.reduce((s, r) => s + Number(r.total_cost || 0), 0))}</div>
-        </div>
-        <div className="stat">
-          <div className="label">{t("supplies.statDebt")}</div>
-          <div className="value" style={totalDebt > 0 ? { color: "var(--danger)" } : undefined}>
-            {som(totalDebt)}
+      {section === "intake" && (
+        <>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+            <p className="muted" style={{ fontSize: 13, margin: 0, maxWidth: "60ch" }}>
+              {t("supplies.hint")}
+            </p>
+            <button onClick={startDraft}>+ {t("supplies.newDoc")}</button>
           </div>
-        </div>
-      </div>
 
-      <DataTable columns={columns} rows={rows} />
+          <div className="stat-grid" style={{ margin: "14px 0" }}>
+            <div className="stat">
+              <div className="label">{t("supplies.statDocs")}</div>
+              <div className="value">{rows.length}</div>
+            </div>
+            <div className="stat">
+              <div className="label">{t("supplies.statSum")}</div>
+              <div className="value">{som(rows.reduce((s, r) => s + Number(r.total_cost || 0), 0))}</div>
+            </div>
+            <div className="stat">
+              <div className="label">{t("supplies.statDebt")}</div>
+              <div className="value" style={totalDebt > 0 ? { color: "var(--danger)" } : undefined}>
+                {som(totalDebt)}
+              </div>
+            </div>
+          </div>
+
+          <DataTable columns={columns} rows={rows} />
+        </>
+      )}
+
+      {section === "waste" && (
+        <>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+            <p className="muted" style={{ fontSize: 13, margin: 0, maxWidth: "60ch" }}>
+              {t("waste.hint")}
+            </p>
+            <button onClick={() => setWasteOpen(true)}>+ {t("waste.new")}</button>
+          </div>
+
+          <div className="stat-grid" style={{ margin: "14px 0" }}>
+            <div className="stat">
+              <div className="label">{t("waste.statMonth")}</div>
+              <div className="value">{wasteMonth.length} <span className="muted" style={{ fontSize: 13 }}>{t("waste.entries")}</span></div>
+            </div>
+            {seesMoney && (
+              <div className="stat">
+                <div className="label">{t("waste.statMonthCost")}</div>
+                <div className="value" style={wasteMonthCost > 0 ? { color: "var(--danger)" } : undefined}>
+                  {som(wasteMonthCost)}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <h3 style={{ margin: "0 0 8px" }}>{t("waste.list")}</h3>
+          <DataTable columns={wasteColumns} rows={waste} empty={t("waste.empty")} />
+        </>
+      )}
+
+      {wasteOpen && (
+        <WasteModal
+          materials={materials}
+          onClose={() => setWasteOpen(false)}
+          onDone={() => {
+            loadWaste();
+            // Остатки в выпадашках материалов — свежие, иначе второй отход
+            // подряд проверялся бы по старому остатку.
+            api
+              .get("/warehouse/materials/", { params: { ordering: "name", page_size: 500 } })
+              .then((r) => setMaterials(r.data.results));
+          }}
+        />
+      )}
 
       {/* --- Просмотр накладной --- */}
       {open && (

@@ -27,6 +27,7 @@ def apply_stock_change(
     happened_at=None,
     receipt=None,
     supply=None,
+    cost: Decimal | None = None,
 ) -> Material:
     """Add `delta` (may be negative) to a material's quantity.
 
@@ -70,6 +71,9 @@ def apply_stock_change(
             reason=reason,
             receipt=receipt,
             supply=supply,
+            # Себестоимость ушедшего — только если вызывающий её знает
+            # (штучный материал без партий: количество × закупочная).
+            cost=cost,
             created_by=user,
         )
         if happened_at:

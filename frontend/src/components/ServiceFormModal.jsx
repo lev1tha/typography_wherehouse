@@ -11,6 +11,8 @@ import { useUI } from "./UIProvider.jsx";
 // здесь услуги ещё нет, и вид выбирают прямо в форме.
 export const KIND_RATE = {
   CUTTING: ["rate_per_pm", "pricing.ratePerPm"],
+  // Гравировка — цена за кв.м гравируемой площади; в кассе её правят по заказу.
+  ENGRAVING: ["rate_flat", "pricing.engravingRate"],
   INSTALL_INTERIOR: ["rate_flat", "pricing.masterWork"],
   INSTALL_EXTERIOR: ["rate_per_piece", "pricing.ratePerPiece"],
   OTHER: ["base_price", "pricing.basePrice"],
@@ -108,6 +110,9 @@ export default function ServiceFormModal({ onClose, onSaved }) {
         />
         {isCutting && (
           <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("pricing.ratePerPmHint")}</p>
+        )}
+        {form.kind === "ENGRAVING" && (
+          <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("pricing.engravingRateHint")}</p>
         )}
       </div>
     </Modal>

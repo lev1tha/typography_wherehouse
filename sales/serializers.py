@@ -75,6 +75,10 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             "sale_mode",
             "width",
             "length",
+            # Материал клиента и комментарий к работе: по ним строку без
+            # материала узнают в чеке («Резка · акрил 3 мм клиента»).
+            "own_material",
+            "note",
             "is_returned",
         ]
 
@@ -98,6 +102,10 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             return obj.material.unit if obj.material_id else "PIECE"
         if obj.service_id and obj.service.uses_running_meter:
             return "METER"
+        # Площадные услуги без реза (гравировка, внутренний монтаж) —
+        # количество строки и есть кв.м.
+        if obj.service_id and obj.service.uses_area:
+            return "SQM"
         return "PIECE"
 
     def get_unit_label(self, obj):
@@ -113,6 +121,8 @@ class TransactionItemSerializer(serializers.ModelSerializer):
         # (буквы наружной установки) или разом за заказ.
         if obj.service_id and obj.service.uses_running_meter:
             return "пог.м"
+        if obj.service_id and obj.service.uses_area:
+            return "кв.м"
         return "шт"
 
 
@@ -239,6 +249,10 @@ class SaleItemInputSerializer(serializers.Serializer):
     cut_rate = serializers.DecimalField(
         max_digits=12, decimal_places=2, min_value=0, required=False, allow_null=True
     )
+    # МАТЕРИАЛ КЛИЕНТА: работа без материала со склада. Строка — только цена
+    # резки/гравировки × сколько отрезано, что резали — в `note`.
+    own_material = serializers.BooleanField(required=False, default=False)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
 
     def validate(self, attrs):
         if attrs["type"] == TransactionItem.Type.MATERIAL and not attrs.get("material"):
@@ -248,6 +262,21 @@ class SaleItemInputSerializer(serializers.Serializer):
 
         material = attrs.get("material")
         mode = attrs.get("mode")
+        service = attrs.get("service")
+
+        # Материал клиента — только у площадной услуги (резка, гравировка) и
+        # БЕЗ материала со склада: две правды об одном куске («чужой» и «наш»)
+        # разъехались бы в остатке. Не угадываем, что имелось в виду, — отказ.
+        if attrs.get("own_material"):
+            if attrs["type"] != TransactionItem.Type.SERVICE or service is None or not service.uses_area:
+                raise serializers.ValidationError(
+                    "«Материал клиента» бывает только у резки и гравировки."
+                )
+            if material is not None:
+                raise serializers.ValidationError(
+                    f"«{service.name}»: материал клиента — не выбирайте материал со "
+                    f"склада, иначе он спишется. Уберите одно из двух."
+                )
         # Способ продажи материала по площади (лист / кв.м / рулон) — ЯВНЫЙ.
         # Раньше отсутствующий `mode` молча становился «кв.м», и дозаказ «1 лист»
         # уходил в чек как 1 кв.м по цене за квадрат (1 250 вместо 3 700, со
@@ -284,7 +313,6 @@ class SaleItemInputSerializer(serializers.Serializer):
         # предлагал любой материал по кв.м, включая рулоны). Метры продаются
         # отдельной строкой (METER), а работа реза по ним — строкой работы без
         # размеров куска: только длина реза и ставка.
-        service = attrs.get("service")
         if (
             attrs["type"] == TransactionItem.Type.SERVICE
             and service is not None
@@ -361,25 +389,50 @@ class SaleItemInputSerializer(serializers.Serializer):
                         f"её в карточке материала (или админ укажет цену вручную)."
                     )
         elif service is not None and service.uses_area:
+            # Гравировка и прочие площадные услуги без реза считаются ОТ
+            # ПЛОЩАДИ: без размеров (или готовой площади) строка ушла бы в чек
+            # нулём — так же, как рез без длины.
+            if (
+                not service.uses_running_meter
+                and not (attrs.get("width") and attrs.get("length"))
+                and qty <= 0
+            ):
+                raise serializers.ValidationError(
+                    f"«{service.name}»: укажите размеры (ширина × длина) — по "
+                    f"площади считается цена."
+                )
             if attrs.get("cut_rate") is None:
                 if service.uses_running_meter:
                     rate = service.rate_per_pm or (
                         material.cut_rate_per_pm if material else Decimal("0")
                     )
-                    where = (
-                        f"ни у станка «{service.name}», ни у материала «{material.name}»"
-                        if material else f"у станка «{service.name}» (материал не выбран)"
-                    )
+                    if attrs.get("own_material"):
+                        # Чужой материал: ставки материала нет по определению,
+                        # цену называет тот, кто оформляет, — и складовщик тоже.
+                        where = f"у станка «{service.name}», а у материала клиента её нет"
+                        fix = "Впишите цену резки в окне."
+                    else:
+                        where = (
+                            f"ни у станка «{service.name}», ни у материала «{material.name}»"
+                            if material else f"у станка «{service.name}» (материал не выбран)"
+                        )
+                        fix = (
+                            "Задайте ставку в «Ценах и услугах» или в карточке "
+                            "материала (или админ укажет её вручную)."
+                        )
                     if not rate or rate <= 0:
                         raise serializers.ValidationError(
                             f"Ставка резки не задана {where} — работа ушла бы в чек "
-                            f"бесплатно. Задайте ставку в «Ценах и услугах» или в "
-                            f"карточке материала (или админ укажет её вручную)."
+                            f"бесплатно. {fix}"
                         )
                 elif not service.rate_flat or service.rate_flat <= 0:
+                    fix = (
+                        "впишите цену за кв.м в окне или задайте её в «Ценах и услугах»"
+                        if service.staff_sets_rate
+                        else "задайте её в «Ценах и услугах» (или админ укажет вручную)"
+                    )
                     raise serializers.ValidationError(
-                        f"«{service.name}»: не задана ставка работы за кв.м — задайте "
-                        f"её в «Ценах и услугах» (или админ укажет вручную)."
+                        f"«{service.name}»: не задана ставка работы за кв.м — {fix}."
                     )
             # Материал куска — по площади: без цены за кв.м он тоже ушёл бы за 0.
             if (

@@ -269,7 +269,7 @@ class ClientDetailSerializer(ClientSerializer):
                     "title": (
                         i.material.name if i.material_id
                         else (i.service.name if i.service_id else "—")
-                    ),
+                    ) + (f" — {i.note}" if i.note else ""),
                     "quantity": i.quantity,
                     # У возвращённой строки line_total = 0; для истории — что стоила.
                     "line_total": (

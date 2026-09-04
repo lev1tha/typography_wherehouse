@@ -26,6 +26,11 @@ const EMPTY_CFG = {
   // уходит на сервер ЯВНО: без него сервер раньше подставлял «кв.м», и
   // «дозаказать 1 лист» превращалось в 1 кв.м по цене за квадрат.
   saleMode: "PIECE",
+  // Материал клиента (только резка) и комментарий к работе — что резали или
+  // гравировали. У такой строки своего материала нет, и без комментария её
+  // потом не узнать.
+  ownMaterial: false,
+  note: "",
 };
 
 /** Configure and append one item (дозаказ) to an existing receipt. */
@@ -77,6 +82,12 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
   const wholeUnit = mat && (mat.intake_form || "SHEET") === "ROLL" ? t("warehouse.unitRoll") : t("warehouse.unitSheet");
   // Резка считается по ДЛИНЕ РЕЗА в погонных метрах, а не по площади куска.
   const usesRunM = !!svc?.uses_running_meter;
+  // Гравировка — площадь × цена за кв.м, материала в строке нет; цену за кв.м
+  // здесь вписывает и складовщик (решение владельца: у крупных заказов своя).
+  const isEngraving = svc?.kind === "ENGRAVING";
+  // Материал клиента: одна строка работы, со склада ничего не уходит, цену
+  // резки называют на месте — каталожной у чужого листа нет.
+  const ownCut = !!(svc && usesRunM && cfg.ownMaterial);
   const cfgMat = materials.find((m) => m.id === Number(cfg.materialId));
   // Ставка резки — у СТАНКА (ЧПУ / лазер), а если у него своей нет, то у
   // материала, как было до разделения на станки. У прочих площадных услуг — у
@@ -92,8 +103,9 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
     : 0;
   // Длина реза в погонных метрах: у обычного реза это ОДНА сторона куска
   // («Длина»), у фигурного — то, что ввёл мастер.
-  const runM =
-    cfg.cutMode === "SIDE" ? Number(cfg.length) || 0 : Number(cfg.running_meters) || 0;
+  const runM = ownCut
+    ? Number(cfg.running_meters) || 0
+    : cfg.cutMode === "SIDE" ? Number(cfg.length) || 0 : Number(cfg.running_meters) || 0;
 
   // Live price preview — по той же формуле, что считает бэкенд: площадь до
   // 0.001 «половиной вверх», каждая строка — вверх до целого сома.
@@ -106,6 +118,11 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
     else if (matMode === "PIECE") preview = ceilSom(matPieceUnit * matQty);
     else if (matMode === "SQM") preview = ceilSom(matAreaPrice * matArea);
     else preview = ceilSom(Number(sel.obj.price_per_unit) * matQty);
+  } else if (ownCut) {
+    // Материал клиента: только работа.
+    preview = ceilSom(runM * rate);
+  } else if (isEngraving) {
+    preview = ceilSom((areaOf(cfg.width, cfg.length) || 0) * rate);
   } else if (svc?.uses_area) {
     const area = areaOf(cfg.width, cfg.length) || 0;
     // Резка: работа = пог.м × ставка, материал = площадь × цена за кв.м. Пока
@@ -125,6 +142,13 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
       if (matMode === "SQM") return { ...it, quantity: matArea, mode: "SQM" };
       return { ...it, quantity: matQty };
     }
+    if (ownCut) {
+      // Цену шлём всегда: она видна и правится в окне у всех, каталожной нет.
+      return { type: "SERVICE", service: svc.id, own_material: true, running_meters: runM, cut_rate: rate, note: cfg.note.trim() };
+    }
+    if (isEngraving) {
+      return { type: "SERVICE", service: svc.id, width: Number(cfg.width), length: Number(cfg.length), cut_rate: rate, note: cfg.note.trim() };
+    }
     if (svc.uses_area) {
       const it = { type: "SERVICE", service: svc.id, material: Number(cfg.materialId), width: Number(cfg.width), length: Number(cfg.length) };
       if (svc.uses_letter_type) it.letter_type = cfg.letter_type;
@@ -142,7 +166,7 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
   // такую строку отклонит. Админ может вписать ставку здесь (0 = подарок),
   // складовщику остаётся позвать админа.
   const rateMissing = !!(svc && usesArea && !(rate > 0) && cfg.cutRate === "");
-  const cutMatPriceMissing = !!(svc && usesArea && cfgMat && !(matSqmPrice > 0));
+  const cutMatPriceMissing = !!(svc && usesArea && !ownCut && !isEngraving && cfgMat && !(matSqmPrice > 0));
   const matPriceMissing =
     sel?.type === "material" &&
     (matMode === "METER" ? !(Number(mat.price_per_pm) > 0)
@@ -158,6 +182,10 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
           : matMode === "SQM"
           ? matArea > 0
           : matQty > 0)
+      : ownCut
+      ? runM > 0 && rate > 0
+      : isEngraving
+      ? Number(cfg.width) > 0 && Number(cfg.length) > 0 && rate > 0
       : svc.uses_area
       ? cfg.materialId && Number(cfg.width) > 0 && Number(cfg.length) > 0 && !runMMissing && !rateMissing && !cutMatPriceMissing
       : Number(cfg.qty) > 0);
@@ -222,6 +250,23 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
 
       {usesArea && (
         <>
+          {/* Материал клиента: клиент принёс своё, режем и берём только за
+              работу. Материал со склада тогда не выбирается вовсе. */}
+          {usesRunM && (
+            <label className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="checkbox"
+                style={{ width: 20, height: 20, minHeight: 0 }}
+                checked={!!cfg.ownMaterial}
+                onChange={(e) => setCfg({ ...cfg, ownMaterial: e.target.checked, cutMode: "CURVE" })}
+              />
+              {t("checkout.ownCutCheckbox")}
+            </label>
+          )}
+          {isEngraving && (
+            <p className="muted" style={{ fontSize: 12, margin: "0 0 10px" }}>{t("checkout.engravingHint")}</p>
+          )}
+          {!ownCut && !isEngraving && (
           <div className="field">
             <label>{t("checkout.cutMaterial")}</label>
             <select value={cfg.materialId} onChange={(e) => setCfg({ ...cfg, materialId: e.target.value })}>
@@ -235,13 +280,31 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
               ))}
             </select>
           </div>
+          )}
+          {!ownCut && (
           <div className="row">
             <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} /></div>
             <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} /></div>
           </div>
+          )}
+          {ownCut && (
+            <div className="field">
+              <label>{t("checkout.ownCutLength")} *</label>
+              <input
+                type="number"
+                step="any"
+                value={cfg.running_meters}
+                onChange={(e) => setCfg({ ...cfg, running_meters: e.target.value })}
+                autoFocus
+              />
+              {!(runM > 0) && (
+                <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.ownCutNeedLength")}</p>
+              )}
+            </div>
+          )}
           {/* Как считать длину реза — так же, как в кассе: обычный рез берёт
               одну сторону куска, фигурный ждёт длину кривой от мастера. */}
-          {usesRunM && (
+          {usesRunM && !ownCut && (
             <>
               <div className="field">
                 <div className="tabs" style={{ marginTop: 0 }}>
@@ -281,9 +344,13 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
               )}
             </>
           )}
-          {isAdmin && usesRunM && (
+          {/* Ставка. У обычной резки её правит только админ; у материала
+              клиента и у гравировки — и складовщик (решение владельца). */}
+          {((isAdmin && usesRunM) || ownCut || isEngraving) && (
             <div className="field">
-              <label>{t("checkout.cutRateLabel")}</label>
+              <label>
+                {ownCut ? t("checkout.ownCutRate") : isEngraving ? t("checkout.engravingRate") : t("checkout.cutRateLabel")}
+              </label>
               <input
                 type="number"
                 step="any"
@@ -295,8 +362,22 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
           )}
           {rateMissing && (
             <p style={{ color: "var(--danger)", fontSize: 12, margin: "0 0 8px" }}>
-              {t(isAdmin ? "checkout.rateMissingAdmin" : "checkout.rateMissing")}
+              {t(
+                ownCut ? "checkout.ownCutNeedRate"
+                : isEngraving ? "checkout.engravingNeedRate"
+                : isAdmin ? "checkout.rateMissingAdmin" : "checkout.rateMissing"
+              )}
             </p>
+          )}
+          {(ownCut || isEngraving) && (
+            <div className="field">
+              <label>{ownCut ? t("checkout.ownCutNote") : t("checkout.engravingNote")}</label>
+              <input
+                value={cfg.note}
+                onChange={(e) => setCfg({ ...cfg, note: e.target.value })}
+                placeholder={ownCut ? t("checkout.ownCutNotePh") : t("checkout.engravingNotePh")}
+              />
+            </div>
           )}
           {cutMatPriceMissing && (
             <p style={{ color: "var(--danger)", fontSize: 12, margin: "0 0 8px" }}>{t("checkout.priceMissing")}</p>

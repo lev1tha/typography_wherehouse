@@ -12,6 +12,7 @@ from rest_framework.decorators import action
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from accounts.permissions import IsAdmin, IsAdminOrReadOnly, IsNotAccountant
 from audit.models import AuditLog
@@ -31,6 +32,7 @@ from .models import (
 )
 from .rolls import InsufficientStock, receive_lot, stocktake_roll, write_off_roll
 from .supplies import SupplyError, move_supply_date, post_supply, supply_summary, unpost_supply
+from .waste import WasteError, waste_summary, write_off_waste
 from .serializers import (
     build_ref_index,
     MaterialBulkRowSerializer,
@@ -50,6 +52,7 @@ from .serializers import (
     RollWriteOffSerializer,
     SupplierSerializer,
     SupplySerializer,
+    WasteSerializer,
     WriteOffSerializer,
 )
 from .stock import apply_stock_change
@@ -876,3 +879,39 @@ class SupplyViewSet(viewsets.ModelViewSet):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         AuditLog.record(request.user, f"Отменена приходная накладная {summary}")
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WasteView(APIView):
+    """POST /warehouse/waste/ — отход (брак): списать несколько строк разом,
+    теми же мерками, что и приход (лист ширина × высота × штук, площадь, метры
+    рулона, количество).
+
+    Пишет и складовщик: брак видит тот, кто стоит у станка и принимает
+    товар, — экран отходов стоит рядом с приёмкой. Бухгалтеру, как и всему,
+    что двигает склад, закрыто. Замок периода отход не держит — как
+    инвентаризацию и списание: они двигают только текущий остаток.
+    """
+
+    permission_classes = [IsAuthenticated, IsNotAccountant]
+
+    def post(self, request):
+        serializer = WasteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            entries = write_off_waste(
+                data["lines"], user=request.user,
+                happened_on=data.get("happened_on"), note=data.get("note", ""),
+            )
+        except (WasteError, InsufficientStock) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        day = data.get("happened_on")
+        AuditLog.record(
+            request.user,
+            "Отход/брак" + (f" за {day:%d.%m.%Y}" if day else "") + ": " + waste_summary(entries)
+            + (f" ({data['note']})" if data.get("note") else ""),
+        )
+        return Response(
+            InventoryLogSerializer(entries, many=True, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )

@@ -408,7 +408,11 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         width = entry.get("width")
         length = entry.get("length")
         area = _area(width, length) if width and length else _qty(entry.get("quantity") or 0)
-        material = entry.get("material")
+        # Материал КЛИЕНТА: со склада ничего не уходит, строки материала нет.
+        # Сериализатор материал при этом флаге не пропускает; здесь — на случай
+        # прямого вызова, чтобы «чужой» лист точно не списался.
+        own_material = bool(entry.get("own_material"))
+        material = None if own_material else entry.get("material")
 
         # Резка → ставка СТАНКА, если она задана, иначе ставка материала.
         # Станок впереди специально: иначе выбор «ЧПУ / лазер» не менял бы цену,
@@ -438,6 +442,8 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
             quantity=work_qty, price_per_item=rate,
             width=Decimal(str(width)) if width else None,
             length=Decimal(str(length)) if length else None,
+            own_material=own_material,
+            note=(entry.get("note") or "")[:255],
         )
         items = [work]
         # The cut/used material is billed as its own line (area × per-кв.м price,
@@ -459,12 +465,14 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         return [TransactionItem.objects.create(
             receipt=receipt, type=item_type, service=service,
             quantity=Decimal(entry.get("quantity") or 1), price_per_item=service.rate_per_piece,
+            note=(entry.get("note") or "")[:255],
         )]
 
     # FIXED-price service (legacy installation / other)
     return [TransactionItem.objects.create(
         receipt=receipt, type=item_type, service=service,
         quantity=Decimal(entry.get("quantity") or 1), price_per_item=service.base_price,
+        note=(entry.get("note") or "")[:255],
     )]
 
 

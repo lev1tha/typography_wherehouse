@@ -288,6 +288,14 @@ class InventoryLogSerializer(serializers.ModelSerializer):
     type_display = serializers.CharField(source="get_type_display", read_only=True)
     # Номер заказа, а не UUID: в ленте движений он и показывается.
     order_number = serializers.IntegerField(source="receipt.order_number", read_only=True)
+    # Себестоимость движения (списание, отход) — только тем, кто видит деньги:
+    # складовщик записывает брак, но почём цех его купил, ему знать незачем.
+    cost = serializers.SerializerMethodField()
+    # Рулонный ли материал — ленте отходов нужна единица без второго запроса.
+    material_is_roll = serializers.BooleanField(source="material.is_roll_material", read_only=True)
+
+    def get_cost(self, obj):
+        return obj.cost if _sees_money(self.context) else None
 
     class Meta:
         model = InventoryLog
@@ -298,11 +306,13 @@ class InventoryLogSerializer(serializers.ModelSerializer):
             "material",
             "material_name",
             "material_unit",
+            "material_is_roll",
             "quantity_changed",
             # Метры у рулона — чем операцию мерили на самом деле. Пусто у
             # листа и штучного: там мера и есть та, что в quantity_changed.
             "metres_changed",
             "actual_price",
+            "cost",
             "reason",
             "receipt",
             "order_number",
@@ -763,3 +773,87 @@ class SupplySerializer(serializers.ModelSerializer):
             "created_by", "created_by_name", "created_at",
         ]
         read_only_fields = ["created_by", "created_at"]
+
+
+class WasteLineSerializer(serializers.Serializer):
+    """Строка отхода — теми же мерками, что и приход (см. warehouse/waste.py)."""
+
+    material = serializers.PrimaryKeyRelatedField(queryset=Material.objects.all())
+    form = serializers.ChoiceField(choices=["SHEET", "AREA", "ROLL", "QTY"], required=False, allow_null=True)
+    width = serializers.DecimalField(max_digits=8, decimal_places=2, min_value=0, required=False, allow_null=True)
+    height = serializers.DecimalField(max_digits=8, decimal_places=2, min_value=0, required=False, allow_null=True)
+    sheet_count = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False, allow_null=True)
+    area = serializers.DecimalField(max_digits=12, decimal_places=4, min_value=0, required=False, allow_null=True)
+    length = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False, allow_null=True)
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=4, min_value=0, required=False, allow_null=True)
+    # Партия/рулон, из которого ушёл брак. Не указана — FIFO, как при продаже.
+    roll = serializers.PrimaryKeyRelatedField(queryset=Roll.objects.all(), required=False, allow_null=True)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+    def validate(self, attrs):
+        from .waste import FORM_AREA, FORM_ROLL, FORM_SHEET, line_quantity
+
+        material = attrs["material"]
+        roll = attrs.get("roll")
+        if roll is not None and roll.material_id != material.id:
+            raise serializers.ValidationError(f"«{material.name}»: партия другого материала.")
+        form = attrs.get("form")
+        if material.sells_by_metre:
+            # Рулон: метры (или площадь, которую переведём шириной рулона).
+            if form not in (FORM_ROLL, FORM_AREA, None):
+                raise serializers.ValidationError(
+                    f"«{material.name}» — рулон: отход вводится метрами или площадью."
+                )
+            value = attrs.get("area") if form == FORM_AREA else attrs.get("length")
+            if not value or value <= 0:
+                raise serializers.ValidationError(
+                    f"«{material.name}»: укажите, сколько метров (или кв.м) ушло в отход."
+                )
+            return attrs
+        if material.is_roll_material and form == FORM_ROLL:
+            raise serializers.ValidationError(
+                f"«{material.name}» приходит листами — отход считается листами или площадью."
+            )
+        if material.is_roll_material and form in (None, FORM_SHEET) and not all(
+            (attrs.get("width"), attrs.get("height"), attrs.get("sheet_count"))
+        ):
+            raise serializers.ValidationError(
+                f"«{material.name}»: для листа укажите ширину, высоту и количество листов."
+            )
+        qty = line_quantity(
+            material, form or ("SHEET" if material.is_roll_material else "QTY"),
+            width=attrs.get("width"), height=attrs.get("height"),
+            sheet_count=attrs.get("sheet_count"), area=attrs.get("area"),
+            length=attrs.get("length"), quantity=attrs.get("quantity"), roll=roll,
+        )
+        if qty <= 0:
+            raise serializers.ValidationError(
+                f"«{material.name}»: не из чего посчитать количество — проверьте размеры или количество."
+            )
+        if qty > material.quantity:
+            unit = "кв.м" if material.is_roll_material else material.get_unit_display()
+            raise serializers.ValidationError(
+                f"«{material.name}»: в отход {qty.normalize():f} {unit}, а на складе "
+                f"{material.quantity.normalize():f} {unit} — столько списать нельзя."
+            )
+        return attrs
+
+
+class WasteSerializer(serializers.Serializer):
+    """POST /warehouse/waste/ — отход (брак) одним действием, несколькими строками."""
+
+    happened_on = serializers.DateField(required=False, allow_null=True)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    lines = WasteLineSerializer(many=True)
+
+    def validate_lines(self, value):
+        if not value:
+            raise serializers.ValidationError("Добавьте хотя бы одну строку отхода.")
+        return value
+
+    def validate_happened_on(self, value):
+        from django.utils import timezone
+
+        if value and value > timezone.localdate():
+            raise serializers.ValidationError("Дата отхода не может быть в будущем.")
+        return value

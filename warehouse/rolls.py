@@ -228,6 +228,10 @@ def consume_area(
             quantity_changed=-need,
             reason=reason,
             receipt=receipt,
+            # Почём ушло — по партиям, из которых взяли. У продажи то же число
+            # лежит на строке чека; у списания и отхода строки чека нет, и
+            # журнал — единственное место, где эта цифра остаётся.
+            cost=cogs.quantize(Decimal("0.01")),
             created_by=user,
         )
         if happened_at:
@@ -489,7 +493,8 @@ def stocktake_roll(roll: Roll, counted_metres: Decimal, *, reason_code, note="",
 
 
 @transaction.atomic
-def write_off_roll(roll: Roll, metres: Decimal, *, reason: str = "", user=None) -> Decimal:
+def write_off_roll(roll: Roll, metres: Decimal, *, reason: str = "", user=None,
+                   happened_at=None) -> Decimal:
     """Списать `metres` погонных метров С ЭТОГО рулона — порча, брак, утеря.
 
     Списание рулонного материала общим числом в кв.м (`consume_area`) шло FIFO
@@ -525,14 +530,20 @@ def write_off_roll(roll: Roll, metres: Decimal, *, reason: str = "", user=None) 
     locked_roll.save(update_fields=["remaining_area"])
     material.quantity = (material.quantity or Decimal("0")) - area
     material.save(update_fields=["quantity", "updated_at"])
-    InventoryLog.objects.create(
+    entry = InventoryLog(
         type=InventoryLog.Type.WRITE_OFF,
         material=material,
         quantity_changed=-area,
         metres_changed=-metres,
         reason=f"{reason} Рулон {label}: {metres.normalize():f} м".strip(),
+        # Метрами по цене метра ЭТОГО рулона — в чём считал поставщик.
+        cost=(metres * locked_roll.cost_per_pm).quantize(Decimal("0.01")),
         created_by=user,
     )
+    # Дата самой операции: отход, как и приход, вносят задним числом.
+    if happened_at:
+        entry.happened_at = happened_at
+    entry.save()
     if was_above and material.quantity <= material.critical_balance:
         from integrations.telegram import notify_low_stock
 

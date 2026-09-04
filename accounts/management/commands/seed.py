@@ -133,6 +133,12 @@ class Command(BaseCommand):
         # Cutting no longer auto-consumes recipe materials — the cut material is a
         # separate sale line; drop legacy paper/glue recipes.
         cutting.recipes.all().delete()
+        # Гравировка — цена за кв.м, материал отдельной строкой не идёт. Ставку
+        # владелец задаёт сам («Цены и услуги»), в кассе её правят по заказу.
+        PrintingService.objects.get_or_create(
+            kind=PrintingService.Kind.ENGRAVING,
+            defaults={"name": "Гравировка", "rate_flat": Decimal("0")},
+        )
 
         # Установка (наружная/внутренняя) убрана из системы по решению заказчика.
         # Существующие услуги установки деактивируем, чтобы они пропали из кассы,

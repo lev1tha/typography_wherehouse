@@ -22,6 +22,11 @@ class PrintingService(models.Model):
         INSTALL_INTERIOR = "INSTALL_INTERIOR", _("Внутренняя установка (по кв.м)")
         INSTALLATION = "INSTALLATION", _("Установка (фикс)")  # legacy
         OTHER = "OTHER", _("Прочее (фикс)")
+        # Гравировка (2026-09-04): цена за кв.м гравируемой площади. Материал
+        # отдельной строкой НЕ идёт — гравируют либо материал клиента, либо
+        # лист, проданный своей строкой. Цену за кв.м правят в момент продажи и
+        # админ, и складовщик: у крупных заказов она своя («5 000 за квадрат»).
+        ENGRAVING = "ENGRAVING", _("Гравировка (по кв.м)")
 
     class Machine(models.TextChoices):
         """Станок, на котором режут. Заказчик считает резку двумя категориями —
@@ -76,14 +81,25 @@ class PrintingService(models.Model):
 
     @property
     def uses_area(self) -> bool:
-        """Priced per кв.м with a chosen material (cutting, interior install)."""
-        return self.kind in (self.Kind.CUTTING, self.Kind.INSTALL_INTERIOR)
+        """Priced per кв.м: cutting, interior install, engraving."""
+        return self.kind in (self.Kind.CUTTING, self.Kind.INSTALL_INTERIOR, self.Kind.ENGRAVING)
 
     @property
     def uses_material(self) -> bool:
         """Area services (cutting, interior install) bill the chosen material as
-        a separate line for clean work-vs-material analytics."""
-        return self.uses_area
+        a separate line for clean work-vs-material analytics. Гравировка —
+        нет: у неё площадь — это площадь РИСУНКА, а не куска материала, и
+        материал (если он цеха) продаётся своей строкой, как лист под рез."""
+        return self.uses_area and self.kind != self.Kind.ENGRAVING
+
+    @property
+    def staff_sets_rate(self) -> bool:
+        """Ставку этой услуги в момент продажи правит и складовщик, не только
+        админ. Ручная цена — право админа (аудит 18.08, п. 14), но гравировку
+        владелец попросил сделать правимой у кассы: «для больших заказов цена
+        за кв.м будет 5 000». Резка МАТЕРИАЛА КЛИЕНТА открыта так же, но это
+        свойство строки (`own_material`), а не услуги."""
+        return self.kind == self.Kind.ENGRAVING
 
     @property
     def uses_running_meter(self) -> bool:

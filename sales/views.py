@@ -117,10 +117,38 @@ def _price_override_forbidden(items, user):
     """
     if user.is_admin_role:
         return None
+    only_admin = "Цену материала и ставку резки при продаже правит только администратор."
     for item in items:
-        if item.get("material_price") is not None or item.get("cut_rate") is not None:
-            return "Цену материала и ставку резки при продаже правит только администратор."
+        if item.get("material_price") is not None:
+            return only_admin
+        rate = item.get("cut_rate")
+        if rate is None:
+            continue
+        if not _rate_open_to_staff(item):
+            return only_admin
+        # Цену складовщик называет, а ПОДАРОК остаётся правом админа. Ноль
+        # здесь — это работа бесплатно: интерфейс её не даёт добавить (кнопка
+        # закрыта, пока цена не больше нуля), но API принимал её от кого
+        # угодно, и консоли браузера хватало, чтобы отдать резку даром. Ровно
+        # эту дверь закрыл аудит 18.08 (п. 14) для обычных строк; открыв цену
+        # складовщику 04.09, мы её приоткрыли снова.
+        if Decimal(str(rate)) <= 0:
+            return (
+                "Работа за 0 сом — это подарок, и оформить его может только "
+                "администратор. Укажите цену больше нуля."
+            )
     return None
+
+
+def _rate_open_to_staff(item) -> bool:
+    """Ставку этой строки складовщик вписывает сам (2026-09-04, решение
+    владельца): резка МАТЕРИАЛА КЛИЕНТА — каталожной ставки у чужого листа
+    нет, цену называют на месте; ГРАВИРОВКА — у крупных заказов цена за кв.м
+    своя. Всё остальное — по-прежнему только админ (аудит 18.08, п. 14)."""
+    if item.get("own_material"):
+        return True
+    service = item.get("service")
+    return bool(service is not None and getattr(service, "staff_sets_rate", False))
 
 
 def _check_backdate(day):

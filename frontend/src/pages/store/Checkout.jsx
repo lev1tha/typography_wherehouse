@@ -10,6 +10,7 @@ import Modal from "../../components/Modal.jsx";
 import { PaymentBadge } from "../../components/StatusBadge.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { areaOf } from "../../utils/area.js";
+import { itemTitle } from "../../utils/itemLabel.js";
 
 // Цену округляем ВВЕРХ до целого сома (решение заказчика), как на бэкенде
 // (TransactionItem.line_total). Эпсилон гасит float-шум, чтобы целое не «прыгало».
@@ -56,6 +57,10 @@ function lineTotal(line) {
   }
   // Работа реза на целом листе (без материала по площади): пог.м × ставка.
   if (line.kind === "cut-work") return ceilSom(Number(line.rate) * Number(line.runM || 0));
+  // Резка материала КЛИЕНТА: только работа — цена резки × сколько отрезано.
+  if (line.kind === "cut-own") return ceilSom(Number(line.rate) * Number(line.runM || 0));
+  // Гравировка: площадь × цена за кв.м, материала в строке нет.
+  if (line.kind === "engraving") return ceilSom(Number(line.rate) * Number(line.area || 0));
   return ceilSom(unitPrice(line) * lineQty(line));
 }
 
@@ -119,6 +124,29 @@ function cartFromReceipt(items, materials, services, t) {
     if (it.type === "SERVICE") {
       const s = it.service ? svcById[String(it.service)] : null;
       if (!s) return void skipped++;
+      // Резка материала КЛИЕНТА: строка работы без материала. Цена — та, что
+      // назвали в прошлый раз: каталожной у чужого материала нет. Проверяем
+      // ДО склейки с парным материалом — соседняя строка чека к ней не
+      // относится.
+      if (it.own_material && s.uses_running_meter) {
+        lines.push({
+          key: `CO${s.id}-${i}`, kind: "cut-own", serviceId: s.id, name: s.name,
+          machine: s.machine_display || "",
+          rate: Number(it.price_per_item) || 0, runM: qty, note: it.note || "", qty: 1,
+        });
+        return;
+      }
+      // Гравировка: площадь × цена за кв.м, материала в строке нет. Цена —
+      // сегодняшняя из каталога, а если её там нет — та, по которой продали.
+      if (s.kind === "ENGRAVING") {
+        lines.push({
+          key: `E${s.id}-${i}`, kind: "engraving", serviceId: s.id, name: s.name,
+          width: Number(it.width) || 0, length: Number(it.length) || 0, area: qty,
+          rate: priceOrLast(s.rate_flat, it), note: it.note || "",
+          ownMaterial: !!it.own_material, qty: 1,
+        });
+        return;
+      }
       // Парный материал — следующая строка чека: сервер пишет их подряд.
       const next = items[i + 1];
       const pair =
@@ -370,6 +398,15 @@ export default function Checkout() {
   }, [client.full_name, client.company_name, client.type, clientId]);
 
   const products = useMemo(() => {
+    // «Только резка» — плитка без материала (2026-09-04, просьба владельца):
+    // клиент принёс своё, цех режет и берёт только за работу. Есть, пока в
+    // каталоге есть хоть одна услуга резки: без неё резать нечем.
+    const ownCut = services.some((s) => s.uses_running_meter && s.is_active !== false)
+      ? [{
+          key: "OWNCUT", kind: "own-cut", serviceKind: "CUTTING", id: 0,
+          name: t("checkout.ownCutTile"), category: t("checkout.ownCutTag"),
+        }]
+      : [];
     const svc = services
       .filter((s) => s.is_active !== false && !s.uses_running_meter)
       .map((s) => ({
@@ -414,7 +451,7 @@ export default function Checkout() {
       price_per_pm: Number(m.price_per_pm ?? 0),
       metres_remaining: m.metres_remaining != null ? Number(m.metres_remaining) : null,
     }));
-    return [...svc, ...mat];
+    return [...ownCut, ...svc, ...mat];
   }, [materials, services, t]);
 
   // Партии рулонных материалов: мастеру надо знать, какой физический рулон он
@@ -499,6 +536,27 @@ export default function Checkout() {
   function tapProduct(p) {
     setError("");
     if (stockState(p)?.out) return; // нет на складе — продажа заблокирована
+    // Только резка — материал клиента: станок, сколько отрезано, цена резки
+    // (её вписывает и складовщик: каталожной у чужого материала нет) и что
+    // резали. Ставка станка, если она есть, подставляется как начальная.
+    if (p.kind === "own-cut") {
+      setCut({
+        ownCut: true,
+        cutServiceId: cuttingService?.id ?? "",
+        cutRate: Number(cuttingService?.rate_per_pm) > 0 ? String(cuttingService.rate_per_pm) : "",
+        running_meters: "", note: "",
+      });
+      return;
+    }
+    // Гравировка: площадь × цена за кв.м, материала в строке нет. Цену за
+    // кв.м правят по заказу — и админ, и складовщик.
+    if (p.kind === "service" && p.serviceKind === "ENGRAVING") {
+      setCut({
+        service: p, engraving: true, width: "", length: "",
+        rate: p.rate_flat > 0 ? String(p.rate_flat) : "", note: "", ownMaterial: false,
+      });
+      return;
+    }
     if (p.kind === "material") {
       // Материал по кв.м → окно с четырьмя режимами продажи.
       if (p.is_roll_material) {
@@ -612,6 +670,37 @@ export default function Checkout() {
 
   function addCutting() {
     const matPrice = Number(cut.matPrice || 0); // overridable material price/кв.м
+
+    // --- Только резка: материал клиента, одна строка работы ---
+    if (cut.ownCut) {
+      const svc = svcById(cut.cutServiceId);
+      const runM = Number(cut.running_meters) || 0;
+      const rate = Number(cut.cutRate) || 0;
+      if (!svc || !(runM > 0) || !(rate > 0)) return;
+      setCart((prev) => [...prev, {
+        key: `CO${svc.id}-${prev.length}`, kind: "cut-own",
+        serviceId: svc.id, name: svc.name || "Резка", machine: svc.machine_display || "",
+        rate, runM, note: (cut.note || "").trim(), qty: 1,
+      }]);
+      setCut(null);
+      return;
+    }
+    // --- Гравировка: площадь × цена за кв.м ---
+    if (cut.engraving) {
+      const w = Number(cut.width);
+      const l = Number(cut.length);
+      if (!w || !l) return;
+      const rate = Number(cut.rate) || 0;
+      if (!(rate > 0)) return;
+      setCart((prev) => [...prev, {
+        key: `E${cut.service.id}-${prev.length}`, kind: "engraving",
+        serviceId: cut.service.id, name: cut.service.name,
+        width: w, length: l, area: areaOf(cut.width, cut.length), rate,
+        note: (cut.note || "").trim(), ownMaterial: !!cut.ownMaterial, qty: 1,
+      }]);
+      setCut(null);
+      return;
+    }
 
     // --- Окно материала: четыре режима продажи ---
     if (cut.material && !cut.service) {
@@ -768,7 +857,7 @@ export default function Checkout() {
     if (!cart.length) return setError(t("checkout.emptyCart"));
     // Резка без длины реза — работа за ноль; сервер такой заказ отклонит, но
     // причину лучше назвать здесь, вместе со строкой, которую надо переделать.
-    const noRunM = cart.find((l) => (l.kind === "cutting" || l.kind === "cut-work") && !(Number(l.runM) > 0));
+    const noRunM = cart.find((l) => (l.kind === "cutting" || l.kind === "cut-work" || l.kind === "cut-own") && !(Number(l.runM) > 0));
     if (noRunM) return setError(t("checkout.runMetersRequiredCart", { name: noRunM.name }));
     // Гасить долг нечем, если не сказано, сколько принесли: пустое поле —
     // это «ничего не приняли», и долг из ничего не закрывается.
@@ -825,6 +914,21 @@ export default function Checkout() {
           running_meters: l.runM,
           ...(isAdmin && l.rateEdited ? { cut_rate: l.rate } : {}),
         };
+      if (l.kind === "cut-own")
+        // Материал клиента: цену шлём ВСЕГДА — она видна и правится у всех,
+        // каталожной у чужого материала нет. Сервер это разрешает только
+        // с флагом `own_material`.
+        return {
+          type: "SERVICE", service: l.serviceId, own_material: true,
+          running_meters: l.runM, cut_rate: l.rate, note: l.note || "",
+        };
+      if (l.kind === "engraving")
+        // Гравировка: цена за кв.м — та, что стояла в окне (правится всеми).
+        return {
+          type: "SERVICE", service: l.serviceId, width: l.width, length: l.length,
+          cut_rate: l.rate, note: l.note || "",
+          ...(l.ownMaterial ? { own_material: true } : {}),
+        };
       return { type: "SERVICE", service: l.id, quantity: l.qty };
     });
     const payload = { payment_method: paymentMethod, items };
@@ -873,6 +977,11 @@ export default function Checkout() {
 
   const isMatModal = !!(cut && cut.material && !cut.service); // окно материала
   const cutPiece = isMatModal && cut.mode === "PIECE";
+  // «Только резка» (материал клиента) и гравировка — свои окна без материала
+  // со склада: цену там называют под заказ, и складовщик тоже.
+  const ownCutRunM = cut?.ownCut ? Number(cut.running_meters) || 0 : 0;
+  const ownCutRate = cut?.ownCut ? Number(cut.cutRate) || 0 : 0;
+  const engRate = cut?.engraving ? Number(cut.rate) || 0 : 0;
   // Рулон продаётся ДЛИНОЙ, и решает это справочник, а не мастер: ширина у
   // рулона постоянная (её режут поперёк целиком), выбирать её нечего. Поэтому
   // для такого материала показываем ОДНО поле — длину, а ширину пишем надписью.
@@ -958,7 +1067,9 @@ export default function Checkout() {
     ? true
     : isMatModal && CUT_MODES.includes(cut.mode) && !!cuttingService;
   // Ставка: у монтажа — своя за кв.м, у реза — ставка станка/материала.
-  const cutWorkRate = cut?.service
+  const cutWorkRate = cut?.engraving
+    ? engRate
+    : cut?.service
     ? (cut.service.uses_running_meter ? Number(cut.cutRate || 0) : Number(cut.service.rate_flat))
     : cutWorkOn
     ? Number(cut?.cutRate || 0)
@@ -1050,7 +1161,7 @@ export default function Checkout() {
                 disabled={!!st?.out || noPrice}
                 title={st?.out ? t("checkout.outOfStockBlock") : noPrice ? t("checkout.priceMissing") : undefined}
               >
-                {p.kind === "service" && <span className="p-tag">{t(`serviceKind.${p.serviceKind}`)}</span>}
+                {(p.kind === "service" || p.kind === "own-cut") && <span className="p-tag">{t(`serviceKind.${p.serviceKind}`)}</span>}
                 {st && (
                   <span className={`badge ${st.out ? "red" : "amber"}`} style={{ alignSelf: "flex-start", marginBottom: 6 }}>
                     {st.out ? t("checkout.outOfStock") : t("warehouse.lowStock")}
@@ -1062,7 +1173,10 @@ export default function Checkout() {
                   {stock && <div className="p-stock">{t("checkout.stockLeft")} {stock}</div>}
                 </div>
                 <div className="p-price">
-                  {p.kind === "material" ? (
+                  {p.kind === "own-cut" ? (
+                    // Цены на плитке нет: её называют в окне под каждый заказ.
+                    <span className="muted" style={{ fontSize: 12 }}>{t("checkout.ownCutPriceTile")}</span>
+                  ) : p.kind === "material" ? (
                     p.sells_by_metre ? (
                       // У рулона цена одна — за погонный метр. Цены за квадрат
                       // и «за лист целиком» у него не бывает.
@@ -1133,6 +1247,22 @@ export default function Checkout() {
                         <span className="badge warn" style={{ marginLeft: 6 }}>{t("checkout.runMetersMissingLine")}</span>
                       )}
                     </div>
+                  ) : l.kind === "cut-own" ? (
+                    <div className="cl-sub">
+                      <span className="badge" style={{ marginRight: 6 }}>{t("checkout.ownCutTag")}</span>
+                      {l.note ? `${l.note} · ` : ""}
+                      {l.rate} × {l.runM} {t("checkout.pmShort")}
+                      {l.machine ? ` · ${l.machine}` : ""}
+                      {!(Number(l.runM) > 0) && (
+                        <span className="badge warn" style={{ marginLeft: 6 }}>{t("checkout.runMetersMissingLine")}</span>
+                      )}
+                    </div>
+                  ) : l.kind === "engraving" ? (
+                    <div className="cl-sub">
+                      {l.width}×{l.length} = {l.area} {t("unit.SQM")} · {l.rate}{" "}
+                      {t("checkout.perPieceShort", { unit: t("unit.SQM") })}
+                      {l.note ? ` · ${l.note}` : ""}
+                    </div>
                   ) : l.kind === "material-metre" ? (
                     // Рулон: показываем длину и ставку за метр — ширины тут нет
                     // намеренно, она в расчёт цены не входит.
@@ -1153,7 +1283,7 @@ export default function Checkout() {
                     <div className="cl-sub">{unitPrice(l)} сом / ед.</div>
                   )}
                 </div>
-                {l.kind !== "cutting" && l.kind !== "material-area" && l.kind !== "material-metre" && l.kind !== "cut-work" && (
+                {!["cutting", "material-area", "material-metre", "cut-work", "cut-own", "engraving"].includes(l.kind) && (
                   <div className="stepper">
                     <button onClick={() => changeQty(l.key, -1)}>−</button>
                     {/* Поле, а не подпись: одну-две штуки удобнее доклацать
@@ -1454,7 +1584,7 @@ export default function Checkout() {
       {/* Unified configurator: material (резка-toggle) or interior-install service */}
       {cut && (
         <Modal
-          title={cut.service ? cut.service.name : cut.material.name}
+          title={cut.ownCut ? t("checkout.ownCutTitle") : cut.service ? cut.service.name : cut.material.name}
           onClose={() => setCut(null)}
           footer={
             <>
@@ -1462,8 +1592,14 @@ export default function Checkout() {
               <button
                 onClick={addCutting}
                 disabled={
-                  // Резку просят, а услуги нет — добавлять нечего.
-                  cutNoService ||
+                  // Материал клиента: нужны длина реза, цена и станок.
+                  cut.ownCut
+                    ? !(ownCutRunM > 0) || !(ownCutRate > 0) || !svcById(cut.cutServiceId)
+                    // Гравировка: площадь и цена за кв.м.
+                    : cut.engraving
+                    ? !cutArea || !(engRate > 0)
+                    // Резку просят, а услуги нет — добавлять нечего.
+                    : cutNoService ||
                   cutRoll
                     // Рулон: нужна длина, цена за метр, чтобы её хватило на
                     // складе и чтобы ширина изделия не превышала рулон.
@@ -1587,8 +1723,9 @@ export default function Checkout() {
             </div>
           )}
 
-          {/* Interior-install service: material picker */}
-          {cut.service && (
+          {/* Interior-install service: material picker. У гравировки материала
+              в строке нет — она считается от площади рисунка. */}
+          {cut.service && !cut.engraving && (
             <div className="field">
               <label>{t("checkout.cutMaterial")}</label>
               <select
@@ -1610,8 +1747,136 @@ export default function Checkout() {
             </div>
           )}
 
-          {/* Штучно: количество, цена за штуку и (по желанию) рез */}
-          {cutRoll ? (
+          {/* Только резка — материал клиента: станок, сколько отрезано, цена
+              резки и что резали. Цену вписывает и складовщик: каталожной у
+              чужого материала нет, а звать админа на каждый такой заказ
+              незачем (2026-09-04, решение владельца). */}
+          {cut.ownCut ? (
+            <>
+              <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>{t("checkout.ownCutHint")}</p>
+              {cuttingServices.length > 1 && (
+                <div className="field">
+                  <label>{t("checkout.cutMachine")}</label>
+                  <div className="tabs" style={{ marginTop: 0 }}>
+                    {cuttingServices.map((s) => (
+                      <button
+                        key={s.id}
+                        className={Number(cut.cutServiceId) === s.id ? "active" : ""}
+                        onClick={() =>
+                          setCut({
+                            ...cut,
+                            cutServiceId: s.id,
+                            // Ставка станка — начальное значение; вписанную
+                            // руками цену смена станка не стирает.
+                            cutRate: Number(s.rate_per_pm) > 0 ? String(s.rate_per_pm) : cut.cutRate,
+                          })
+                        }
+                      >
+                        {s.machine_display || s.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="row">
+                <div className="field grow" style={{ margin: 0 }}>
+                  <label>{t("checkout.ownCutLength")} *</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={cut.running_meters}
+                    onChange={(e) => setCut({ ...cut, running_meters: e.target.value })}
+                    autoFocus
+                  />
+                </div>
+                <div className="field grow" style={{ margin: 0 }}>
+                  <label>{t("checkout.ownCutRate")} *</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={cut.cutRate ?? ""}
+                    onChange={(e) => setCut({ ...cut, cutRate: e.target.value })}
+                  />
+                </div>
+              </div>
+              {!(ownCutRate > 0) && (
+                <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.ownCutNeedRate")}</p>
+              )}
+              <div className="field" style={{ marginTop: 10 }}>
+                <label>{t("checkout.ownCutNote")}</label>
+                <input
+                  value={cut.note ?? ""}
+                  onChange={(e) => setCut({ ...cut, note: e.target.value })}
+                  placeholder={t("checkout.ownCutNotePh")}
+                />
+              </div>
+              {ownCutRunM > 0 && ownCutRate > 0 && (
+                <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
+                  <div className="crow">
+                    <span className="k">{t("checkout.rateWork")}</span>
+                    <span>{ownCutRate} × {ownCutRunM} = {ceilSom(ownCutRate * ownCutRunM)}</span>
+                  </div>
+                  <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
+                    <strong>{t("common.total")}</strong>
+                    <strong style={{ fontSize: 18 }}>{ceilSom(ownCutRate * ownCutRunM)} сом</strong>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : cut.engraving ? (
+            <>
+              <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>{t("checkout.engravingHint")}</p>
+              <div className="row">
+                <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cut.width} onChange={(e) => setCut({ ...cut, width: e.target.value })} autoFocus /></div>
+                <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cut.length} onChange={(e) => setCut({ ...cut, length: e.target.value })} /></div>
+              </div>
+              <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("checkout.sizeHint")}</p>
+              {/* Цена за кв.м — на виду и правится у всех: у крупных заказов
+                  она своя («5 000 за квадрат»). */}
+              <div className="field">
+                <label>{t("checkout.engravingRate")} *</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={cut.rate ?? ""}
+                  onChange={(e) => setCut({ ...cut, rate: e.target.value })}
+                />
+                {!(engRate > 0) && (
+                  <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.engravingNeedRate")}</p>
+                )}
+              </div>
+              <div className="field">
+                <label>{t("checkout.engravingNote")}</label>
+                <input
+                  value={cut.note ?? ""}
+                  onChange={(e) => setCut({ ...cut, note: e.target.value })}
+                  placeholder={t("checkout.engravingNotePh")}
+                />
+              </div>
+              <label className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  style={{ width: 20, height: 20, minHeight: 0 }}
+                  checked={!!cut.ownMaterial}
+                  onChange={(e) => setCut({ ...cut, ownMaterial: e.target.checked })}
+                />
+                {t("checkout.ownCutTag")}
+              </label>
+              {cutArea > 0 && engRate > 0 && (
+                <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
+                  <div className="crow"><span className="k">{t("checkout.engravingArea")}</span><strong>{cutArea} {t("unit.SQM")}</strong></div>
+                  <div className="crow">
+                    <span className="k">{t("checkout.engravingRate")}</span>
+                    <span>{engRate} × {cutArea} = {ceilSom(engRate * cutArea)}</span>
+                  </div>
+                  <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
+                    <strong>{t("common.total")}</strong>
+                    <strong style={{ fontSize: 18 }}>{ceilSom(engRate * cutArea)} сом</strong>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : cutRoll ? (
             <>
               {/* Ширина — надпись, а не поле. Мастеру там нечего менять: рулон
                   режут поперёк на всю ширину, и 40 см ширины купить нельзя.
@@ -2003,7 +2268,7 @@ export default function Checkout() {
           {receipt.items.map((it) => (
             <div className="crow" key={it.id}>
               <span>
-                {it.type === "SERVICE" ? it.service_name : it.material_name}
+                {itemTitle(it, t)}
                 <span className="muted">
                   {" "}× {trimQty(it.quantity)} {it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || ""}
                   {" "}· {trimQty(it.price_per_item)} {t("checkout.perPieceShort", { unit: it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "" })}

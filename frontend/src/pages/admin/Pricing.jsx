@@ -15,6 +15,8 @@ function rateFields(service, t) {
   // Резка считается по погонному метру — у неё своё поле ставки, а не «за кв.м».
   // Ноль означает «своей ставки у станка нет», тогда берётся ставка материала.
   if (service.uses_running_meter) return [["rate_per_pm", t("pricing.ratePerPm")]];
+  // Гравировка — цена за кв.м. Это базовая цена: в кассе её меняют по заказу.
+  if (service.kind === "ENGRAVING") return [["rate_flat", t("pricing.engravingRate")]];
   if (service.uses_area) return [["rate_flat", t("pricing.masterWork")]];
   if (service.uses_pieces) return [["rate_per_piece", t("pricing.ratePerPiece")]];
   return [["base_price", t("pricing.basePrice")]];
@@ -75,6 +77,9 @@ function ServiceCard({ service, materials, onSaved }) {
             />
             {key === "rate_per_pm" && (
               <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("pricing.ratePerPmHint")}</p>
+            )}
+            {service.kind === "ENGRAVING" && (
+              <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("pricing.engravingRateHint")}</p>
             )}
           </div>
         ))}

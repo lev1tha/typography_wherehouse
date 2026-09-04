@@ -5,6 +5,7 @@ import api from "../api/api.js";
 import Icon from "./Icon.jsx";
 import PrintHost from "./PrintHost.jsx";
 import amountInWords, { plural } from "../utils/amountInWords.js";
+import { itemTitle } from "../utils/itemLabel.js";
 
 // Печатные формы заказа: товарный чек и накладная.
 //
@@ -54,7 +55,7 @@ function ItemsTable({ items, t }) {
         {items.map((it, i) => (
           <tr key={it.id}>
             <td className="c">{i + 1}</td>
-            <td>{it.type === "SERVICE" ? it.service_name : it.material_name}</td>
+            <td>{itemTitle(it, t)}</td>
             <td className="r">{qty(it.quantity)}</td>
             <td className="c">{it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label}</td>
             <td className="r">{money(it.price_per_item)}</td>

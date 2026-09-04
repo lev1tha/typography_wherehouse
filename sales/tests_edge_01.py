@@ -214,7 +214,7 @@ class EdgeCuttingTests(APITestCase):
             "type": "SERVICE", "service": interior.id, "material": self.acrylic.id,
         }])
         self.assertEqual(r.status_code, 400, r.data)
-        self.assertIn("количеством или размером", str(r.data))
+        self.assertIn("размер", str(r.data))
         self.assertFalse(Receipt.objects.exists())
 
     def test_explicit_zero_width_treated_as_blank(self):

@@ -5,6 +5,7 @@ import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { itemTitle } from "../utils/itemLabel.js";
 
 // Возврат по чеку — целиком или ОТДЕЛЬНЫМИ позициями.
 //
@@ -88,7 +89,7 @@ export default function RefundModal({ receipt, onClose, onDone }) {
           </button>
         </div>
         {items.map((it) => {
-          const name = it.type === "SERVICE" ? it.service_name : it.material_name;
+          const name = itemTitle(it, t);
           // Единица — кодом с сервера, подпись из словаря (та же, что в накладной).
           const unit = it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "";
           return (

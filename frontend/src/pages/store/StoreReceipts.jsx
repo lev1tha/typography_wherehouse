@@ -6,6 +6,7 @@ import api from "../../api/api.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import AddToOrderModal from "../../components/AddToOrderModal.jsx";
 import RefundModal from "../../components/RefundModal.jsx";
+import { itemTitle } from "../../utils/itemLabel.js";
 
 const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
 const trimQty = (n) => String(+Number(n || 0).toFixed(3));
@@ -340,7 +341,7 @@ export default function StoreReceipts() {
             return (
               <div className="crow" key={it.id}>
                 <span>
-                  {it.type === "SERVICE" ? it.service_name : it.material_name}
+                  {itemTitle(it, t)}
                   <span className="muted">
                     {" "}× {trimQty(it.quantity)} {unit} · {trimQty(it.price_per_item)}{" "}
                     {t("checkout.perPieceShort", { unit })}

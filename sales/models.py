@@ -292,6 +292,19 @@ class TransactionItem(models.Model):
     letter_type = models.CharField(max_length=20, blank=True)  # legacy, unused
     width = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
     length = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    # МАТЕРИАЛ КЛИЕНТА (2026-09-04, просьба владельца): клиент принёс своё, цех
+    # только режет. Со склада ничего не уходит и строки материала нет — одна
+    # работа по цене, названной в момент продажи: каталожной ставки у чужого
+    # материала не бывает, поэтому цену здесь вписывает и складовщик, не только
+    # админ (см. `_price_override_forbidden`). Что именно резали — в `note`.
+    own_material = models.BooleanField(
+        _("материал клиента"), default=False,
+        help_text=_("Резали материал клиента — со склада ничего не списано"),
+    )
+    # Свободный комментарий к строке работы: «акрил 3 мм клиента», «логотип на
+    # крышке». Нужен ровно потому, что у такой строки нет материала, по
+    # которому её потом узнают в чеке.
+    note = models.CharField(_("комментарий"), max_length=255, blank=True)
     is_returned = models.BooleanField(_("возвращено"), default=False)
 
     class Meta:

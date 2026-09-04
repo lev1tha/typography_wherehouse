@@ -1,6 +1,8 @@
+from django.urls import path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    WasteView,
     InventoryLogViewSet,
     MaterialImageViewSet,
     MaterialMonthOpeningViewSet,
@@ -25,4 +27,4 @@ router.register("month-openings", MaterialMonthOpeningViewSet, basename="month-o
 router.register("suppliers", SupplierViewSet, basename="supplier")
 router.register("supplies", SupplyViewSet, basename="supply")
 
-urlpatterns = router.urls
+urlpatterns = [path("waste/", WasteView.as_view(), name="waste")] + router.urls
