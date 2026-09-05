@@ -117,7 +117,12 @@
     "outOfStockSub": "out of stock: {{n}}",
     "cogsAside": "For reference: cost of goods sold (not in the total)",
     "clientMaterialsHint": "All orders of the period except cancelled and returned lines — the same basis as “Material sold for”; orders without a client are not listed here.",
-    "assetHint": "At the purchase prices of the lots the material has not left yet."
+    "assetHint": "At the purchase prices of the lots the material has not left yet.",
+    "materialSalesTitle": "What each material brought in",
+    "materialSalesHint": "How much money each material brought in over the period. Cutting work on it stands beside as a separate figure: that is machine work, and it is not part of the bar.",
+    "materialSalesEmpty": "No material was sold in this period",
+    "materialSalesCut": "cutting",
+    "materialSalesNotSold": "not sold in this period: {{n}}"
   },
   "warehouse": {
     "title": "Warehouse",

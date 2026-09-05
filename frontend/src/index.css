@@ -2197,6 +2197,48 @@ label {
   margin: 10px 0;
 }
 
+/* Длинный список шкал (продажи по материалам) — прокручивается внутри
+   карточки, а не растягивает её: в каталоге заказчика три десятка позиций, и
+   без ограничения высоты карточка выталкивала соседние блоки на экран вниз.
+   Полосу прокрутки рисуем явно: на macOS системная видна только во время
+   прокрутки, и список выглядит обрезанным без намёка, что он листается. */
+.bar-scroll {
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.bar-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.bar-scroll::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 5px;
+  border: 2px solid var(--canvas);
+}
+
+.bar-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Строка шкалы продаж: имя слева сжимается и обрезается многоточием, сумма
+   справа не переносится никогда. Без этого длинное название («Орг стекло 2мм
+   180*121см») выталкивало сумму на вторую строку, и в узкой карточке колонка
+   денег переставала читаться сверху вниз. Полное имя — в подсказке. */
+.bar-head .bar-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-head .bar-value {
+  white-space: nowrap;
+  flex-shrink: 0;
+  padding-left: 10px;
+}
+
 .bar-row .bar-head {
   display: flex;
   justify-content: space-between;

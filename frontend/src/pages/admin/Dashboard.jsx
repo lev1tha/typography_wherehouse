@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
@@ -22,6 +22,14 @@ const expenseRows = (fin, materialsLabel) => [
 
 // Количества без хвоста нулей и с разрядами — как в каталоге («2», «0», «14,88»).
 const qtyFmt = (v) => Number(v || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+
+// Единица, в которой складской лист считает материал: рулон в погонных метрах,
+// лист листами, штучный своей. Та же функция, что в «Остатках по месяцам», —
+// иначе один и тот же материал читался бы там метрами, а здесь квадратами.
+const unitOf = (code, t) =>
+  code === "METER" ? t("unit.METER")
+  : code === "SHEET" ? t("warehouse.sheetsShort")
+  : t(`unit.${code}`, { defaultValue: code || "" });
 
 function Stat({ label, value, suffix, color, sub }) {
   return (
@@ -76,23 +84,45 @@ export default function Dashboard() {
   const { t } = useTranslation();
   const [data, setData] = useState(null);
   const [materials, setMaterials] = useState([]);
+  // Продажи по материалам за период. Берём их из ТОГО ЖЕ эндпоинта, что и
+  // складской лист (`/finance/material-report/`): вторая реализация того же
+  // расчёта рано или поздно разойдётся с первой, и владелец увидит на двух
+  // экранах разные деньги за один материал.
+  const [matSales, setMatSales] = useState([]);
   const [clientBuys, setClientBuys] = useState([]);
   const [fin, setFin] = useState(null);
   const [error, setError] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  // Номер последнего запроса периода — им отсекаем ответы, которые опоздали.
+  const requestSeq = useRef(0);
 
   function loadDashboard() {
     const params = {};
     if (from) params.date_from = from;
     if (to) params.date_to = to;
-    api.get("/audit/dashboard/", { params }).then((r) => setData(r.data)).catch(() => setError(t("common.error")));
+    // Ответы приходят НЕ в том порядке, в котором их спросили. Смена обеих дат
+    // подряд шлёт два набора запросов, и ответ по более широкому периоду (он
+    // же и более медленный) приходит последним и затирает свежий: при
+    // выбранном январе на экране оставались цифры за весь год — по всем
+    // плиткам сразу, потому что запросов четыре и гонка у них общая.
+    // Считаем запросы: применяем только ответы последнего.
+    const seq = (requestSeq.current += 1);
+    const fresh = () => seq === requestSeq.current;
+    api.get("/audit/dashboard/", { params })
+      .then((r) => { if (fresh()) setData(r.data); })
+      .catch(() => { if (fresh()) setError(t("common.error")); });
     // Покупки по клиентам — за тот же период и на той же базе, что «Продали
     // материала на …» выше: иначе сумма таблицы не сходилась с плиткой.
     api.get("/audit/client-purchases/", { params: { ordering: "-material_spend", ...params } })
-      .then((r) => setClientBuys(r.data)).catch(() => {});
+      .then((r) => { if (fresh()) setClientBuys(r.data); }).catch(() => {});
     // Финотчёт (расходы/вложения/прибыль) тоже слушает период — те же даты.
-    api.get("/finance/report/", { params }).then((r) => setFin(r.data)).catch(() => {});
+    api.get("/finance/report/", { params })
+      .then((r) => { if (fresh()) setFin(r.data); }).catch(() => {});
+    // Продажи по материалам — тот же период и тот же расчёт, что в складском
+    // листе. Сумма шкалы сходится с плиткой «Продали материала на» выше.
+    api.get("/finance/material-report/", { params })
+      .then((r) => { if (fresh()) setMatSales(r.data.rows || []); }).catch(() => {});
   }
 
   useEffect(() => {
@@ -124,6 +154,27 @@ export default function Dashboard() {
       .sort((a, b) => b.value - a.value);
   }, [materials, t]);
 
+  // Сколько денег принёс каждый материал. Длина шкалы — продажа САМОГО
+  // материала (та же величина, что в плитке «Продали материала на» и в колонке
+  // «Материал» складского листа). Резку показываем рядом отдельным числом:
+  // это работа, а не материал, и складывать их в одну полосу значило бы
+  // объяснять потом, почему шкала не сходится с плиткой.
+  const materialSales = useMemo(
+    () =>
+      (matSales || [])
+        .map((r) => ({
+          id: r.id,
+          name: r.name,
+          value: Number(r.material_revenue || 0),
+          cut: Number(r.cut_revenue || 0),
+          qty: Number(r.sold_qty || 0),
+          unit: r.counted_in,
+        }))
+        .filter((r) => r.value > 0)
+        .sort((a, b) => b.value - a.value),
+    [matSales]
+  );
+
   if (error) return <div className="error">{error}</div>;
   if (!data) return <p className="muted">{t("common.loading")}</p>;
 
@@ -131,6 +182,14 @@ export default function Dashboard() {
   const rev = data.revenue;
   const revTotal = Number(rev.total);
   const maxCat = Math.max(1, ...byCategory.map((x) => x.value));
+  // Показываем ВСЕ материалы, которые продавались: в каталоге их три десятка,
+  // и обрезка по верхушке отвечала бы на вопрос «что продаётся» наполовину.
+  // Длину держит прокрутка внутри карточки, а не отбор.
+  const salesTotal = materialSales.reduce((s, r) => s + r.value, 0);
+  const maxSale = Math.max(1, ...materialSales.map((x) => x.value));
+  // Сколько позиций каталога за период не продавались вовсе — тоже ответ на
+  // вопрос «что у меня продаётся», только с другой стороны.
+  const notSoldCount = Math.max(0, (matSales || []).length - materialSales.length);
 
   const methods = [
     { key: "cash", label: t("checkout.cash"), color: COLORS[0] },
@@ -154,6 +213,15 @@ export default function Dashboard() {
     }
     push(t("dashboard.services"), data.services_performed);
     push(t("dashboard.refunded"), Math.round(Number(data.refunds.total_refunded)));
+    // Продажи по материалам — теми же строками, что на шкале, плюс её итог.
+    if (materialSales.length) {
+      push("", "");
+      push(t("dashboard.materialSalesTitle"), "");
+      for (const row of materialSales) {
+        push(`${row.name} (${qtyFmt(row.qty)} ${unitOf(row.unit, t)})`, Math.round(row.value));
+      }
+      push(t("finance.totalRow"), Math.round(salesTotal));
+    }
     if (fin) {
       push("", "");
       // Строки — виды расхода из отчёта, поэтому свои виды («Реклама»,
@@ -367,6 +435,73 @@ export default function Dashboard() {
             ))
           ) : (
             <p className="muted">{t("common.empty")}</p>
+          )}
+        </div>
+
+        {/* Продажи по материалам — какой материал сколько принёс за период */}
+        <div className="card">
+          <h3>{t("dashboard.materialSalesTitle")}</h3>
+          <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>
+            {t("dashboard.materialSalesHint")}
+          </p>
+          {materialSales.length ? (
+            <>
+              {/* Список прокручивается внутри карточки: материалов бывает три
+                  десятка, и без этого карточка растягивала бы весь экран. */}
+              <div className="bar-scroll">
+              {materialSales.map((row, i) => (
+                <div className="bar-row" key={row.id}>
+                  <div className="bar-head">
+                    {/* Имя, а за ним мелким — сколько ушло и сколько дала резка
+                        по этому материалу. Всё второстепенное держим СЛЕВА, в
+                        сжимаемой части: справа должна остаться только сумма,
+                        иначе колонка денег перестаёт читаться столбиком. */}
+                    <span className="bar-name" title={row.name}>
+                      {row.name}
+                      {row.qty > 0 && (
+                        <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>
+                          {qtyFmt(row.qty)} {unitOf(row.unit, t)}
+                        </span>
+                      )}
+                      {row.cut > 0 && (
+                        <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>
+                          · {t("dashboard.materialSalesCut")} {som(row.cut)}
+                        </span>
+                      )}
+                    </span>
+                    <strong className="bar-value">{som(row.value)}</strong>
+                  </div>
+                  <div className="bar-track">
+                    {/* Минимальная ширина полосы: один материал легко забирает
+                        90 % выручки, и у остальных полоса схлопывается в точку,
+                        неотличимую от нуля. Сумма стоит рядом числом, так что
+                        полоса здесь — указатель «есть продажи», а не мера. */}
+                    <div
+                      className="bar-fill"
+                      style={{
+                        width: `${Math.max(2, (row.value / maxSale) * 100)}%`,
+                        background: COLORS[i % COLORS.length],
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+              </div>
+              {/* Итог и «сколько не продавалось» — ВНЕ прокрутки: их читают
+                  первыми, и уезжать за край списка они не должны. */}
+              <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 8, paddingTop: 8 }}>
+                <strong>{t("finance.totalRow")}</strong>
+                <strong>{som(salesTotal)}</strong>
+              </div>
+              {/* Обратная сторона того же вопроса: что за период не ушло вовсе. */}
+              {notSoldCount > 0 && (
+                <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
+                  {t("dashboard.materialSalesNotSold", { n: notSoldCount })}
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="muted">{t("dashboard.materialSalesEmpty")}</p>
           )}
         </div>
       </div>
