@@ -11,6 +11,57 @@ from accounts.models import User
 from clients.models import Client, ReferralChangeRequest
 
 
+class ClientNameEditTests(APITestCase):
+    """ФИО правится из карточки: кладовщик может, бухгалтер — нет, а пустое ФИО
+    у физлица не проходит (иначе карточка останется без имени)."""
+
+    def setUp(self):
+        self.store = User.objects.create_user(
+            username="store_n", password="x", role=User.Role.STOREKEEPER
+        )
+        self.person = Client.objects.create(
+            type=Client.Type.PHYSICAL, full_name="Иванв Иван", phone="+700101"
+        )
+        self.company = Client.objects.create(
+            type=Client.Type.OSOO, company_name="Реклама", full_name="Пётр", phone="+700102"
+        )
+
+    def patch(self, client, body):
+        return self.client.patch(f"/api/clients/clients/{client.id}/", body, format="json")
+
+    def test_storekeeper_renames_client(self):
+        self.client.force_authenticate(self.store)
+        r = self.patch(self.person, {"full_name": "Иванов Иван"})
+        self.assertEqual(r.status_code, 200)
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.full_name, "Иванов Иван")
+        self.assertEqual(r.data["display_name"], "Иванов Иван")
+
+    def test_blank_name_rejected_for_physical(self):
+        self.client.force_authenticate(self.store)
+        r = self.patch(self.person, {"full_name": "   "})
+        self.assertEqual(r.status_code, 400)
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.full_name, "Иванв Иван")
+
+    def test_osoo_contact_name_can_be_cleared(self):
+        self.client.force_authenticate(self.store)
+        r = self.patch(self.company, {"full_name": ""})
+        self.assertEqual(r.status_code, 200)
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.full_name, "")
+
+    def test_accountant_cannot_rename(self):
+        accountant = User.objects.create_user(
+            username="acc_n", password="x", role=User.Role.ACCOUNTANT
+        )
+        self.client.force_authenticate(accountant)
+        r = self.patch(self.person, {"full_name": "Кто-то"})
+        self.assertEqual(r.status_code, 403)
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.full_name, "Иванв Иван")
+
+
 class ReferralAPITests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(

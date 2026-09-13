@@ -22,7 +22,8 @@ export default function Clients() {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
   const navigate = useNavigate();
-  const { isAdmin } = useAuth();
+  const { isAdmin, isAccountant } = useAuth();
+  const canEdit = !isAccountant;
   const [clients, setClients] = useState([]);
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState(null);
@@ -98,17 +99,20 @@ export default function Clients() {
     load();
   }
 
-  // ИНН юрлица — нужен счёту на оплату. Сохраняем по уходу из поля, как
-  // остальные правки в карточке.
-  async function saveInn(value) {
-    const next = value.trim();
-    if (next === (detail.inn || "")) return;
+  // Правка поля карточки (ФИО, компания, ИНН) — по уходу из поля. Если сервер
+  // отказал (например, стёрли ФИО у физлица), возвращаем в поле старое значение:
+  // иначе на экране осталась бы пустота, которой в базе нет.
+  async function saveField(field, input) {
+    const next = input.value.trim();
+    const prev = detail[field] || "";
+    if (next === prev) return;
     try {
-      await api.patch(`/clients/clients/${detail.id}/`, { inn: next });
+      await api.patch(`/clients/clients/${detail.id}/`, { [field]: next });
       await refreshDetail(detail.id);
       toast(t("common.saved"));
     } catch (e) {
-      toast(e.response?.data?.detail || t("common.error"), "error");
+      input.value = prev;
+      toast(apiError(e, t("common.error")), "error");
     }
   }
 
@@ -379,6 +383,38 @@ export default function Clients() {
 
       {detail && (
         <Modal title={detail.display_name} onClose={() => setDetail(null)}>
+          {/* Имя правится прямо в карточке: на кассе его набирают на ходу, с
+              опечатками. Бухгалтер карточки не правит — у него только чтение.
+              key по клиенту: иначе при переходе к другому клиенту неуправляемое
+              поле оставило бы в себе имя предыдущего. */}
+          {detail.type === "OSOO" && (
+            <div className="crow">
+              <span className="k">{t("clients.companyName")}</span>
+              {canEdit ? (
+                <input
+                  key={`company-${detail.id}`}
+                  defaultValue={detail.company_name || ""}
+                  style={{ width: 240, height: 34, textAlign: "right" }}
+                  onBlur={(e) => saveField("company_name", e.target)}
+                />
+              ) : (
+                <span>{detail.company_name || "—"}</span>
+              )}
+            </div>
+          )}
+          <div className="crow">
+            <span className="k">{t("clients.fullName")}</span>
+            {canEdit ? (
+              <input
+                key={`name-${detail.id}`}
+                defaultValue={detail.full_name || ""}
+                style={{ width: 240, height: 34, textAlign: "right" }}
+                onBlur={(e) => saveField("full_name", e.target)}
+              />
+            ) : (
+              <span>{detail.full_name || "—"}</span>
+            )}
+          </div>
           <div className="crow">
             <span className="k">{t("clients.phone")}</span>
             <span>{detail.phone}</span>
@@ -394,10 +430,11 @@ export default function Clients() {
               <span className="k">{t("clients.inn")}</span>
               {isAdmin ? (
                 <input
+                  key={`inn-${detail.id}`}
                   defaultValue={detail.inn || ""}
                   placeholder={t("clients.innPh")}
                   style={{ width: 200, height: 34, textAlign: "right" }}
-                  onBlur={(e) => saveInn(e.target.value)}
+                  onBlur={(e) => saveField("inn", e.target)}
                 />
               ) : (
                 <span>{detail.inn || "—"}</span>
