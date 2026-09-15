@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db.models import DecimalField, F, Q, Sum
+from django.db.models import DecimalField, F, Sum
 from django.db.models.functions import Coalesce
 from rest_framework import viewsets
 from rest_framework.response import Response
@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 
 from accounts.permissions import IsAdminOrAccountantRead
 from sales.models import Receipt, TransactionItem
-from warehouse.models import InventoryLog, Material
+from warehouse.models import InventoryLog, Material, stock_value_total
 
 from .models import AuditLog
 from .serializers import AuditLogSerializer
@@ -68,10 +68,12 @@ class DashboardView(APIView):
 
         # Стоимость склада — по остаткам ПАРТИЙ, у каждой своя себестоимость
         # (Material.stock_value). Раньше здесь стояло quantity × purchase_price,
-        # то есть весь остаток оценивался ценой последнего прихода.
+        # то есть весь остаток оценивался ценой последнего прихода. Считает её
+        # `stock_value_total` — та же функция, что у «Склада (оборот)» в
+        # «Финансах»: своя формула там разошлась с этой (15.09).
         #
         # ДВА разных набора материалов, и путать их нельзя:
-        #  · `stock_materials` — что лежит на складе и стоит денег. Скрытый
+        #  · стоимость склада — что лежит на складе и стоит денег. Скрытый
         #    материал с остатком СЮДА ВХОДИТ: он физически на полке. Раньше он
         #    выпадал целиком, и нажатие «Удалить» на позиции с товаром мгновенно
         #    уменьшало активы — 7 201 сом исчезали одним кликом, хотя материал
@@ -81,14 +83,8 @@ class DashboardView(APIView):
         #    Опустевший скрытый материал даёт ноль и так.
         #  · `live_materials` — чем цех торгует. Скрытого тут нет: докупать то,
         #    что убрали из каталога, не нужно.
-        stock_materials = Material.objects.filter(
-            Q(is_archived=False) | Q(quantity__gt=0)
-        )
         live_materials = Material.objects.filter(is_archived=False)
-        stock_value = sum(
-            (m.stock_value for m in stock_materials.prefetch_related("rolls")),
-            Decimal("0"),
-        )
+        stock_value = stock_value_total()
 
         # Выручка по способам оплаты (нал / MBank / DemirBank / онлайн) — за
         # вычетом возвращённых строк, как «Выручка» в Финансах: до этого Обзор

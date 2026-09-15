@@ -366,25 +366,52 @@ class Material(models.Model):
         Считаем по партиям, самые старые первыми — они и уйдут следующими
         (FIFO). Остаток сверх партий (инвентаризация правит количество, партий
         не создавая) оцениваем последней закупочной ценой: другой у него нет.
+
+        ШТУЧНЫЙ материал — тем же циклом: с 27.08 у него тоже партии
+        (`Roll.Form.PIECE`), и приход прибавляет штуки к `quantity`. Раньше цикл
+        стоял под `is_roll_material`, и штучный оценивался ценой последнего
+        прихода — ровно та ошибка, от которой партии и заводились. Штучный без
+        партий уходит в «хвост» и считается по карточке, как раньше.
+
+        Это ЕДИНСТВЕННАЯ формула стоимости склада: ей же считают и «Обзор», и
+        «Склад (оборот)» в «Финансах» (`stock_value_total`). Своя формула в
+        финотчёте считала штучные партии дважды — партией и ещё раз
+        количеством × закупочную — и на проде расходилась с «Обзором» на
+        двести с лишним тысяч (15.09).
         """
         left = self.quantity or Decimal("0")
         if left <= 0:
             return Decimal("0")
         value = Decimal("0")
-        if self.is_roll_material:
-            for roll in sorted(self.rolls.all(), key=lambda r: r.received_at):
-                if left <= 0:
-                    break
-                take = min(roll.remaining_area, left)
-                if take <= 0:
-                    continue
-                value += take * roll.cost_per_sqm
-                left -= take
+        for roll in sorted(self.rolls.all(), key=lambda r: r.received_at):
+            if left <= 0:
+                break
+            take = min(roll.remaining_area, left)
+            if take <= 0:
+                continue
+            value += take * roll.cost_per_sqm
+            left -= take
         value += left * (self.purchase_price or Decimal("0"))
         return value.quantize(Decimal("0.01"))
 
     def __str__(self) -> str:
         return self.name
+
+
+def stock_value_total() -> Decimal:
+    """Стоимость всего склада — сумма `Material.stock_value`.
+
+    Одна функция на «Обзор» и «Финансы»: две формулы одной цифры уже
+    разъехались (штучные партии в финотчёте считались дважды).
+
+    Скрытый материал с остатком СЮДА ВХОДИТ — он физически на полке (решение
+    18.08, см. `audit/views.py`). Отбор по `quantity > 0` это и даёт: пустой
+    материал, скрытый или нет, стоит ноль и так.
+    """
+    return sum(
+        (m.stock_value for m in Material.objects.filter(quantity__gt=0).prefetch_related("rolls")),
+        Decimal("0"),
+    )
 
 
 class MaterialMonthOpening(models.Model):

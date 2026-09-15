@@ -1,8 +1,9 @@
 """Секция «Склад (оборот)» в финотчёте: деньги в материале — не расход.
 
 Закуп попадает сюда, а не в «Расходы»; стоимость склада — по ценам партий
-(штучные и кг/л — по закупочной из карточки). Прибыль материал уменьшает по
-мере продажи, строкой «Себестоимость проданного».
+(штучные без партий — по закупочной из карточки), той же формулой, что в
+«Обзоре». Прибыль материал уменьшает по мере продажи, строкой «Себестоимость
+проданного».
 """
 from decimal import Decimal
 
@@ -66,10 +67,44 @@ class StockSectionTests(APITestCase):
         # Прибыль = выручка (2 × 1000) − себестоимость.
         self.assertEqual(Decimal(str(data["profit"])), Decimal("1600"))
 
-    def test_hidden_material_does_not_inflate_stock_value(self):
-        """Скрытый штучный материал в стоимости полок не считается."""
+    def _dashboard_asset(self):
+        r = self.client.get("/api/audit/dashboard/")
+        self.assertEqual(r.status_code, 200, r.data)
+        return Decimal(str(r.data["unrealised_asset"]))
+
+    def test_hidden_material_with_stock_still_counts(self):
+        """Скрытый материал с остатком лежит на полке — и в стоимости склада.
+
+        Раньше «Финансы» его выкидывали, а «Обзор» считал (решение 18.08:
+        «Удалить» не должно мгновенно уменьшать активы) — одна цифра на двух
+        экранах была разной.
+        """
         self.piece.is_archived = True
         self.piece.save(update_fields=["is_archived"])
         self.assertEqual(
-            Decimal(str(self._report()["stock"]["value_now"])), Decimal("2000.00")
+            Decimal(str(self._report()["stock"]["value_now"])), Decimal("3500.00")
         )
+        self.assertEqual(self._dashboard_asset(), Decimal("3500.00"))
+
+    def test_piece_lots_are_not_counted_twice(self):
+        """Штучная партия — один раз, по своей цене.
+
+        Финотчёт складывал остатки ВСЕХ партий и сверху количество × закупочную
+        у штучных. Приход штучной партии поднимает `quantity`, так что те же
+        штуки попадали в сумму дважды: на проде «Склад (оборот)» был больше
+        «Стоимости склада» в «Обзоре» на двести с лишним тысяч.
+        """
+        glue = Material.objects.create(name="Клей", unit=Material.Unit.PIECE)
+        receive_lot(glue, form="PIECE", sheet_count=Decimal("10"),
+                    purchase_cost=Decimal("1000"))   # 10 шт по 100
+        receive_lot(glue, form="PIECE", sheet_count=Decimal("10"),
+                    purchase_cost=Decimal("3000"))   # 10 шт по 300
+        # Старая партия не дорожает от новой: 10 × 100 + 10 × 300 = 4000,
+        # а не 20 × 300 (цена последнего прихода) и не 4000 + 6000 (дважды).
+        glue.refresh_from_db()
+        self.assertEqual(glue.stock_value, Decimal("4000.00"))
+        # 3500 (акрил + саморезы) + 4000 (клей).
+        self.assertEqual(
+            Decimal(str(self._report()["stock"]["value_now"])), Decimal("7500.00")
+        )
+        self.assertEqual(self._dashboard_asset(), Decimal("7500.00"))

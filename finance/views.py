@@ -20,7 +20,7 @@ from accounts.permissions import IsAdminOrAccountantRead, SeesMoney
 from audit.models import AuditLog
 from sales.models import Receipt, TransactionItem
 from services.models import PrintingService
-from warehouse.models import InventoryLog, Material, Roll, Supply
+from warehouse.models import InventoryLog, Material, Roll, Supply, stock_value_total
 
 from .material_sheet import (
     collect_flows,
@@ -502,8 +502,8 @@ class FinanceReportView(APIView):
         # Деньги, вложенные в материал. Закуп за период — сколько переложили из
         # кассы в склад (авто по приходам + ручные записи вида «Закуп»);
         # стоимость склада — сколько лежит на полках СЕЙЧАС, по ценам партий
-        # (штучные и кг/л — по закупочной из карточки). Именно «сейчас», а не
-        # «на конец периода»: отматывать остатки назад по журналу система
+        # (штучные без партий — по закупочной из карточки). Именно «сейчас», а
+        # не «на конец периода»: отматывать остатки назад по журналу система
         # сознательно не берётся (см. складской лист).
         purchase_kind_id = next(
             (k.id for k in kinds if k.code == ExpenseKind.MATERIAL_PURCHASE), None
@@ -511,29 +511,13 @@ class FinanceReportView(APIView):
         stock_purchases = auto_by_code[ExpenseKind.MATERIAL_PURCHASE] + spent_by_kind.get(
             purchase_kind_id, Decimal("0")
         )
-        # По партиям, той же ценой за кв.м, что и списание (свойство партии,
-        # не поле) — питоном: партий сотни, а не миллионы.
-        lots_value = sum(
-            (
-                r.remaining_area * r.cost_per_sqm
-                for r in Roll.objects.filter(remaining_area__gt=0).only(
-                    "remaining_area", "purchase_cost", "initial_area"
-                )
-            ),
-            Decimal("0"),
-        )
-        pieces_value = sum(
-            (
-                (m.quantity or Decimal("0")) * (m.purchase_price or Decimal("0"))
-                for m in Material.objects.filter(
-                    is_roll_material=False, is_archived=False
-                ).only("quantity", "purchase_price")
-            ),
-            Decimal("0"),
-        )
+        # Той же функцией, что «Стоимость склада» в «Обзоре». Своя формула
+        # здесь (все партии + количество × закупочную у штучных) считала
+        # штучные партии дважды: приход партии поднимает и её остаток, и
+        # `quantity` материала. На проде 15.09 — 1 386 543 против 1 180 737.
         stock = {
             "purchases": stock_purchases,
-            "value_now": (lots_value + pieces_value).quantize(Decimal("0.01")),
+            "value_now": stock_value_total().quantize(Decimal("0.01")),
         }
 
         # РАСХОДЫ — только то, что уходит из кассы насовсем: транспорт и свои
