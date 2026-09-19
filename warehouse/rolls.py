@@ -54,6 +54,7 @@ def receive_lot(
     supply=None,
     declared_length=None,
     production=None,
+    paid_account=None,
 ) -> Roll:
     """Receive a new lot (roll or sheets). Computes area from dimensions unless
     `area` is given directly; then creates the lot and refreshes material stock.
@@ -127,6 +128,21 @@ def receive_lot(
     if received_at:
         entry.happened_at = received_at
     entry.save()
+
+    # ЗАПЛАТИЛИ ПОСТАВЩИКУ — расход по кассе. Только если при приёмке выбрали
+    # счёт: взяли в долг (или зовут из накладной, где оплата своя, на весь
+    # документ) — записи нет. До 19.09 закуп мимо кассы проходил всегда, и
+    # остаток «сколько в ящике» не знал про 1 678 477 сом, ушедших поставщикам.
+    if paid_account:
+        from finance import cash
+
+        cash.supplier_paid(
+            roll.purchase_cost, paid_account,
+            roll=roll,
+            happened_on=(received_at.date() if received_at else None),
+            note=f"{locked.name}: {roll.dimensions_label}",
+            user=user,
+        )
     return roll
 
 

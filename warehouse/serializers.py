@@ -338,6 +338,14 @@ class QuickIntakeSerializer(serializers.Serializer):
     # Дата поступления: приход часто вносят задним числом. Не указана — сегодня.
     happened_on = serializers.DateField(required=False, allow_null=True)
     reason = serializers.CharField(required=False, allow_blank=True)
+    # Чем заплатили за поставку: «наличные» / «банк» пишут расход в кассу,
+    # «в долг» — не пишут. Поля нет — тоже не пишем: система не должна
+    # выдумывать движение денег за того, кто про него ничего не сказал (так
+    # ведут себя старые вызовы API и импорт каталога).
+    payment = serializers.ChoiceField(
+        choices=["CASH", "BANK", "DEBT"], required=False, allow_blank=True
+    )
+
 
 
 class AdjustmentSerializer(serializers.Serializer):
@@ -465,6 +473,13 @@ class RollIntakeSerializer(serializers.Serializer):
     # маркировку («бишкек»), и свести по производству было нельзя.
     production = serializers.PrimaryKeyRelatedField(
         queryset=ProductionSite.objects.all(), required=False, allow_null=True
+    )
+    # Чем заплатили за поставку: «наличные» / «банк» пишут расход в кассу,
+    # «в долг» — не пишут. Поля нет — тоже не пишем: система не должна
+    # выдумывать движение денег за того, кто про него ничего не сказал (так
+    # ведут себя старые вызовы API и импорт каталога).
+    payment = serializers.ChoiceField(
+        choices=["CASH", "BANK", "DEBT"], required=False, allow_blank=True
     )
     form = serializers.ChoiceField(choices=Roll.Form.values)
     width = serializers.DecimalField(max_digits=8, decimal_places=2, min_value=0, required=False, allow_null=True)
@@ -768,7 +783,7 @@ class SupplySerializer(serializers.ModelSerializer):
         fields = [
             "id", "number", "supplier", "supplier_name",
             "supplier_inn", "supplier_phone", "received_on",
-            "stated_total", "paid_amount", "note", "lines",
+            "stated_total", "paid_amount", "paid_account", "note", "lines",
             "total_cost", "discrepancy", "debt",
             "created_by", "created_by_name", "created_at",
         ]

@@ -26,8 +26,8 @@ def account_for(payment_method) -> str:
 
 
 def record(kind, amount, article, *, account=None, payment_method=None,
-           happened_on=None, receipt=None, supply=None, expense=None, note="",
-           user=None, is_auto=True):
+           happened_on=None, receipt=None, supply=None, expense=None, roll=None,
+           note="", user=None, is_auto=True):
     """Записать движение. Ноль и минус игнорируем — это не операция."""
     from .models import CashEntry
 
@@ -43,6 +43,7 @@ def record(kind, amount, article, *, account=None, payment_method=None,
         receipt=receipt,
         supply=supply,
         expense=expense,
+        roll=roll,
         note=note,
         created_by=user,
         is_auto=is_auto,
@@ -110,6 +111,27 @@ def payment_reverted(receipt, amount, *, user=None):
         payment_method=receipt.payment_method,
         receipt=receipt, user=user,
         note=f"Откат оплаты по заказу №{receipt.order_number}" if receipt.order_number else "",
+    )
+
+
+def supplier_paid(amount, account, *, roll=None, supply=None, happened_on=None,
+                  note="", user=None):
+    """Заплатили поставщику за материал — деньги ушли.
+
+    Зовут её только тогда, когда человек ПРИ ПРИЁМКЕ выбрал счёт: система не
+    может знать, отдали за поставку деньги или взяли в долг, а догадка здесь
+    дороже пропуска. Не выбрали — записи нет, и касса остаётся как была.
+
+    Ноль и минус `record` отсекает сам: накладная без оплаты (взяли в долг)
+    сюда дойдёт с нулём и ничего не запишет.
+    """
+    from .models import CashEntry
+
+    return money_out(
+        amount, CashEntry.Article.SUPPLY,
+        account=account,
+        happened_on=happened_on,
+        roll=roll, supply=supply, note=note, user=user,
     )
 
 

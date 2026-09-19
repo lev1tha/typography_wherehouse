@@ -66,6 +66,18 @@ def _as_moment(day):
     return timezone.make_aware(datetime.combine(day, datetime.min.time()))
 
 
+def _paid_account(data):
+    """Счёт, с которого заплатили поставщику, или None.
+
+    «В долг» и вовсе не указанный способ — одно и то же для кассы: движения
+    денег не было. Разводить их отдельными значениями не нужно, а вот молча
+    подставлять «наличные» нельзя — так в кассе появился бы расход, которого
+    никто не делал.
+    """
+    value = data.get("payment") or ""
+    return value if value in ("CASH", "BANK") else None
+
+
 class MaterialViewSet(viewsets.ModelViewSet):
     """Warehouse catalogue. Read for all staff; create/edit for admins.
 
@@ -312,6 +324,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
             production=data["material"].production,
             user=request.user,
             received_at=_as_moment(data.get("happened_on")),
+            paid_account=_paid_account(data),
         )
         return Response(
             MaterialSerializer(roll.material, context={"request": request}).data
@@ -448,6 +461,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
             production=data.get("production"),
             user=request.user,
             declared_length=data.get("declared_length"),
+            paid_account=_paid_account(data),
         )
         note = (
             f"Поступление «{roll.material.name}»: {roll.dimensions_label} = "

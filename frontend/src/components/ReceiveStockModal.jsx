@@ -47,6 +47,11 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
     // ВЧЕРАШНИЙ день, и партия вставала в очередь FIFO не туда, а закуп падал
     // в предыдущие сутки. Тот же приём, что в кассе (`todayStr`).
     received_on: new Date().toLocaleDateString("sv-SE"),
+    // Чем заплатили поставщику. Пусто НАРОЧНО: заказчик платит по-разному, и
+    // подставленное «наличные» тихо списывало бы деньги из ящика за поставку,
+    // оплаченную переводом или взятую в долг. Пока не выбрано — приёмка не
+    // отправляется.
+    payment: "",
   });
   const [busy, setBusy] = useState(false);
   // Считаем размерами (ширина × высота × листы / метры) или сразу площадью.
@@ -115,6 +120,14 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
       : 0;
 
   const costPerSqm = area && batchCost ? (batchCost / area).toFixed(2) : null;
+  // Сколько уйдёт из кассы, если приход оплачен. У партии это её стоимость, у
+  // штучного прихода — количество × цену за штуку, а пустую цену сервер берёт
+  // из карточки (последнюю закупочную) — показываем ровно то, что он посчитает,
+  // иначе подпись обещала бы «расход на 0 сом» там, где спишется 240.
+  const payAmount = roll
+    ? batchCost
+    : Number(v.quantity || 0) *
+      Number(v.actual_price || material.purchase_price || 0);
   const cur = Number(material.quantity) || 0;
   const unit = t(`unit.${material.unit}`);
   const added = roll ? area : Number(v.quantity) || 0;
@@ -137,14 +150,14 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
   const perSheet = (perSqm) => (sheetArea > 0 ? Math.round(perSqm * sheetArea) : null);
   const money = (n) => Number(n).toLocaleString("ru-RU");
 
-  const valid = roll
+  const valid = !!v.payment && (roll
     ? (byArea
         // У рулона площадь бесполезна без ширины: в метры её не перевести.
         ? Number(v.area) > 0 && (form !== "ROLL" || rollWidth > 0)
         : form === "ROLL"
         ? (material.roll_width || v.width) && v.length
         : v.width && v.height && v.sheet_count) && batchCost > 0
-    : !!v.quantity;
+    : !!v.quantity);
 
   async function submit() {
     setBusy(true);
@@ -174,6 +187,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           sheet_count: form === "SHEET" && !byArea ? Number(v.sheet_count) : null,
           purchase_cost: batchCost,
           received_on: v.received_on || null,
+          payment: v.payment,
         });
       } else {
         await api.post("/warehouse/materials/supply/", {
@@ -182,6 +196,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           actual_price: v.actual_price ? Number(v.actual_price) : null,
           happened_on: v.received_on || null,
           reason: v.code,
+          payment: v.payment,
         });
       }
       toast(t("supply.done"));
@@ -359,6 +374,35 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
         <input type="date" value={v.received_on} onChange={set("received_on")} />
         <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
           {t("supply.receivedOnHint")}
+        </p>
+      </div>
+
+      {/* ЧЕМ ЗАПЛАТИЛИ. Ничего не выбрано заранее: владелец платит по-разному,
+          и угадывать за него — значит списать из ящика деньги, которых оттуда
+          не брали. «В долг» тоже ответ: материал приехал, деньги не ушли. */}
+      <div className="field">
+        <label>{t("supply.payment")}</label>
+        <div className="row" style={{ gap: 8, margin: 0 }}>
+          {[["CASH", t("expenses.paidCash")], ["BANK", t("expenses.paidBank")], ["DEBT", t("supply.onCredit")]].map(
+            ([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                className={v.payment === key ? "" : "secondary"}
+                aria-pressed={v.payment === key}
+                onClick={() => setV({ ...v, payment: key })}
+              >
+                {label}
+              </button>
+            )
+          )}
+        </div>
+        <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+          {v.payment === "DEBT"
+            ? t("supply.onCreditHint")
+            : v.payment
+              ? t("supply.paymentHint", { sum: money(Math.round(payAmount)) })
+              : t("supply.paymentNeeded")}
         </p>
       </div>
 

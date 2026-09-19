@@ -842,6 +842,13 @@ class Supply(models.Model):
     paid_amount = models.DecimalField(
         _("оплачено поставщику"), max_digits=14, decimal_places=2, default=Decimal("0")
     )
+    # Чем платили: ящик или счёт. Пусто — не платили (взяли в долг), и в кассу
+    # накладная не пишется. Сумму берём из `paid_amount`: оплата бывает
+    # частичной, и остаток честно висит в `debt`.
+    paid_account = models.CharField(
+        _("чем заплатили"), max_length=10, blank=True,
+        choices=[("CASH", _("Наличные")), ("BANK", _("Банк"))],
+    )
     note = models.CharField(_("примечание"), max_length=255, blank=True)
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,

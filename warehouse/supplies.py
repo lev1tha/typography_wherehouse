@@ -126,6 +126,22 @@ def post_supply(supply: Supply, lines_data: list[dict], *, user=None) -> Supply:
 
         line.save()
 
+    # ОПЛАТА ПОСТАВЩИКУ — одной записью на весь документ, а не на каждую
+    # строку: платят за накладную целиком, и в кассовой книге она должна
+    # читаться так же. Оплата бывает частичной — берём ровно `paid_amount`,
+    # остаток честно висит в `Supply.debt`. Счёт не выбран (взяли в долг) —
+    # записи нет.
+    if supply.paid_account and supply.paid_amount > 0:
+        from finance import cash
+
+        cash.supplier_paid(
+            supply.paid_amount, supply.paid_account,
+            supply=supply,
+            happened_on=supply.received_on,
+            note=reason_head,
+            user=user,
+        )
+
     return supply
 
 
@@ -205,4 +221,9 @@ def unpost_supply(supply: Supply) -> None:
         # журнале: её приход тоже уходит ниже, и движения в сумме нет.
         apply_stock_change(material, -line.quantity)
     supply.inventory_logs.all().delete()
+    # Оплата поставщику уходит вместе с документом: поставки не было — значит
+    # и деньги за неё не отдавали. Каскадом это не решить: ссылка на накладную
+    # у кассовой записи намеренно SET_NULL, чтобы РУЧНАЯ запись пережила отмену
+    # документа (человек её сделал, ему и решать). Снимаем только свои.
+    supply.cash_entries.filter(is_auto=True).delete()
     supply.delete()

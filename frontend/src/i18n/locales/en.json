@@ -652,7 +652,12 @@
     "writeoffRoll": "Roll",
     "writeoffMetres": "Metres to write off",
     "writeoffRollHint": "Roll stock is written off per roll and in metres — at that roll's width and cost. The roll's remainder after the write-off is shown below.",
-    "writeoffRollNone": "This material has no rolls with stock left."
+    "writeoffRollNone": "This material has no rolls with stock left.",
+    "payment": "How the supplier was paid",
+    "onCredit": "On credit",
+    "paymentNeeded": "Pick how it was paid — this decides whether money leaves the cash book.",
+    "paymentHint": "An expense of {{sum}} som will be written to the cash book.",
+    "onCreditHint": "The material arrived, the money did not leave — nothing is written to the cash book."
   },
   "journal": {
     "title": "Journal",
