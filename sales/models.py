@@ -422,7 +422,3 @@ class Payment(models.Model):
 
     def __str__(self) -> str:
         return f"Оплата {self.amount} сом по чеку №{self.receipt.order_number}"
-
-    def __str__(self) -> str:
-        target = self.material or self.service
-        return f"{self.get_type_display()}: {target} × {self.quantity}"

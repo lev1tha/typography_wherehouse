@@ -213,6 +213,14 @@ export default function Cash() {
           <div className="label">{t("cash.total")}</div>
           <div className="value" style={{ color: "var(--accent-strong)" }}>{som(balance.total)}</div>
           <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("cash.totalHint")}</div>
+          {/* Сдача, которую ещё не вернули, лежит здесь же, но выручкой не
+              стала: она уйдёт на руки или в зачёт следующего заказа. Без этой
+              строки касса спорила с «Финансами» ровно на неё. */}
+          {Number(balance.change_held || 0) > 0 && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+              {t("cash.changeHeld", { value: som(balance.change_held) })}
+            </div>
+          )}
         </div>
       </div>
 

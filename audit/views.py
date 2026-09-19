@@ -1,3 +1,4 @@
+from collections import defaultdict
 from decimal import Decimal
 
 from django.db.models import DecimalField, F, Sum
@@ -99,6 +100,55 @@ class DashboardView(APIView):
         revenue_online = rev(Receipt.PaymentMethod.ONLINE)
         revenue_total = revenue_cash + revenue_mbank + revenue_demirbank + revenue_online
 
+        # СКОЛЬКО ИЗ ЭТОГО УЖЕ ПОЛУЧИЛИ, а сколько ещё должны — тем же
+        # разрезом. Без этих двух строк «Наличные 449 042» читаются как деньги
+        # в ящике, а это СТОИМОСТЬ ЗАКАЗОВ: на проде 19.09 из них не заплачено
+        # 314 141, и в ящике лежало 114 707. Плитка и касса спорили вчетверо,
+        # и это первое, что заказчик складывает в уме.
+        #
+        # Способ у полученных денег берём НЕ у чека, а у самой оплаты: долг
+        # часто гасят не тем способом, которым оформляли заказ (наличный заказ
+        # закрывают переводом). Первая оплата при оформлении своей записи
+        # `Payment` не заводит — это остаток суммы чека сверх записанных
+        # погашений, и он идёт способом чека. Ровно так же разносит деньги
+        # кассовая книга (`finance.cash.account_for`), поэтому «получено
+        # наличными» здесь и наличный остаток кассы — об одном и том же.
+        received = defaultdict(lambda: Decimal("0"))
+        debt = defaultdict(lambda: Decimal("0"))
+        for r in paid.prefetch_related("payments"):
+            kept = r.total_price - r.refunded_amount
+            # Больше, чем стоит оставшийся заказ, выручкой не считаем: лишнее —
+            # это сдача или возвращённые деньги, у них свои поля (та же
+            # оговорка, что у `revenue_paid` в «Финансах»).
+            cap = min(r.amount_paid, kept) if kept > 0 else Decimal("0")
+            rows = []
+            payments = sorted(r.payments.all(), key=lambda p: (p.paid_on, p.id))
+            first = r.amount_paid - sum((p.amount for p in payments), Decimal("0"))
+            if first > 0:
+                rows.append((r.payment_method, first))
+            rows += [(p.method, p.amount) for p in payments]
+            left = cap
+            for method, amount in rows:
+                if left <= 0:
+                    break
+                take = min(amount, left)
+                received[method] += take
+                left -= take
+            owed = kept - r.amount_paid
+            if r.payment_status in Receipt.OWING_STATUSES and owed > 0:
+                debt[r.payment_method] += owed
+
+        def split(source):
+            """Четыре способа и итог — одной формой, как у выручки выше."""
+            out = {
+                "cash": source[Receipt.PaymentMethod.CASH],
+                "mbank": source[Receipt.PaymentMethod.MBANK],
+                "demirbank": source[Receipt.PaymentMethod.DEMIRBANK],
+                "online": source[Receipt.PaymentMethod.ONLINE],
+            }
+            out["total"] = sum(out.values(), Decimal("0"))
+            return out
+
         # Разбивка выручки — работа против материала — по тем же заказам, что и
         # выручка выше: все неотменённые, кроме возвращённых строк.
         paid_lines = by_period(
@@ -147,17 +197,31 @@ class DashboardView(APIView):
             v=Coalesce(Sum("refunded_amount"), Decimal("0"), output_field=DecimalField())
         )["v"]
 
-        # Material lost via write-offs and negative inventory adjustments.
-        lost_qty = (
+        # СПИСАНО МИМО ПРОДАЖИ — недостача по инвентаризации и брак.
+        #
+        # Главное здесь ДЕНЬГИ: материал, вынесенный со склада правкой остатка,
+        # не попадает ни в себестоимость, ни в расходы, и склад просто худеет.
+        # На проде 19.09 так ушло 103 424 сома — и не было экрана, где эта
+        # сумма появлялась хоть раз. Себестоимость движения знает журнал: у
+        # площадных — по партиям, у штучных — по закупочной; у записей до
+        # 04.09 её нет, поэтому «сколько» и «на сколько» — разные ответы.
+        #
+        # Количество складывать по материалам НЕЛЬЗЯ (штуки диодов с
+        # квадратными метрами акрила), поэтому наружу отдаём только деньги и
+        # число записей. Период — тот же, что у остальных денежных плиток:
+        # раньше эта цифра считалась по всей истории и с ними не дружила.
+        losses = by_period(
             InventoryLog.objects.filter(
                 type__in=[InventoryLog.Type.ADJUSTMENT, InventoryLog.Type.WRITE_OFF],
                 quantity_changed__lt=0,
-            ).aggregate(
-                v=Coalesce(
-                    Sum("quantity_changed"), Decimal("0"), output_field=DecimalField()
-                )
-            )["v"]
+            ),
+            field="happened_at",
         )
+        lost_cost = losses.aggregate(
+            v=Coalesce(Sum("cost"), Decimal("0"), output_field=DecimalField())
+        )["v"]
+        lost_rows = losses.count()
+        lost_unknown = losses.filter(cost__isnull=True).count()
 
         # Виды материалов на исходе (остаток ≤ критического) — список, не только
         # счёт. Скрытые не показываем: докупать то, что удалили из каталога, не
@@ -191,6 +255,11 @@ class DashboardView(APIView):
                     "demirbank": revenue_demirbank,
                     "online": revenue_online,
                     "total": revenue_total,
+                    # Выручка — это ЗАКАЗЫ периода, включая отданные в долг.
+                    # Сколько из них уже на руках и сколько ещё должны — тем же
+                    # разрезом, чтобы плитку нельзя было прочитать как кассу.
+                    "received": split(received),
+                    "debt": split(debt),
                 },
                 "breakdown": {
                     "work_revenue": work_revenue,
@@ -224,7 +293,12 @@ class DashboardView(APIView):
                 "materials_consumed_by_services": materials_consumed,
                 "refunds": {
                     "total_refunded": refunded_total,
-                    "material_lost_quantity": abs(lost_qty),
+                    # Сколько денег вынесли со склада мимо продажи, сколько
+                    # таких записей и у скольких из них себестоимость
+                    # неизвестна (списания до 04.09).
+                    "material_lost_cost": lost_cost,
+                    "material_lost_rows": lost_rows,
+                    "material_lost_unknown": lost_unknown,
                 },
                 "low_stock_count": low_stock_count,
                 "out_of_stock_count": out_of_stock_count,
@@ -268,12 +342,17 @@ class ClientPurchasesView(APIView):
 
         # Суммы строк — вверх до сома по Decimal, как в шапке Обзора (см.
         # `_line_sum`); собираем по клиентам в Python — набор небольшой.
+        #
+        # Заказы БЕЗ КЛИЕНТА (продажа с улицы) идут одной общей строкой, а не
+        # выбрасываются: без неё сумма таблицы не сходилась с плиткой «Продали
+        # материала на …» над ней — на проде 19.09 это 467 263 против 474 274.
+        # Разницу в 7 011 объяснить было нечем, и обе цифры выглядели
+        # неправильными, хотя каждая считалась верно.
         by_client = {}
         lines = TransactionItem.objects.filter(
             type=TransactionItem.Type.MATERIAL,
             is_returned=False,
             receipt__in=live,
-            receipt__client__isnull=False,
         ).values_list("receipt__client", "quantity", "price_per_item")
         for client_id, qty, price in lines:
             acc = by_client.setdefault(client_id, {"spend": Decimal("0"), "qty": Decimal("0")})
@@ -287,13 +366,19 @@ class ClientPurchasesView(APIView):
         result = []
         for client_id, acc in by_client.items():
             client = clients.get(client_id)
-            if not client:
+            if client_id and not client:
                 continue
-            orders = live.filter(client=client).count()
+            orders = (
+                live.filter(client=client).count()
+                if client
+                else live.filter(client__isnull=True).count()
+            )
             result.append({
-                "client_id": client.id,
-                "client_name": client.display_name,
-                "phone": client.phone,
+                # У строки «без клиента» `client_id` пустой — по нему интерфейс
+                # и отличает её от обычной: ни карточки, ни телефона у неё нет.
+                "client_id": client.id if client else None,
+                "client_name": client.display_name if client else "Без клиента",
+                "phone": client.phone if client else "",
                 "material_spend": acc["spend"],
                 "material_qty": acc["qty"],
                 "orders": orders,

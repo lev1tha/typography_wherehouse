@@ -217,7 +217,13 @@ export default function Finance() {
     { key: "material_revenue", label: t("finance.colMatSum"), render: (r) => som(r.material_revenue) },
     { key: "cut_revenue", label: t("finance.colCutSum"), render: (r) => som(r.cut_revenue) },
     { key: "received", label: t("finance.colReceived"), render: (r) => q2(r.received) },
-    { key: "stock", label: t("finance.colStock"), render: (r) => `${q2(r.stock)} ${t(`unit.${r.unit}`)}` },
+    {
+      key: "stock",
+      label: t("finance.colStock"),
+      // У строки «Материал клиента» (резка своего материала) склада нет вовсе —
+      // ни остатка, ни единицы. Прочерк честнее, чем «0 unit.».
+      render: (r) => (r.unit ? `${q2(r.stock)} ${t(`unit.${r.unit}`)}` : "—"),
+    },
   ];
 
   // Группы для списков трат внизу — как раньше были отдельные разделы.
@@ -389,7 +395,19 @@ export default function Finance() {
           value={som(report.profit)}
           color={Number(report.profit) >= 0 ? "ok" : "danger"}
         />
-        <Stat label={t("finance.clientDebt")} value={som(report.client_debt)} color="accent-strong" />
+        <Stat
+          label={t("finance.clientDebt")}
+          value={som(report.client_debt)}
+          color="accent-strong"
+          // Долг по заказам без клиента входит в эту сумму, но в карточках
+          // клиентов его нет: сумма долгов на «Клиентах» не сходилась с
+          // плиткой, и разницу объяснить было нечем.
+          sub={
+            Number(report.anonymous_debt || 0) > 0
+              ? t("finance.debtNoClient", { value: som(report.anonymous_debt) })
+              : undefined
+          }
+        />
         {/* Оборот — на первом экране, а не под сгибом: «где мои деньги в
             складе» — первый вопрос владельца, ответ не должен требовать
             прокрутки. Подробности — в карточке «Склад (оборот)» ниже. */}
@@ -461,6 +479,73 @@ export default function Finance() {
             <span className="k">{t("finance.stockValueNow")}</span>
             <span>{som(report.stock.value_now)}</span>
           </div>
+          {/* Списанное мимо продажи — недостача и брак. Это деньги, которые
+              ушли со склада, не став ни выручкой, ни себестоимостью: без этой
+              строки закуп и остаток не сходились, и разницу нечем было
+              объяснить. */}
+          {Number(report.stock.losses || 0) > 0 && (
+            <div className="crow">
+              <span className="k">{t("finance.stockLosses")}</span>
+              <span style={{ color: "var(--danger)" }}>− {som(report.stock.losses)}</span>
+            </div>
+          )}
+          {report.stock.reconcile && (
+            <>
+              <div style={{ borderTop: "1px solid var(--hairline)", marginTop: 10, paddingTop: 8 }}>
+                <strong>{t("finance.stockReconcile")}</strong>
+                <p className="muted" style={{ fontSize: 13, marginTop: 2 }}>
+                  {t("finance.stockReconcileHint")}
+                </p>
+              </div>
+              {/* Строки блока — за ВСЮ историю, поэтому и подпись другая:
+                  «за период» рядом с цифрой за всё время читается как ошибка
+                  ровно в том месте, где заказчик ищет объяснение. */}
+              <div className="crow">
+                <span className="k">{t("finance.stockPurchasesAll")}</span>
+                <span>{som(report.stock.reconcile.purchases)}</span>
+              </div>
+              <div className="crow">
+                <span className="k">{t("finance.cogs")}</span>
+                <span style={{ color: "var(--danger)" }}>− {som(report.stock.reconcile.cogs)}</span>
+              </div>
+              <div className="crow">
+                <span className="k">{t("finance.stockLosses")}</span>
+                <span style={{ color: "var(--danger)" }}>− {som(report.stock.reconcile.losses)}</span>
+              </div>
+              <div className="crow">
+                <span className="k">{t("finance.stockExpected")}</span>
+                <span>{som(report.stock.reconcile.expected)}</span>
+              </div>
+              <div className="crow">
+                <span className="k">{t("finance.stockValueNow")}</span>
+                <span>{som(report.stock.reconcile.value_now)}</span>
+              </div>
+              {/* Необъяснённый остаток. Прятать его в разнице двух строк — это
+                  и есть «статистика неправильная»: цифра должна стоять на
+                  экране и называться своим именем. */}
+              <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6, paddingTop: 8 }}>
+                <strong>{t("finance.stockGap")}</strong>
+                <strong style={{ color: Number(report.stock.reconcile.gap) ? "var(--danger)" : undefined }}>
+                  {som(report.stock.reconcile.gap)}
+                </strong>
+              </div>
+              {Number(report.stock.reconcile.losses_unknown || 0) > 0 && (
+                <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                  {t("finance.stockLossesUnknown", { n: report.stock.reconcile.losses_unknown })}
+                </p>
+              )}
+              {/* Вторая половина ответа «почему не сходится»: остаток, который
+                  завела инвентаризация, прихода под собой не имеет и тянет
+                  разрыв в минус. */}
+              {Number(report.stock.reconcile.stock_without_lots || 0) > 0 && (
+                <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                  {t("finance.stockWithoutLots", {
+                    value: som(report.stock.reconcile.stock_without_lots),
+                  })}
+                </p>
+              )}
+            </>
+          )}
         </div>
       )}
 

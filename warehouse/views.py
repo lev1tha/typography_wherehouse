@@ -377,6 +377,18 @@ class MaterialViewSet(viewsets.ModelViewSet):
                 log_type=InventoryLog.Type.ADJUSTMENT,
                 reason=reason,
                 user=request.user,
+                # Недостача — это ДЕНЬГИ, и цифру нужно сохранить здесь: у
+                # правки остатка нет ни строки чека, ни партии, и восстановить
+                # её потом не по чему. У площадных материалов её считает
+                # `consume_area` по партиям; у штучных цена одна — закупочная
+                # из карточки (так же оценивает остаток `stock_value`).
+                # До 19.09 её не писали вовсе: 4 000 диодов ушли правкой на
+                # 14 000 сом, и в отчётах эти деньги просто исчезли.
+                cost=(
+                    (-delta * (material.purchase_price or Decimal("0"))).quantize(Decimal("0.01"))
+                    if delta < 0
+                    else None
+                ),
             )
         AuditLog.record(
             request.user,

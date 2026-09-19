@@ -81,6 +81,9 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
             "kind_block",
             "name",
             "amount",
+            # Чем заплатили: из ящика или со счёта. Кассовая книга разносит
+            # трату по этому полю — иначе остаток наличных считал бы и переводы.
+            "account",
             "spent_at",
             "note",
             "created_at",
@@ -135,7 +138,7 @@ class CashEntrySerializer(serializers.ModelSerializer):
         fields = [
             "id", "account", "account_display", "kind", "kind_display",
             "article", "article_display", "amount", "happened_on", "note",
-            "receipt", "order_number", "supply", "is_auto",
+            "receipt", "order_number", "supply", "expense", "is_auto",
             "created_by", "created_by_name", "created_at",
             "confirm_negative",
         ]

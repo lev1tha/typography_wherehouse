@@ -32,7 +32,11 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
   const { isAccountant: readOnly } = useAuth();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [form, setForm] = useState({ name: "", amount: "", spent_at: defaultDate(period), note: "" });
+  // «Чем заплатили» нужно кассовой книге: трата уходит в неё расходом, и без
+  // счёта остаток наличных считал бы и переводы тоже.
+  const [form, setForm] = useState({
+    name: "", amount: "", spent_at: defaultDate(period), note: "", account: "CASH",
+  });
   const [editing, setEditing] = useState(null);
 
   // У зарплат в это поле пишется имя сотрудника — мастера и резчики не заводятся
@@ -61,9 +65,10 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
         amount: Number(form.amount),
         spent_at: form.spent_at,
         note: form.note,
+        account: form.account,
       })
       .then(() => {
-        setForm({ name: "", amount: "", spent_at: form.spent_at, note: "" });
+        setForm({ name: "", amount: "", spent_at: form.spent_at, note: "", account: form.account });
         load();
         onChanged?.();
         toast(t("expenses.added"));
@@ -79,6 +84,7 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
         amount: Number(editing.amount),
         spent_at: editing.spent_at,
         note: editing.note || "",
+        account: editing.account,
       })
       .then(() => {
         setEditing(null);
@@ -155,6 +161,16 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
               onKeyDown={(e) => e.key === "Enter" && add()}
             />
           </div>
+          <div className="field" style={{ width: 130 }}>
+            <label>{t("expenses.paidFrom")}</label>
+            <select
+              value={form.account}
+              onChange={(e) => setForm({ ...form, account: e.target.value })}
+            >
+              <option value="CASH">{t("expenses.paidCash")}</option>
+              <option value="BANK">{t("expenses.paidBank")}</option>
+            </select>
+          </div>
           <div className="field" style={{ display: "flex", alignItems: "flex-end" }}>
             <button onClick={add}>{t("common.add")}</button>
           </div>
@@ -202,6 +218,16 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
                       value={editing.amount}
                       onChange={(e) => setEditing({ ...editing, amount: e.target.value })}
                     />
+                  </div>
+                  <div className="field" style={{ width: 130 }}>
+                    <label>{t("expenses.paidFrom")}</label>
+                    <select
+                      value={editing.account || "CASH"}
+                      onChange={(e) => setEditing({ ...editing, account: e.target.value })}
+                    >
+                      <option value="CASH">{t("expenses.paidCash")}</option>
+                      <option value="BANK">{t("expenses.paidBank")}</option>
+                    </select>
                   </div>
                 </div>
                 <div className="field">

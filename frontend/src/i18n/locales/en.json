@@ -85,12 +85,17 @@
     "revenueCash": "Revenue (cash)",
     "revenueOnline": "Revenue (online)",
     "revenueTotal": "Total revenue",
+    "revenueSub": "received {{received}} · owed {{debt}}",
+    "revenueReceived": "Of which received",
     "services": "Services performed",
     "consumed": "Material consumed by services",
     "refunded": "Total refunded",
     "lost": "Written off (damage/shortage)",
+    "lostUnknown": "{{n}} write-offs have no recorded cost",
     "lowStock": "Low-stock materials",
     "revenueSplit": "Revenue: cash / online",
+    "revenueSplitHint": "Shares are based on order value: an order given on credit is counted here in full. How much of it was actually received is shown under each method.",
+    "methodSplit": "received {{received}} · owed {{debt}}",
     "stockByCategory": "Stock value by category",
     "workRevenue": "Revenue: work",
     "profitBeforeExpenses": "Profit before expenses",
@@ -116,13 +121,14 @@
     "materialProfitFormula": "sold {{revenue}} − cost {{cost}}",
     "outOfStockSub": "out of stock: {{n}}",
     "cogsAside": "For reference: cost of goods sold (not in the total)",
-    "clientMaterialsHint": "All orders of the period except cancelled and returned lines — the same basis as “Material sold for”; orders without a client are not listed here.",
+    "clientMaterialsHint": "All orders of the period except cancelled and returned lines — the same basis as “Material sold for”, and the table adds up to it. Orders with no name are gathered in the “No client” row.",
     "assetHint": "At the purchase prices of the lots the material has not left yet.",
     "materialSalesTitle": "What each material brought in",
     "materialSalesHint": "How much money each material brought in over the period. Cutting work on it stands beside as a separate figure: that is machine work, and it is not part of the bar.",
     "materialSalesEmpty": "No material was sold in this period",
     "materialSalesCut": "cutting",
-    "materialSalesNotSold": "not sold in this period: {{n}}"
+    "materialSalesNotSold": "not sold in this period: {{n}}",
+    "noClient": "No client"
   },
   "warehouse": {
     "title": "Warehouse",
@@ -495,7 +501,8 @@
     "engravingNote": "What is engraved (comment)",
     "engravingNotePh": "e.g. logo on a plate, client's acrylic",
     "engravingNeedRate": "Enter the price per sq m — it is not set in the catalogue",
-    "engravingArea": "Engraved area"
+    "engravingArea": "Engraved area",
+    "debtNeedsClient": "A credit order with no client — there will be nobody to collect from. Enter a name and phone."
   },
   "receipts": {
     "title": "Receipts",
@@ -829,8 +836,17 @@
     "stockTitle": "Stock (working capital)",
     "stockHint": "Money invested in material. Not an expense: the material sits on the shelf and reduces profit as it is sold — via “Cost of materials sold”.",
     "stockPurchases": "Material purchased this period",
+    "stockPurchasesAll": "Material purchases, all time",
     "stockValueNow": "Material in stock now",
-    "investmentTileSub": "not part of profit or “Expenses”"
+    "stockLosses": "Written off outside sales (shortage, waste)",
+    "stockReconcile": "Where the warehouse money went",
+    "stockReconcileHint": "All time, not the selected period: stock value is only known as of now. Purchases − sold − written off = what should be on the shelves.",
+    "stockExpected": "Should be on the shelves",
+    "stockGap": "Unexplained",
+    "stockLossesUnknown": "{{n}} write-offs have no recorded cost (before Sep 4) — their money is not in the line above.",
+    "investmentTileSub": "not part of profit or “Expenses”",
+    "debtNoClient": "of which without a client: {{value}}",
+    "stockWithoutLots": "{{value}} of the stock value is stock with no intake behind it: an inventory count created it, and it is valued at the last purchase price."
   },
   "expenses": {
     "amount": "Amount",
@@ -843,7 +859,11 @@
     "subtitle": "Cutter, transport, equipment, workshop upgrades and other variable costs.",
     "category": "Expense type",
     "fromSupply": "delivery",
-    "supplyHint": "edited in Warehouse"
+    "supplyHint": "edited in Warehouse",
+    "paidFrom": "Paid from",
+    "paidCash": "Cash",
+    "paidBank": "Bank",
+    "cashHint": "The expense is written to the cash book against this account."
   },
   "myOrders": {
     "title": "My orders",
@@ -1120,13 +1140,13 @@
     "addIn": "Money in",
     "addOut": "Money out",
     "count": "Count the cash",
-    "hint": "How much money there is right now. Payments, change and refunds are written by the system itself — by hand you enter what it cannot know: cash purchases, salaries, cash collection.",
+    "hint": "How much money there is right now. Payments, change, refunds and expenses from Finance are written by the system — you enter only what it cannot know: cash purchases, collection, deposits.",
     "totalHint": "cash and bank together",
     "turnover": "for the period: +{{in}} · −{{out}}",
     "notePh": "what exactly for",
     "allAccounts": "All accounts",
     "needAmount": "Enter an amount greater than zero",
-    "manualHint": "Order payments, change and refunds need not be entered here — they reach the cash book by themselves.",
+    "manualHint": "Order payments, change, refunds and expenses from Finance do not need to be entered here — they reach the cash book on their own.",
     "countHint": "Count the money and enter the result. The system records the difference as a separate line — like a stock count — so a shortage is not lost.",
     "counted": "Counted",
     "bySystem": "Per system",
@@ -1141,7 +1161,8 @@
     "article_SUPPLY": "Payment to supplier",
     "article_EXPENSE": "Workshop expense",
     "article_SALARY": "Salary",
-    "article_OTHER": "Other"
+    "article_OTHER": "Other",
+    "changeHeld": "including customer change held: {{value}}"
   },
   "period": {
     "title": "Period lock",

@@ -22,6 +22,7 @@ from sales.models import Receipt, TransactionItem
 from services.models import PrintingService
 from warehouse.models import InventoryLog, Material, Roll, Supply, stock_value_total
 
+from . import cash
 from .material_sheet import (
     collect_flows,
     collect_manual,
@@ -214,15 +215,23 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         # Трата задним числом в закрытый месяц изменила бы принятый отчёт.
         ensure_open(serializer.validated_data.get("spent_at"), "Записать трату этой датой")
-        serializer.save(created_by=self.request.user)
+        entry = serializer.save(created_by=self.request.user)
+        # Деньги ушли — касса обязана это увидеть. Раньше не видела ни одной
+        # траты: показывала один приход, и «сколько в ящике» было завышено на
+        # всю аренду с зарплатами (на проде 19.09 — на 86 877 сом).
+        cash.sync_expense(entry, user=self.request.user)
 
     def perform_update(self, serializer):
         ensure_open(serializer.instance.spent_at, "Править трату закрытого периода")
         ensure_open(serializer.validated_data.get("spent_at"), "Перенести трату этой датой")
-        serializer.save()
+        entry = serializer.save()
+        # Правка суммы/даты/счёта двигает и кассовую запись: иначе в книге
+        # осталась бы старая цифра, и остаток разошёлся бы с отчётом.
+        cash.sync_expense(entry, user=self.request.user)
 
     def perform_destroy(self, instance):
         ensure_open(instance.spent_at, "Удалить трату закрытого периода")
+        # Кассовую запись уносит каскад по ссылке `CashEntry.expense`.
         instance.delete()
 
     @action(detail=False, methods=["get"])
@@ -511,13 +520,90 @@ class FinanceReportView(APIView):
         stock_purchases = auto_by_code[ExpenseKind.MATERIAL_PURCHASE] + spent_by_kind.get(
             purchase_kind_id, Decimal("0")
         )
-        # Той же функцией, что «Стоимость склада» в «Обзоре». Своя формула
-        # здесь (все партии + количество × закупочную у штучных) считала
-        # штучные партии дважды: приход партии поднимает и её остаток, и
-        # `quantity` материала. На проде 15.09 — 1 386 543 против 1 180 737.
+        # СПИСАНО МИМО ПРОДАЖИ — недостача по инвентаризации и брак. Это
+        # деньги: на проде 19.09 правки остатка вынесли со склада материала на
+        # 103 424 сома, и не было экрана, где эта сумма хоть раз появлялась.
+        # Заказчик видел только концы: «закупил на 1 678 477, на складе лежит
+        # 1 239 959, продал по себестоимости 309 261» — и 129 257 разницы,
+        # которую объяснить было нечем. Отсюда и «статистика неправильная».
+        #
+        # Себестоимость движения знает журнал (`InventoryLog.cost`): у
+        # площадных — по партиям, у штучных — по закупочной. У записей до
+        # 04.09 (поля тогда не было) её нет, и выдумывать её мы не станем —
+        # такие записи считаем отдельно и показываем как «без себестоимости».
+        def _losses(d1, d2):
+            qs = InventoryLog.objects.filter(
+                type__in=[InventoryLog.Type.ADJUSTMENT, InventoryLog.Type.WRITE_OFF],
+                quantity_changed__lt=0,
+            )
+            if d1:
+                qs = qs.filter(happened_at__date__gte=d1)
+            if d2:
+                qs = qs.filter(happened_at__date__lte=d2)
+            return (
+                qs.filter(cost__isnull=False).aggregate(v=_SUM("cost"))["v"],
+                qs.filter(cost__isnull=True).count(),
+            )
+
+        loss_cost, loss_unknown = _losses(d_from, d_to)
+
+        # СХОДИМОСТЬ СКЛАДА — «куда делись деньги», за всю историю, а не за
+        # период: стоимость склада система считает только «на сейчас» (назад по
+        # журналу остатки сознательно не отматываются), и вычитать из неё закуп
+        # одного месяца значит сравнивать разные даты. За всё время равенство
+        # честное, и им же ловятся будущие расхождения.
+        all_purchases = purchases_from_stock(None, None)
+        all_cogs = (
+            TransactionItem.objects.filter(is_returned=False)
+            .exclude(receipt__status=Receipt.Status.CANCELLED)
+            .aggregate(v=_SUM("cost_total"))["v"]
+        )
+        all_loss, all_loss_unknown = _losses(None, None)
+
+        # ОСТАТОК СВЕРХ ПАРТИЙ — часть стоимости склада, за которой нет
+        # прихода: инвентаризация правит количество, партий не создавая, и
+        # такой «хвост» оценивается последней закупочной ценой (так же его
+        # считает `Material.stock_value`). На проде 19.09 это 3 980 сом:
+        # «диот жёлтый» куплен в количестве 4 штук на 16 сом, а пересчёт
+        # поставил 800 — и склад подорожал на 3 184 из воздуха. Цифра
+        # объясняет часть разрыва, поэтому стоит рядом с ним.
+        stock_without_lots = Decimal("0")
+        for m in Material.objects.filter(quantity__gt=0).prefetch_related("rolls"):
+            in_lots = sum((r.remaining_area for r in m.rolls.all()), Decimal("0"))
+            tail = (m.quantity or Decimal("0")) - in_lots
+            if tail > 0:
+                stock_without_lots += tail * (m.purchase_price or Decimal("0"))
+        # Стоимость склада — той же функцией, что «Стоимость склада» в «Обзоре».
+        # Своя формула здесь (все партии + количество × закупочную у штучных)
+        # считала штучные партии дважды: приход партии поднимает и её остаток,
+        # и `quantity` материала. На проде 15.09 — 1 386 543 против 1 180 737.
+        value_now = stock_value_total().quantize(Decimal("0.01"))
+        expected = all_purchases - all_cogs - all_loss
         stock = {
             "purchases": stock_purchases,
-            "value_now": stock_value_total().quantize(Decimal("0.01")),
+            "value_now": value_now,
+            # Потери периода — справочно, в прибыль не входят (это уже
+            # случилось со складом, а не трата месяца).
+            "losses": loss_cost,
+            "losses_unknown": loss_unknown,
+            "reconcile": {
+                "purchases": all_purchases.quantize(Decimal("0.01")),
+                "cogs": all_cogs,
+                "losses": all_loss,
+                "losses_unknown": all_loss_unknown,
+                "expected": expected.quantize(Decimal("0.01")),
+                "value_now": value_now,
+                # Что не объясняется ни продажей, ни списанием: остаток,
+                # заведённый инвентаризацией без прихода («было на полке до
+                # системы»), приход без цены, старые списания без
+                # себестоимости. Ноль тут — редкость; важно, чтобы цифра
+                # стояла на экране, а не пряталась в разнице двух других.
+                "gap": (expected - value_now).quantize(Decimal("0.01")),
+                # Из чего разрыв складывается чаще всего: остаток, у которого
+                # нет прихода (его завела инвентаризация), — он тянет разрыв в
+                # минус, и старые списания без себестоимости — в плюс.
+                "stock_without_lots": stock_without_lots.quantize(Decimal("0.01")),
+            },
         }
 
         # РАСХОДЫ — только то, что уходит из кассы насовсем: транспорт и свои
@@ -551,11 +637,21 @@ class FinanceReportView(APIView):
         pending = live.filter(payment_status__in=Receipt.OWING_STATUSES)
 
         # Долг клиентов = Σ (сумма − предоплата − возвраты) по открытым чекам.
+        #
+        # Заказы БЕЗ КЛИЕНТА считаем отдельной строкой. Они входят в общий долг
+        # (деньги цеху правда не принесли), но спросить их не с кого: в
+        # карточках клиентов их нет, и сумма долгов по «Клиентам» не сходилась
+        # с этой плиткой — на проде 19.09 это 304 038 против 314 141, и
+        # 10 103 разницы объяснить было нечем. Четыре заказа, оформленные
+        # целиком в долг и без имени.
         client_debt = Decimal("0")
-        for r in pending.only("total_price", "amount_paid", "refunded_amount"):
+        anonymous_debt = Decimal("0")
+        for r in pending.only("total_price", "amount_paid", "refunded_amount", "client_id"):
             owed = r.total_price - r.amount_paid - r.refunded_amount
             if owed > 0:
                 client_debt += owed
+                if not r.client_id:
+                    anonymous_debt += owed
 
         # Резка — по СТАНКАМ: ЧПУ и лазер. Раньше строки были по типу материала
         # (Акрил / Форекс / Оргстекло), но заказчик считает работу цеха станками:
@@ -784,6 +880,10 @@ class FinanceReportView(APIView):
                 # долга и «выручка 300 000» деньгами это разные месяцы.
                 "revenue_paid": revenue_paid,
                 "client_debt": client_debt,
+                # Часть долга, которую не с кого спросить: заказы без клиента.
+                # Она ВНУТРИ `client_debt`, а не рядом — иначе итог долга
+                # пришлось бы складывать глазами.
+                "anonymous_debt": anonymous_debt,
                 # Прибыль = ВАЛОВАЯ ПРИБЫЛЬ − расходы. Цифра та же, что и по
                 # прежней формуле (выручка − расходы с себестоимостью внутри):
                 # алгебраически это одно и то же. Изменилось, из чего она
@@ -989,6 +1089,9 @@ class MaterialReportView(APIView):
         # Сумма резки по материалу: работу «Резка» каждого чека относим к
         # материалу этого же чека (как в разбивке по категориям).
         cut_by_mat = defaultdict(lambda: Decimal("0"))
+        # Резка материала, принесённого клиентом, — своей строкой (см. ниже).
+        own_material_cut = Decimal("0")
+        own_material_orders = set()
         cut_receipts = (
             live.filter(
                 items__type=TransactionItem.Type.SERVICE,
@@ -1019,8 +1122,17 @@ class MaterialReportView(APIView):
                 ),
                 None,
             )
+            # Резка СВОЕГО материала клиента: строки материала в чеке нет, и
+            # отнести работу не к чему. Раньше такая сумма просто выпадала из
+            # таблицы, и столбец «Резка» не сходился с плиткой «Резка, всего» в
+            # отчёте — на проде 19.09 это 83 075 против 84 363. Собираем её в
+            # отдельную строку: работа сделана, деньги получены, и в таблице
+            # заказчика они должны стоять.
             if mat:
                 cut_by_mat[mat.id] += cut_rev
+            else:
+                own_material_cut += cut_rev
+                own_material_orders.add(r.id)
 
         # Продажи материалов: площадь, листы, метры, сумма материала, число
         # заказов. У рулона единица — погонные метры (`metres`), площадь —
@@ -1188,11 +1300,36 @@ class MaterialReportView(APIView):
 
             rows = [r for r in rows if r["id"] not in archived_ids or has_numbers(r)]
 
+        # Резка своего материала клиента — строкой без материала. Ставим её
+        # последней: это работа станка, а не движение склада, и складские
+        # колонки у неё пустые.
+        if own_material_cut:
+            rows.append({
+                "id": None,
+                "name": "Материал клиента",
+                "type": "", "production": "",
+                "orders": len(own_material_orders),
+                "sold_area": Decimal("0"), "sold_sheets": Decimal("0"),
+                "material_revenue": Decimal("0"),
+                "cut_revenue": own_material_cut,
+                "received": Decimal("0"),
+                "stock": Decimal("0"),
+                "unit": "", "counted_in": "",
+                "opening_is_manual": False,
+                "stock_start": Decimal("0"), "stock_end": Decimal("0"),
+                "received_qty": Decimal("0"), "sold_qty": Decimal("0"),
+                "receipts": [],
+            })
+
         # ИТОГО. Заказы не складываем по строкам: один чек может содержать
         # несколько материалов и посчитался бы дважды — берём уникальные чеки.
         all_orders = set()
         for a in agg.values():
             all_orders |= a["orders"]
+        # Чеки с резкой своего материала — тоже заказы периода, и в «ИТОГО
+        # заказов» они входят: строки материала в них нет, поэтому через `agg`
+        # они не пришли бы.
+        all_orders |= own_material_orders
         totals = {
             "orders": len(all_orders),
             "sold_area": sum((r["sold_area"] for r in rows), Decimal("0")),
@@ -1227,8 +1364,9 @@ class CashEntryViewSet(viewsets.ModelViewSet):
     """Кассовая книга: движение денег по кассе и по банку.
 
     Отвечает на вопрос, которого системе не хватало: «сколько сейчас должно быть
-    в ящике». Оплаты, сдачу, возвраты и откаты пишет сама система — руками сюда
-    вносят то, чего она знать не может: закуп за наличные, зарплату, инкассацию.
+    в ящике». Оплаты, сдачу, возвраты, откаты и траты из «Финансов» пишет сама
+    система — руками сюда вносят то, чего она знать не может: закуп за наличные,
+    инкассацию, внесение денег.
 
     Права как у остальных денежных экранов: админ ведёт, бухгалтер смотрит.
     """
@@ -1239,7 +1377,7 @@ class CashEntryViewSet(viewsets.ModelViewSet):
     ordering = ["-happened_on", "-created_at"]
 
     def get_queryset(self):
-        qs = CashEntry.objects.select_related("created_by", "receipt")
+        qs = CashEntry.objects.select_related("created_by", "receipt", "expense__kind")
         d_from = _parse_date(self.request.query_params.get("date_from"))
         d_to = _parse_date(self.request.query_params.get("date_to"))
         if d_from:
@@ -1261,9 +1399,11 @@ class CashEntryViewSet(viewsets.ModelViewSet):
         """Записи системы руками не трогаем: они отражают чеки, и правка здесь
         развела бы кассу с продажами — а объяснить расхождение было бы нечем."""
         if instance.is_auto:
+            where = "трате" if instance.expense_id else "чеку"
+            what = "саму трату" if instance.expense_id else "сам чек или оплату"
             return Response(
-                {"detail": "Эту запись создала система по чеку — править её нельзя. "
-                           "Нужно изменить сам чек или оплату."},
+                {"detail": f"Эту запись создала система по {where} — править её нельзя. "
+                           f"Нужно изменить {what}."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return None
@@ -1313,11 +1453,20 @@ class CashEntryViewSet(viewsets.ModelViewSet):
                 "income": side(value, CashEntry.Kind.IN),
                 "outcome": side(value, CashEntry.Kind.OUT),
             })
+        # СДАЧА КЛИЕНТОВ, которую ещё не вернули (`Receipt.change_due`). Это
+        # чужие деньги: они лежат в кассе, но выручкой не стали и уйдут либо на
+        # руки, либо в зачёт следующего заказа. Без этой строки касса спорила с
+        # финотчётом: на проде 19.09 в книге 245 453, а «получено по заказам»
+        # 245 396 — ровно на 57 сом сдачи по чеку №21, которую не выдали.
+        change_held = Receipt.objects.exclude(
+            status=Receipt.Status.CANCELLED
+        ).aggregate(v=_SUM("change_due"))["v"]
         return Response({
             "accounts": accounts,
             "total": CashEntry.balance(upto=d_to),
             "income": side(None, CashEntry.Kind.IN),
             "outcome": side(None, CashEntry.Kind.OUT),
+            "change_held": change_held,
         })
 
     @action(detail=False, methods=["post"])

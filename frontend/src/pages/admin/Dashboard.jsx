@@ -80,6 +80,17 @@ function Donut({ segments }) {
   );
 }
 
+// Границы текущего месяца в формате поля <input type="date">. Местные, а не
+// UTC: toISOString() в Бишкеке уводит первое число на предыдущий месяц.
+function monthBounds() {
+  const now = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  const last = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const ym = `${now.getFullYear()}-${p(now.getMonth() + 1)}`;
+  return [`${ym}-01`, `${ym}-${p(last)}`];
+}
+const [monthStart, monthEnd] = monthBounds();
+
 export default function Dashboard() {
   const { t } = useTranslation();
   const [data, setData] = useState(null);
@@ -92,8 +103,13 @@ export default function Dashboard() {
   const [clientBuys, setClientBuys] = useState([]);
   const [fin, setFin] = useState(null);
   const [error, setError] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  // Период по умолчанию — ТЕКУЩИЙ МЕСЯЦ, как в «Финансах». Раньше «Обзор»
+  // открывался за всё время, и два экрана с одинаковыми плитками отвечали на
+  // разные вопросы: пока данных был один месяц, это совпадало, а с первым же
+  // новым месяцем «Выручка» на них разошлась бы, и цифры снова выглядели бы
+  // неправильными. Кнопка рядом возвращает весь период одним нажатием.
+  const [from, setFrom] = useState(monthStart);
+  const [to, setTo] = useState(monthEnd);
   // Номер последнего запроса периода — им отсекаем ответы, которые опоздали.
   const requestSeq = useRef(0);
 
@@ -205,6 +221,8 @@ export default function Dashboard() {
     push("", "");
     methods.forEach((m) => push(m.label, Math.round(Number(rev[m.key]))));
     push(t("dashboard.revenueTotal"), Math.round(revTotal));
+    push(t("dashboard.revenueReceived"), Math.round(Number(rev.received?.total || 0)));
+    push(t("finance.clientDebt"), Math.round(Number(rev.debt?.total || 0)));
     if (data.breakdown) {
       push(t("dashboard.workRevenue"), Math.round(Number(data.breakdown.work_revenue)));
       push(t("dashboard.materialRevenue"), Math.round(Number(data.breakdown.material_revenue)));
@@ -255,18 +273,47 @@ export default function Dashboard() {
           <label>{t("dashboard.to")}</label>
           <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
         </div>
-        {(from || to) && (
-          <button className="ghost" onClick={() => { setFrom(""); setTo(""); }}>{t("common.reset")}</button>
-        )}
+        <button
+          className="ghost"
+          onClick={() => {
+            const whole = !from && !to;
+            setFrom(whole ? monthStart : "");
+            setTo(whole ? monthEnd : "");
+          }}
+        >
+          {from || to ? t("finance.allTime") : t("finance.thisMonth")}
+        </button>
         <div style={{ flex: 1 }} />
         <button className="secondary" onClick={downloadCsv}>{t("finance.downloadCsv")}</button>
       </div>
 
       <div className="stat-grid" style={{ marginTop: 12 }}>
         <Stat label={t("dashboard.asset")} value={som(data.unrealised_asset)} />
-        <Stat label={t("dashboard.revenueTotal")} value={som(revTotal)} />
+        {/* Выручка — стоимость ЗАКАЗОВ периода, а не деньги в ящике: заказ в
+            долг входит в неё целиком. Без подписи «получено / долг» плитку
+            читают как кассу и не сходятся с ней вчетверо. */}
+        <Stat
+          label={t("dashboard.revenueTotal")}
+          value={som(revTotal)}
+          sub={t("dashboard.revenueSub", {
+            received: som(rev.received?.total || 0),
+            debt: som(rev.debt?.total || 0),
+          })}
+        />
         <Stat label={t("dashboard.services")} value={data.services_performed} />
         <Stat label={t("dashboard.refunded")} value={som(data.refunds.total_refunded)} />
+        {/* Списано мимо продажи: недостача по инвентаризации и брак. Деньги, а
+            не количество, — складывать штуки с квадратными метрами нельзя. */}
+        <Stat
+          label={t("dashboard.lost")}
+          value={som(data.refunds.material_lost_cost)}
+          color={Number(data.refunds.material_lost_cost) > 0 ? "danger" : undefined}
+          sub={
+            Number(data.refunds.material_lost_unknown || 0) > 0
+              ? t("dashboard.lostUnknown", { n: data.refunds.material_lost_unknown })
+              : undefined
+          }
+        />
         {/* Как в каталоге: красное — остаток есть, но упал до порога; ноль —
             отдельной строкой, спокойно (свежий каталог весь на нуле). */}
         <Stat
@@ -344,6 +391,11 @@ export default function Dashboard() {
               label={t("finance.clientDebt")}
               value={som(fin.client_debt)}
               color={Number(fin.client_debt) > 0 ? "danger" : undefined}
+              sub={
+                Number(fin.anonymous_debt || 0) > 0
+                  ? t("finance.debtNoClient", { value: som(fin.anonymous_debt) })
+                  : undefined
+              }
             />
             <Stat label={t("finance.expenses")} value={som(fin.total_expenses)} />
             <Stat
@@ -397,15 +449,41 @@ export default function Dashboard() {
         {/* Revenue split donut (by payment method) */}
         <div className="card">
           <h3>{t("dashboard.revenueSplit")}</h3>
+          {/* Способ оплаты стоит в ЗАКАЗЕ, поэтому доли считаются по заказам, а
+              не по деньгам: неоплаченный наличный заказ сидит в «Наличных»
+              целиком. Что из него реально получено — строкой ниже. */}
+          <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>
+            {t("dashboard.revenueSplitHint")}
+          </p>
           {revTotal > 0 ? (
             <div className="donut-wrap">
               <Donut segments={methods.map((m) => ({ value: Number(rev[m.key]), color: m.color }))} />
               <div className="legend">
                 {methods.map((m) => (
-                  <div className="lg" key={m.key}>
-                    <span className="dot" style={{ background: m.color }} />
-                    {m.label}: <strong>{som(rev[m.key])}</strong>
-                    <span className="muted">({Math.round((Number(rev[m.key]) / revTotal) * 100)}%)</span>
+                  // Строка легенды в две строки: сумма заказов сверху, деньги
+                  // под ней. `.lg` — флекс-ряд, поэтому вторую строку кладём в
+                  // свою колонку, иначе она встаёт сбоку и ломает диаграмму.
+                  <div className="lg" key={m.key} style={{ alignItems: "flex-start" }}>
+                    <span className="dot" style={{ background: m.color, marginTop: 4 }} />
+                    <div>
+                      <div>
+                        {m.label}: <strong>{som(rev[m.key])}</strong>{" "}
+                        <span className="muted">
+                          ({Math.round((Number(rev[m.key]) / revTotal) * 100)}%)
+                        </span>
+                      </div>
+                      {/* Долг показываем только там, где он есть: строка «долг
+                          0» у перевода — шум, из-за которого не видно строки,
+                          где долг настоящий. */}
+                      {Number(rev.debt?.[m.key] || 0) > 0 ? (
+                        <div className="muted" style={{ fontSize: 12 }}>
+                          {t("dashboard.methodSplit", {
+                            received: som(rev.received?.[m.key] || 0),
+                            debt: som(rev.debt[m.key]),
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -562,9 +640,13 @@ export default function Dashboard() {
             </thead>
             <tbody>
               {clientBuys.map((r) => (
-                <tr key={r.client_id}>
-                  <td><strong>{r.client_name}</strong></td>
-                  <td className="muted">{r.phone}</td>
+                // Строка без `client_id` — общая по заказам «с улицы»: она
+                // держит сумму таблицы равной плитке «Продали материала на».
+                <tr key={r.client_id ?? "no-client"}>
+                  <td>
+                    <strong>{r.client_id ? r.client_name : t("dashboard.noClient")}</strong>
+                  </td>
+                  <td className="muted">{r.phone || "—"}</td>
                   <td>{som(r.material_spend)}</td>
                   <td>{Number(r.material_qty)}</td>
                   <td>{r.orders}</td>

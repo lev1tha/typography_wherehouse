@@ -250,3 +250,66 @@ class CashBookTests(APITestCase):
             amount_paid=Decimal("18"),
         )
         self.assertEqual(CashEntry.balance(CASH), Decimal("18"))
+
+
+class ChangeHeldTests(APITestCase):
+    """Сдача, которую ещё не вернули, лежит в кассе, но выручкой не стала.
+
+    Проверка прод-данных 19.09.2026: в кассовой книге 245 453, а «получено по
+    заказам» в отчёте — 245 396. Разница в 57 сом оказалась переплатой по чеку
+    №21, которую не выдали на руки. Деньги в ящике настоящие, просто чужие, —
+    и об этом должна быть строка, а не догадка.
+    """
+
+    BALANCE = "/api/finance/cash/balance/"
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="ch_admin", password="x", role=User.Role.ADMIN
+        )
+        self.client.force_authenticate(self.admin)
+        self.customer = Client.objects.create(full_name="Клиент", phone="+996700000888")
+        self.material = Material.objects.create(
+            name="Крепёж", unit=Material.Unit.PIECE,
+            quantity=Decimal("500"), price_per_unit=Decimal("18"),
+            purchase_price=Decimal("10"),
+        )
+
+    def _sale(self, paid):
+        return sale_service.create_sale(
+            client=self.customer, cashier=self.admin,
+            payment_method=Receipt.PaymentMethod.CASH,
+            items_data=[{
+                "type": "MATERIAL", "material": self.material,
+                "quantity": Decimal("2"), "mode": "SQM",
+            }],
+            amount_paid=Decimal(paid),
+        )
+
+    def _balance(self):
+        r = self.client.get(self.BALANCE)
+        self.assertEqual(r.status_code, 200, r.data)
+        return r.data
+
+    def test_unreturned_change_is_named(self):
+        self._sale("100")                       # заказ на 36, принесли 100
+        data = self._balance()
+        self.assertEqual(Decimal(str(data["total"])), Decimal("100"))
+        self.assertEqual(Decimal(str(data["change_held"])), Decimal("64"))
+
+    def test_cash_equals_revenue_received_plus_change(self):
+        """Касса объясняется до сома: выручка на руках + чужая сдача."""
+        self._sale("100")
+        data = self._balance()
+        report = self.client.get("/api/finance/report/").data
+        self.assertEqual(
+            Decimal(str(data["total"])),
+            Decimal(str(report["revenue_paid"])) + Decimal(str(data["change_held"])),
+        )
+
+    def test_giving_the_change_back_clears_the_line(self):
+        receipt = self._sale("100")
+        sale_service.give_change(receipt, user=self.admin)
+        data = self._balance()
+        self.assertEqual(Decimal(str(data["change_held"])), Decimal("0"))
+        self.assertEqual(Decimal(str(data["total"])), Decimal("36"))

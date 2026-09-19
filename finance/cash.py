@@ -26,8 +26,8 @@ def account_for(payment_method) -> str:
 
 
 def record(kind, amount, article, *, account=None, payment_method=None,
-           happened_on=None, receipt=None, supply=None, note="", user=None,
-           is_auto=True):
+           happened_on=None, receipt=None, supply=None, expense=None, note="",
+           user=None, is_auto=True):
     """Записать движение. Ноль и минус игнорируем — это не операция."""
     from .models import CashEntry
 
@@ -42,6 +42,7 @@ def record(kind, amount, article, *, account=None, payment_method=None,
         **({"happened_on": happened_on} if happened_on else {}),
         receipt=receipt,
         supply=supply,
+        expense=expense,
         note=note,
         created_by=user,
         is_auto=is_auto,
@@ -109,4 +110,37 @@ def payment_reverted(receipt, amount, *, user=None):
         payment_method=receipt.payment_method,
         receipt=receipt, user=user,
         note=f"Откат оплаты по заказу №{receipt.order_number}" if receipt.order_number else "",
+    )
+
+
+def sync_expense(entry, *, user=None):
+    """Привести кассовую запись траты в соответствие с самой тратой.
+
+    Одна функция на создание и на правку: трату правят чаще, чем заводят
+    (сумму уточнили, дату сдвинули, счёт перепутали), и две почти одинаковые
+    ветки разошлись бы на первой же доработке. Запись у траты всегда одна —
+    старые убираем, новую пишем.
+
+    «Долг материала» в кассу не идёт: эта запись означает «материал взяли,
+    деньги ещё не отдали», и расхода по ней не было. Остальные виды — реальные
+    деньги, ушедшие из ящика или со счёта, включая вложения: станок за 300 000
+    прибыль не уменьшает, но из кассы уходит.
+    """
+    from .models import CashEntry, ExpenseKind
+
+    entry.cash_entries.all().delete()
+    if entry.kind.code == ExpenseKind.MATERIAL_DEBT:
+        return None
+    article = (
+        CashEntry.Article.SALARY
+        if entry.kind.code == ExpenseKind.SALARY
+        else CashEntry.Article.EXPENSE
+    )
+    return money_out(
+        entry.amount, article,
+        account=entry.account,
+        happened_on=entry.spent_at,
+        note=f"{entry.kind.name}: {entry.name}".strip(": ") or entry.kind.name,
+        user=user or entry.created_by,
+        expense=entry,
     )
