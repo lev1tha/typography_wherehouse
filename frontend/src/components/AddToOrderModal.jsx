@@ -31,6 +31,10 @@ const EMPTY_CFG = {
   // потом не узнать.
   ownMaterial: false,
   note: "",
+  // Отходы: мерка строки. Отходы бывают от любого товара — лист меряют
+  // квадратами, рулон метрами, штучное штуками.
+  wasteMode: "SQM",
+  wasteAmount: "",
 };
 
 /** Configure and append one item (дозаказ) to an existing receipt. */
@@ -85,6 +89,19 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
   // Гравировка — площадь × цена за кв.м, материала в строке нет; цену за кв.м
   // здесь вписывает и складовщик (решение владельца: у крупных заказов своя).
   const isEngraving = svc?.kind === "ENGRAVING";
+  // Отходы: мерка и цена — свои у каждой строки, склада строка не касается.
+  const isWaste = !!svc?.uses_free_measure;
+  const wasteMode = cfg.wasteMode;
+  const wasteAmount = isWaste
+    ? wasteMode === "SQM"
+      ? (Number(cfg.width) && Number(cfg.length) ? areaOf(cfg.width, cfg.length) || 0 : Number(cfg.wasteAmount) || 0)
+      : Number(cfg.wasteAmount) || 0
+    : 0;
+  const wasteCatalogue = !isWaste
+    ? 0
+    : Number(wasteMode === "METER" ? svc.rate_per_pm : wasteMode === "PIECE" ? svc.rate_per_piece : svc.rate_flat) || 0;
+  const wasteRate = cfg.cutRate === "" ? wasteCatalogue : Number(cfg.cutRate) || 0;
+  const wasteUnit = wasteMode === "METER" ? t("unit.METER") : wasteMode === "PIECE" ? t("unit.PIECE") : t("unit.SQM");
   // Материал клиента: одна строка работы, со склада ничего не уходит, цену
   // резки называют на месте — каталожной у чужого листа нет.
   const ownCut = !!(svc && usesRunM && cfg.ownMaterial);
@@ -118,6 +135,8 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
     else if (matMode === "PIECE") preview = ceilSom(matPieceUnit * matQty);
     else if (matMode === "SQM") preview = ceilSom(matAreaPrice * matArea);
     else preview = ceilSom(Number(sel.obj.price_per_unit) * matQty);
+  } else if (isWaste) {
+    preview = ceilSom(wasteAmount * wasteRate);
   } else if (ownCut) {
     // Материал клиента: только работа.
     preview = ceilSom(runM * rate);
@@ -141,6 +160,17 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
       if (matMode === "PIECE") return { ...it, quantity: matQty, mode: "PIECE" };
       if (matMode === "SQM") return { ...it, quantity: matArea, mode: "SQM" };
       return { ...it, quantity: matQty };
+    }
+    if (isWaste) {
+      // Мерка — ЯВНО: сервер её не угадывает. Цена тоже всегда своя: на
+      // отходы каталожная — лишь подсказка.
+      return {
+        type: "SERVICE", service: svc.id, mode: wasteMode,
+        ...(wasteMode === "SQM" && Number(cfg.width) && Number(cfg.length)
+          ? { width: Number(cfg.width), length: Number(cfg.length) }
+          : { quantity: wasteAmount }),
+        cut_rate: wasteRate, note: cfg.note.trim(),
+      };
     }
     if (ownCut) {
       // Цену шлём всегда: она видна и правится в окне у всех, каталожной нет.
@@ -182,6 +212,8 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
           : matMode === "SQM"
           ? matArea > 0
           : matQty > 0)
+      : isWaste
+      ? wasteAmount > 0 && wasteRate > 0
       : ownCut
       ? runM > 0 && rate > 0
       : isEngraving
@@ -246,6 +278,67 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
             ))}
           </div>
         </div>
+      )}
+
+      {isWaste && (
+        <>
+          <p className="muted" style={{ fontSize: 12, margin: "0 0 10px" }}>{t("checkout.wasteHint")}</p>
+          <div className="field">
+            <label>{t("checkout.wasteMeasure")}</label>
+            <div className="tabs" style={{ marginTop: 0 }}>
+              {["SQM", "METER", "PIECE"].map((m) => (
+                <button
+                  key={m}
+                  className={wasteMode === m ? "active" : ""}
+                  // Цену стираем вместе с меркой: «300 за квадрат» и «300 за
+                  // штуку» — разные деньги, и оставить число значило бы
+                  // посчитать дозаказ по чужому прайсу.
+                  onClick={() => setCfg({ ...cfg, wasteMode: m, cutRate: "", width: "", length: "", wasteAmount: "" })}
+                >
+                  {t(`checkout.wasteMeasure${m}`)}
+                </button>
+              ))}
+            </div>
+          </div>
+          {wasteMode === "SQM" ? (
+            <>
+              <div className="row">
+                <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value, wasteAmount: "" })} /></div>
+                <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value, wasteAmount: "" })} /></div>
+              </div>
+              <div className="field">
+                <label>{t("checkout.wasteAreaDirect")}</label>
+                <input type="number" step="any" value={cfg.wasteAmount} onChange={(e) => setCfg({ ...cfg, wasteAmount: e.target.value, width: "", length: "" })} />
+              </div>
+            </>
+          ) : (
+            <div className="field">
+              <label>{wasteMode === "METER" ? t("checkout.wasteMetres") : t("checkout.wastePieces")} *</label>
+              <input type="number" step="any" value={cfg.wasteAmount} onChange={(e) => setCfg({ ...cfg, wasteAmount: e.target.value })} />
+            </div>
+          )}
+          <div className="field">
+            <label>{t("checkout.wasteRate", { unit: wasteUnit })} *</label>
+            <input
+              type="number"
+              step="any"
+              value={cfg.cutRate}
+              onChange={(e) => setCfg({ ...cfg, cutRate: e.target.value })}
+              placeholder={String(wasteCatalogue)}
+            />
+            {!(wasteRate > 0) && (
+              <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.wasteNeedRate")}</p>
+            )}
+          </div>
+          <div className="field">
+            <label>{t("checkout.wasteNote")}</label>
+            <input
+              value={cfg.note}
+              onChange={(e) => setCfg({ ...cfg, note: e.target.value })}
+              placeholder={t("checkout.wasteNotePh")}
+            />
+          </div>
+        </>
       )}
 
       {usesArea && (
@@ -442,7 +535,7 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
         </>
       )}
 
-      {sel && !usesArea && !matRoll && !matSheet && (
+      {sel && !usesArea && !isWaste && !matRoll && !matSheet && (
         <div className="field">
           <label>{sel.type === "service" && svc.uses_pieces ? t("receipts.letters") : t("common.quantity")}</label>
           <input type="number" value={cfg.qty} onChange={(e) => setCfg({ ...cfg, qty: e.target.value })} />

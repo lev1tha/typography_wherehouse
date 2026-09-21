@@ -263,7 +263,11 @@
     "created": "Service created",
     "noServices": "No services yet. Add CNC and laser cutting — without a service there is nothing to cut with at the till.",
     "engravingRate": "Engraving price, som/sq m",
-    "engravingRateHint": "Base price per sq m. At the till it can be changed for a specific order — by admin and storekeeper alike."
+    "engravingRateHint": "Base price per sq m. At the till it can be changed for a specific order — by admin and storekeeper alike.",
+    "wasteRateSqm": "Waste, som/sq.m",
+    "wasteRatePm": "Waste, som/running m",
+    "wasteRatePiece": "Waste, som/piece",
+    "wasteRateHint": "Base waste price, one per measure. At the till it can be changed for the individual sale — by the admin and the storekeeper alike."
   },
   "serviceKind": {
     "CUTTING": "Cutting",
@@ -271,7 +275,8 @@
     "INSTALL_INTERIOR": "Interior install",
     "INSTALLATION": "Installation",
     "OTHER": "Other",
-    "ENGRAVING": "Engraving"
+    "ENGRAVING": "Engraving",
+    "WASTE": "Waste"
   },
   "applies": {
     "ALL": "Always",
@@ -502,7 +507,21 @@
     "engravingNotePh": "e.g. logo on a plate, client's acrylic",
     "engravingNeedRate": "Enter the price per sq m — it is not set in the catalogue",
     "engravingArea": "Engraved area",
-    "debtNeedsClient": "A credit order with no client — there will be nobody to collect from. Enter a name and phone."
+    "debtNeedsClient": "A credit order with no client — there will be nobody to collect from. Enter a name and phone.",
+    "wastePriceTile": "measure & price in the dialog",
+    "wasteHint": "Selling offcuts and rejects. Nothing leaves stock: this waste was already written off — as a reject at intake or as an offcut when cutting.",
+    "wasteMeasure": "Measured in",
+    "wasteMeasureSQM": "Square metres",
+    "wasteMeasureMETER": "Running metres",
+    "wasteMeasurePIECE": "Pieces",
+    "wasteAreaDirect": "Or the area directly, sq.m",
+    "wasteMetres": "How many metres",
+    "wastePieces": "How many pieces",
+    "wasteRate": "Waste price, som/{{unit}}",
+    "wasteNeedRate": "Enter a price — waste is always negotiated",
+    "wasteNote": "What the waste is (note)",
+    "wasteNotePh": "e.g. acrylic 3 mm offcuts, vinyl remnant",
+    "wasteAmount": "Waste"
   },
   "receipts": {
     "title": "Receipts",

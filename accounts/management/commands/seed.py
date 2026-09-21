@@ -139,6 +139,12 @@ class Command(BaseCommand):
             kind=PrintingService.Kind.ENGRAVING,
             defaults={"name": "Гравировка", "rate_flat": Decimal("0")},
         )
+        # Отходы — мерку (кв.м / пог.м / шт) и цену называют в кассе: отходы
+        # бывают от любого товара, и цена на них всегда договорная.
+        PrintingService.objects.get_or_create(
+            kind=PrintingService.Kind.WASTE,
+            defaults={"name": "Отходы", "rate_flat": Decimal("0")},
+        )
 
         # Установка (наружная/внутренняя) убрана из системы по решению заказчика.
         # Существующие услуги установки деактивируем, чтобы они пропали из кассы,

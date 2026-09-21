@@ -17,6 +17,14 @@ function rateFields(service, t) {
   if (service.uses_running_meter) return [["rate_per_pm", t("pricing.ratePerPm")]];
   // Гравировка — цена за кв.м. Это базовая цена: в кассе её меняют по заказу.
   if (service.kind === "ENGRAVING") return [["rate_flat", t("pricing.engravingRate")]];
+  // Отходы — по цене на КАЖДУЮ мерку: отходы листа меряют квадратами, рулона —
+  // метрами, штучного — штуками, и прайс на них разный.
+  if (service.uses_free_measure)
+    return [
+      ["rate_flat", t("pricing.wasteRateSqm")],
+      ["rate_per_pm", t("pricing.wasteRatePm")],
+      ["rate_per_piece", t("pricing.wasteRatePiece")],
+    ];
   if (service.uses_area) return [["rate_flat", t("pricing.masterWork")]];
   if (service.uses_pieces) return [["rate_per_piece", t("pricing.ratePerPiece")]];
   return [["base_price", t("pricing.basePrice")]];
@@ -75,7 +83,7 @@ function ServiceCard({ service, materials, onSaved }) {
               value={form[key]}
               onChange={(e) => setForm({ ...form, [key]: e.target.value })}
             />
-            {key === "rate_per_pm" && (
+            {key === "rate_per_pm" && service.uses_running_meter && (
               <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("pricing.ratePerPmHint")}</p>
             )}
             {service.kind === "ENGRAVING" && (
@@ -84,6 +92,11 @@ function ServiceCard({ service, materials, onSaved }) {
           </div>
         ))}
       </div>
+      {/* Подсказка про отходы — одна на карточку: полей у них три, и под
+          каждым она повторялась бы трижды. */}
+      {service.uses_free_measure && (
+        <p className="muted" style={{ fontSize: 12, marginTop: -4 }}>{t("pricing.wasteRateHint")}</p>
+      )}
       <div className="field">
         <label>{t("pricing.recipes")}</label>
         {service.recipes?.length ? (

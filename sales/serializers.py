@@ -10,6 +10,9 @@ from services.models import PrintingService
 from warehouse.models import Material, Roll
 
 from .models import Receipt, TransactionItem
+# Площадь считаем ТОЙ ЖЕ функцией, что и сборщик строки: иначе «0.01 × 0.01»
+# прошло бы проверку и легло в чек нулём после округления до трёх знаков.
+from .sale_service import _area
 
 
 def _qr_data_uri(text: str) -> str:
@@ -100,6 +103,10 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             if obj.material_id and obj.material.is_roll_material:
                 return "SQM"
             return obj.material.unit if obj.material_id else "PIECE"
+        # ОТХОДЫ: мерку выбрали при продаже и запомнили в `sale_mode` — у одной
+        # услуги законно соседствуют квадраты листа, метры рулона и штуки.
+        if obj.service_id and obj.service.uses_free_measure:
+            return obj.sale_mode or TransactionItem.SaleMode.SQM
         if obj.service_id and obj.service.uses_running_meter:
             return "METER"
         # Площадные услуги без реза (гравировка, внутренний монтаж) —
@@ -119,6 +126,11 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             return obj.material.get_unit_display() if obj.material_id else "шт"
         # Работа резки считается погонными метрами, остальные услуги — штуками
         # (буквы наружной установки) или разом за заказ.
+        if obj.service_id and obj.service.uses_free_measure:
+            return {
+                TransactionItem.SaleMode.METER: "пог.м",
+                TransactionItem.SaleMode.PIECE: "шт",
+            }.get(obj.sale_mode, "кв.м")
         if obj.service_id and obj.service.uses_running_meter:
             return "пог.м"
         if obj.service_id and obj.service.uses_area:
@@ -277,6 +289,25 @@ class SaleItemInputSerializer(serializers.Serializer):
                     f"«{service.name}»: материал клиента — не выбирайте материал со "
                     f"склада, иначе он спишется. Уберите одно из двух."
                 )
+        # ОТХОДЫ: мерка — ЯВНАЯ, материала со склада нет.
+        #
+        # Отход уже списан там, где его признали браком или где он остался
+        # обрезком от резки; выбранный здесь материал списался бы ВТОРОЙ раз и
+        # увёл остаток в минус. Мерку не угадываем по цифрам: 2 у отходов
+        # рулона — это метры, у отходов листа — квадраты, и молчаливая подмена
+        # посчитала бы заказ не по тому прайсу.
+        if attrs["type"] == TransactionItem.Type.SERVICE and service is not None and service.uses_free_measure:
+            if material is not None:
+                raise serializers.ValidationError(
+                    f"«{service.name}»: материал со склада не выбирают — отход "
+                    f"уже списан, второй раз он уйдёт в минус."
+                )
+            if not mode:
+                raise serializers.ValidationError(
+                    f"«{service.name}»: укажите мерку — площадь (SQM), длина "
+                    f"(METER) или штуки (PIECE)."
+                )
+
         # Способ продажи материала по площади (лист / кв.м / рулон) — ЯВНЫЙ.
         # Раньше отсутствующий `mode` молча становился «кв.м», и дозаказ «1 лист»
         # уходил в чек как 1 кв.м по цене за квадрат (1 250 вместо 3 700, со
@@ -303,7 +334,7 @@ class SaleItemInputSerializer(serializers.Serializer):
                     f"«{material.name}» метрами не продаётся — укажите лист (PIECE) "
                     f"или площадь (SQM)."
                 )
-        elif mode == TransactionItem.SaleMode.METER:
+        elif attrs["type"] == TransactionItem.Type.MATERIAL and mode == TransactionItem.SaleMode.METER:
             raise serializers.ValidationError(
                 f"«{material.name}» метрами не продаётся."
             )
@@ -387,6 +418,33 @@ class SaleItemInputSerializer(serializers.Serializer):
                     raise serializers.ValidationError(
                         f"«{material.name}»: в каталоге не задана {what} — задайте "
                         f"её в карточке материала (или админ укажет цену вручную)."
+                    )
+        elif service is not None and service.uses_free_measure:
+            # ОТХОДЫ. Мерка уже проверена выше; здесь — количество и цена.
+            # Площадь можно прислать готовой (`quantity`) или размерами:
+            # обрезок мерят рулеткой, и «0.8 × 1.2» удобнее, чем 0.96.
+            if mode == TransactionItem.SaleMode.SQM and attrs.get("width") and attrs.get("length"):
+                qty = _area(attrs["width"], attrs["length"])
+            if qty <= 0:
+                what = {
+                    TransactionItem.SaleMode.METER: "длину в пог.м",
+                    TransactionItem.SaleMode.PIECE: "количество штук",
+                }.get(mode, "размеры (ширина × длина) или площадь")
+                raise serializers.ValidationError(
+                    f"«{service.name}»: укажите {what} — иначе строка уйдёт в чек нулём."
+                )
+            # Цена: вписанная в кассе или каталожная ДЛЯ ЭТОЙ мерки. Пустая
+            # каталожная — не скидка, а незаполненный справочник: молчаливый
+            # ноль здесь отдал бы отход даром.
+            if attrs.get("cut_rate") is None:
+                price, what = {
+                    TransactionItem.SaleMode.METER: (service.rate_per_pm, "цена за пог.м"),
+                    TransactionItem.SaleMode.PIECE: (service.rate_per_piece, "цена за штуку"),
+                }.get(mode, (service.rate_flat, "цена за кв.м"))
+                if not price or price <= 0:
+                    raise serializers.ValidationError(
+                        f"«{service.name}»: не задана {what} — впишите цену в окне "
+                        f"или задайте её в «Ценах и услугах»."
                     )
         elif service is not None and service.uses_area:
             # Гравировка и прочие площадные услуги без реза считаются ОТ

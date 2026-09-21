@@ -177,11 +177,21 @@ def service_item_area(item: TransactionItem) -> Decimal:
     У резки `quantity` — ДЛИНА РЕЗА в погонных метрах, а площадь куска лежит в
     `width × length` (у реза целого листа размеров нет — площадь 0). У прочих
     площадных услуг (внутренний монтаж) количество и есть площадь.
+
+    У ОТХОДОВ мерка своя в каждой строке: квадраты — это площадь, а метры и
+    штуки площадью не являются вовсе. Считать их квадратами значило бы списать
+    расходник техкарты по чужой мерке.
     """
     if item.service_id and item.service.uses_running_meter:
         if item.width and item.length:
             return _area(item.width, item.length)
         return Decimal("0")
+    if item.service_id and item.service.uses_free_measure:
+        if item.sale_mode != TransactionItem.SaleMode.SQM:
+            return Decimal("0")
+        if item.width and item.length:
+            return _area(item.width, item.length)
+        return item.quantity
     return item.quantity
 
 
@@ -329,6 +339,8 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
     - SERVICE / INTERIOR install: area × rate_flat (no separate material line).
     - SERVICE / EXTERIOR install: per piece (rate_per_piece × count).
     - SERVICE / FIXED (installation, other): base_price × count.
+    - SERVICE / WASTE (отходы): мерка из `mode` — кв.м, пог.м или штуки;
+      склада не касается, материала отдельной строкой нет.
     """
     def _override(key):
         v = entry.get(key)
@@ -401,6 +413,35 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         )]
 
     service = entry["service"]
+
+    # ОТХОДЫ: мерку выбрали в кассе и прислали в `mode` — одна услуга продаёт
+    # и квадраты листа, и метры рулона, и штуки. Мерку запоминаем на строке
+    # (`sale_mode`), иначе в чеке «Отходы × 2» не отличить 2 кв.м от 2 метров.
+    # Материала у строки нет: отход уже списан браком или обрезком резки,
+    # второе списание увело бы остаток в минус. Цена — вписанная при продаже
+    # (её называет и складовщик), иначе каталожная ДЛЯ ЭТОЙ мерки.
+    if service.uses_free_measure:
+        mode = entry.get("mode") or TransactionItem.SaleMode.SQM
+        width = entry.get("width")
+        length = entry.get("length")
+        if mode == TransactionItem.SaleMode.SQM and width and length:
+            qty = _area(width, length)
+        else:
+            qty = _qty(entry.get("quantity") or 0)
+        catalogue = {
+            TransactionItem.SaleMode.METER: service.rate_per_pm,
+            TransactionItem.SaleMode.PIECE: service.rate_per_piece,
+        }.get(mode, service.rate_flat)
+        return [TransactionItem.objects.create(
+            receipt=receipt, type=item_type, service=service,
+            quantity=qty, price_per_item=_priced("cut_rate", catalogue),
+            sale_mode=mode,
+            # Размеры — только у площадной мерки: у метров и штук их нет, и
+            # чужие цифры в этих колонках врали бы о том, что мерили.
+            width=Decimal(str(width)) if mode == TransactionItem.SaleMode.SQM and width else None,
+            length=Decimal(str(length)) if mode == TransactionItem.SaleMode.SQM and length else None,
+            note=(entry.get("note") or "")[:255],
+        )]
 
     # Area-priced services: cutting and interior install. Work is computed
     # automatically from the cut area (width × length); no manual entry.

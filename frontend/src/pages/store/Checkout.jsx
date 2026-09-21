@@ -61,6 +61,8 @@ function lineTotal(line) {
   if (line.kind === "cut-own") return ceilSom(Number(line.rate) * Number(line.runM || 0));
   // Гравировка: площадь × цена за кв.м, материала в строке нет.
   if (line.kind === "engraving") return ceilSom(Number(line.rate) * Number(line.area || 0));
+  // Отходы: цена × количество В ВЫБРАННОЙ МЕРКЕ (кв.м, пог.м или штуки).
+  if (line.kind === "waste") return ceilSom(Number(line.rate) * Number(line.amount || 0));
   return ceilSom(unitPrice(line) * lineQty(line));
 }
 
@@ -144,6 +146,19 @@ function cartFromReceipt(items, materials, services, t) {
           width: Number(it.width) || 0, length: Number(it.length) || 0, area: qty,
           rate: priceOrLast(s.rate_flat, it), note: it.note || "",
           ownMaterial: !!it.own_material, qty: 1,
+        });
+        return;
+      }
+      // Отходы: мерку берём с прошлой строки (`sale_mode`) — «Отходы × 2»
+      // без неё не отличить: 2 кв.м обрезка листа или 2 метра рулона.
+      if (s.kind === "WASTE") {
+        const mode = it.sale_mode || "SQM";
+        const catalogue =
+          mode === "METER" ? s.rate_per_pm : mode === "PIECE" ? s.rate_per_piece : s.rate_flat;
+        lines.push({
+          key: `W${s.id}-${i}`, kind: "waste", serviceId: s.id, name: s.name,
+          mode, width: Number(it.width) || 0, length: Number(it.length) || 0,
+          amount: qty, rate: priceOrLast(catalogue, it), note: it.note || "", qty: 1,
         });
         return;
       }
@@ -416,11 +431,14 @@ export default function Checkout() {
       uses_area: s.uses_area,
       uses_material: s.uses_material,
       uses_pieces: s.uses_pieces,
+      // Отходы: мерку выбирают в окне, поэтому ставок у плитки три.
+      uses_free_measure: s.uses_free_measure,
       id: s.id,
       name: s.name,
       category: t(`serviceKind.${s.kind}`),
       base_price: Number(s.base_price),
       rate_flat: Number(s.rate_flat),
+      rate_per_pm: Number(s.rate_per_pm),
       rate_per_piece: Number(s.rate_per_piece),
     }));
     const mat = materials.map((m) => ({
@@ -545,6 +563,17 @@ export default function Checkout() {
         cutServiceId: cuttingService?.id ?? "",
         cutRate: Number(cuttingService?.rate_per_pm) > 0 ? String(cuttingService.rate_per_pm) : "",
         running_meters: "", note: "",
+      });
+      return;
+    }
+    // Отходы: сначала мерка (кв.м / пог.м / шт), потом количество и цена.
+    // Мерка обязательна, потому что отходы бывают от любого товара: от листа
+    // их меряют квадратами, от рулона — метрами, от штучного — штуками.
+    if (p.kind === "service" && p.uses_free_measure) {
+      setCut({
+        service: p, waste: true, mode: "SQM",
+        width: "", length: "", amount: "",
+        rate: p.rate_flat > 0 ? String(p.rate_flat) : "", note: "",
       });
       return;
     }
@@ -681,6 +710,21 @@ export default function Checkout() {
         key: `CO${svc.id}-${prev.length}`, kind: "cut-own",
         serviceId: svc.id, name: svc.name || "Резка", machine: svc.machine_display || "",
         rate, runM, note: (cut.note || "").trim(), qty: 1,
+      }]);
+      setCut(null);
+      return;
+    }
+    // --- Отходы: цена × количество в выбранной мерке ---
+    if (cut.waste) {
+      const amount = wasteAmount;
+      const rate = Number(cut.rate) || 0;
+      if (!(amount > 0) || !(rate > 0)) return;
+      setCart((prev) => [...prev, {
+        key: `W${cut.service.id}-${prev.length}`, kind: "waste",
+        serviceId: cut.service.id, name: cut.service.name, mode: cut.mode,
+        width: cut.mode === "SQM" ? Number(cut.width) || 0 : 0,
+        length: cut.mode === "SQM" ? Number(cut.length) || 0 : 0,
+        amount, rate, note: (cut.note || "").trim(), qty: 1,
       }]);
       setCut(null);
       return;
@@ -922,6 +966,17 @@ export default function Checkout() {
           type: "SERVICE", service: l.serviceId, own_material: true,
           running_meters: l.runM, cut_rate: l.rate, note: l.note || "",
         };
+      if (l.kind === "waste")
+        // Отходы: мерка — ЯВНО (сервер её не угадывает), цена — всегда своя.
+        // Площадь шлём размерами, если их называли: так она сойдётся с тем,
+        // что мерили рулеткой.
+        return {
+          type: "SERVICE", service: l.serviceId, mode: l.mode,
+          ...(l.mode === "SQM" && l.width && l.length
+            ? { width: l.width, length: l.length }
+            : { quantity: l.amount }),
+          cut_rate: l.rate, note: l.note || "",
+        };
       if (l.kind === "engraving")
         // Гравировка: цена за кв.м — та, что стояла в окне (правится всеми).
         return {
@@ -982,6 +1037,27 @@ export default function Checkout() {
   const ownCutRunM = cut?.ownCut ? Number(cut.running_meters) || 0 : 0;
   const ownCutRate = cut?.ownCut ? Number(cut.cutRate) || 0 : 0;
   const engRate = cut?.engraving ? Number(cut.rate) || 0 : 0;
+  // Отходы: количество в выбранной мерке. У квадратов его можно ввести
+  // размерами (обрезок мерят рулеткой) или готовой площадью — не всякий
+  // обрезок прямоугольный.
+  const wasteRate = cut?.waste ? Number(cut.rate) || 0 : 0;
+  const wasteAmount = !cut?.waste
+    ? 0
+    : cut.mode === "SQM"
+    ? (Number(cut.width) && Number(cut.length) ? areaOf(cut.width, cut.length) : Number(cut.amount) || 0)
+    : Number(cut.amount) || 0;
+  // Единица подписи — та же, что уйдёт в чек.
+  const wasteUnit = !cut?.waste
+    ? ""
+    : cut.mode === "METER" ? t("unit.METER") : cut.mode === "PIECE" ? t("unit.PIECE") : t("unit.SQM");
+  // Каталожная цена для мерки: подставляется при переключении. Своя у каждой,
+  // потому что «300 за квадрат» и «300 за штуку» — разные деньги.
+  const wasteCatalogue = (mode) => {
+    const svc = cut?.service;
+    if (!svc) return "";
+    const v = mode === "METER" ? svc.rate_per_pm : mode === "PIECE" ? svc.rate_per_piece : svc.rate_flat;
+    return Number(v) > 0 ? String(v) : "";
+  };
   // Рулон продаётся ДЛИНОЙ, и решает это справочник, а не мастер: ширина у
   // рулона постоянная (её режут поперёк целиком), выбирать её нечего. Поэтому
   // для такого материала показываем ОДНО поле — длину, а ширину пишем надписью.
@@ -1204,6 +1280,10 @@ export default function Checkout() {
                     ) : (
                       `${ceilSom(p.price)} сом`
                     )
+                  ) : p.uses_free_measure ? (
+                    // Мерку и цену называют в окне: у отходов их три, и какая
+                    // нужна — решают по товару, от которого отход остался.
+                    <span className="muted" style={{ fontSize: 12 }}>{t("checkout.wastePriceTile")}</span>
                   ) : p.uses_area ? (
                     `${ceilSom(p.rate_flat)} ${t("checkout.perPieceShort", { unit: t("unit.SQM") })}`
                   ) : p.uses_pieces ? (
@@ -1257,6 +1337,16 @@ export default function Checkout() {
                         <span className="badge warn" style={{ marginLeft: 6 }}>{t("checkout.runMetersMissingLine")}</span>
                       )}
                     </div>
+                  ) : l.kind === "waste" ? (
+                    <div className="cl-sub">
+                      {l.mode === "SQM" && l.width && l.length ? `${l.width}×${l.length} = ` : ""}
+                      {trimQty(l.amount)} {l.mode === "METER" ? t("unit.METER") : l.mode === "PIECE" ? t("unit.PIECE") : t("unit.SQM")}
+                      {" · "}{l.rate}{" "}
+                      {t("checkout.perPieceShort", {
+                        unit: l.mode === "METER" ? t("unit.METER") : l.mode === "PIECE" ? t("unit.PIECE") : t("unit.SQM"),
+                      })}
+                      {l.note ? ` · ${l.note}` : ""}
+                    </div>
                   ) : l.kind === "engraving" ? (
                     <div className="cl-sub">
                       {l.width}×{l.length} = {l.area} {t("unit.SQM")} · {l.rate}{" "}
@@ -1283,7 +1373,7 @@ export default function Checkout() {
                     <div className="cl-sub">{unitPrice(l)} сом / ед.</div>
                   )}
                 </div>
-                {!["cutting", "material-area", "material-metre", "cut-work", "cut-own", "engraving"].includes(l.kind) && (
+                {!["cutting", "material-area", "material-metre", "cut-work", "cut-own", "engraving", "waste"].includes(l.kind) && (
                   <div className="stepper">
                     <button onClick={() => changeQty(l.key, -1)}>−</button>
                     {/* Поле, а не подпись: одну-две штуки удобнее доклацать
@@ -1605,6 +1695,9 @@ export default function Checkout() {
                   // Материал клиента: нужны длина реза, цена и станок.
                   cut.ownCut
                     ? !(ownCutRunM > 0) || !(ownCutRate > 0) || !svcById(cut.cutServiceId)
+                    // Отходы: количество в выбранной мерке и цена.
+                    : cut.waste
+                    ? !(wasteAmount > 0) || !(wasteRate > 0)
                     // Гравировка: площадь и цена за кв.м.
                     : cut.engraving
                     ? !cutArea || !(engRate > 0)
@@ -1734,8 +1827,9 @@ export default function Checkout() {
           )}
 
           {/* Interior-install service: material picker. У гравировки материала
-              в строке нет — она считается от площади рисунка. */}
-          {cut.service && !cut.engraving && (
+              в строке нет — она считается от площади рисунка; у отходов его
+              нет тем более: отход уже списан, второй раз он уйдёт в минус. */}
+          {cut.service && !cut.engraving && !cut.waste && (
             <div className="field">
               <label>{t("checkout.cutMaterial")}</label>
               <select
@@ -1829,6 +1923,103 @@ export default function Checkout() {
                   <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
                     <strong>{t("common.total")}</strong>
                     <strong style={{ fontSize: 18 }}>{ceilSom(ownCutRate * ownCutRunM)} сом</strong>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : cut.waste ? (
+            <>
+              <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>{t("checkout.wasteHint")}</p>
+              {/* Мерка — первым делом: от неё зависят и поля, и цена. */}
+              <div className="field">
+                <label>{t("checkout.wasteMeasure")}</label>
+                <div className="tabs" style={{ marginTop: 0 }}>
+                  {["SQM", "METER", "PIECE"].map((m) => (
+                    <button
+                      key={m}
+                      className={cut.mode === m ? "active" : ""}
+                      onClick={() =>
+                        setCut({
+                          ...cut, mode: m,
+                          // Цена ВСЕГДА пересобирается по каталогу мерки:
+                          // «300 за квадрат» и «300 за штуку» — разные деньги,
+                          // и оставить прежнее число значило бы посчитать
+                          // заказ по чужому прайсу.
+                          rate: wasteCatalogue(m),
+                          width: "", length: "", amount: "",
+                        })
+                      }
+                    >
+                      {t(`checkout.wasteMeasure${m}`)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {cut.mode === "SQM" ? (
+                <>
+                  <div className="row">
+                    <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cut.width} onChange={(e) => setCut({ ...cut, width: e.target.value, amount: "" })} autoFocus /></div>
+                    <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cut.length} onChange={(e) => setCut({ ...cut, length: e.target.value, amount: "" })} /></div>
+                  </div>
+                  <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("checkout.sizeHint")}</p>
+                  {/* Обрезок бывает и непрямоугольный — тогда площадь считают
+                      сами и вписывают сюда, не выдумывая «ширину × длину». */}
+                  <div className="field">
+                    <label>{t("checkout.wasteAreaDirect")}</label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={cut.amount ?? ""}
+                      onChange={(e) => setCut({ ...cut, amount: e.target.value, width: "", length: "" })}
+                    />
+                  </div>
+                </>
+              ) : (
+                <div className="field">
+                  <label>{cut.mode === "METER" ? t("checkout.wasteMetres") : t("checkout.wastePieces")} *</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={cut.amount ?? ""}
+                    onChange={(e) => setCut({ ...cut, amount: e.target.value })}
+                    autoFocus
+                  />
+                </div>
+              )}
+              {/* Цена на отходы всегда договорная — её вписывает и складовщик. */}
+              <div className="field">
+                <label>{t("checkout.wasteRate", { unit: wasteUnit })} *</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={cut.rate ?? ""}
+                  onChange={(e) => setCut({ ...cut, rate: e.target.value })}
+                />
+                {!(wasteRate > 0) && (
+                  <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.wasteNeedRate")}</p>
+                )}
+              </div>
+              <div className="field">
+                <label>{t("checkout.wasteNote")}</label>
+                <input
+                  value={cut.note ?? ""}
+                  onChange={(e) => setCut({ ...cut, note: e.target.value })}
+                  placeholder={t("checkout.wasteNotePh")}
+                />
+              </div>
+              {wasteAmount > 0 && wasteRate > 0 && (
+                <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
+                  <div className="crow">
+                    <span className="k">{t("checkout.wasteAmount")}</span>
+                    <strong>{trimQty(wasteAmount)} {wasteUnit}</strong>
+                  </div>
+                  <div className="crow">
+                    <span className="k">{t("checkout.wasteRate", { unit: wasteUnit })}</span>
+                    <span>{wasteRate} × {trimQty(wasteAmount)} = {ceilSom(wasteRate * wasteAmount)}</span>
+                  </div>
+                  <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
+                    <strong>{t("common.total")}</strong>
+                    <strong style={{ fontSize: 18 }}>{ceilSom(wasteRate * wasteAmount)} сом</strong>
                   </div>
                 </div>
               )}

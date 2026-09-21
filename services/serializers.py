@@ -25,6 +25,8 @@ class PrintingServiceSerializer(serializers.ModelSerializer):
     uses_material = serializers.BooleanField(read_only=True)
     uses_running_meter = serializers.BooleanField(read_only=True)
     uses_pieces = serializers.BooleanField(read_only=True)
+    # Отходы: мерку строки (кв.м / пог.м / шт) выбирают в кассе.
+    uses_free_measure = serializers.BooleanField(read_only=True)
 
     machine_display = serializers.CharField(source="get_machine_display", read_only=True)
 
@@ -44,6 +46,7 @@ class PrintingServiceSerializer(serializers.ModelSerializer):
             "uses_material",
             "uses_running_meter",
             "uses_pieces",
+            "uses_free_measure",
             "is_active",
             "recipes",
             "created_at",

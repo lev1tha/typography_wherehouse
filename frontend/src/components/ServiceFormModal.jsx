@@ -6,16 +6,26 @@ import { apiError } from "../api/errors.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 
-// Какое поле ставки заводится у каждого вида — зеркало серверных `uses_*`
+// Какие поля ставки заводятся у каждого вида — зеркало серверных `uses_*`
 // (services/models.py). У готовой услуги поля берутся из ответа сервера, а
 // здесь услуги ещё нет, и вид выбирают прямо в форме.
+//
+// Список, а не одно поле: у отходов мерок три (квадраты, метры, штуки), и
+// цена на каждую своя.
 export const KIND_RATE = {
-  CUTTING: ["rate_per_pm", "pricing.ratePerPm"],
+  CUTTING: [["rate_per_pm", "pricing.ratePerPm"]],
   // Гравировка — цена за кв.м гравируемой площади; в кассе её правят по заказу.
-  ENGRAVING: ["rate_flat", "pricing.engravingRate"],
-  INSTALL_INTERIOR: ["rate_flat", "pricing.masterWork"],
-  INSTALL_EXTERIOR: ["rate_per_piece", "pricing.ratePerPiece"],
-  OTHER: ["base_price", "pricing.basePrice"],
+  ENGRAVING: [["rate_flat", "pricing.engravingRate"]],
+  // Отходы — продажа обрезков и брака: мерку и цену называют в кассе, а здесь
+  // задаётся базовый прайс по каждой мерке.
+  WASTE: [
+    ["rate_flat", "pricing.wasteRateSqm"],
+    ["rate_per_pm", "pricing.wasteRatePm"],
+    ["rate_per_piece", "pricing.wasteRatePiece"],
+  ],
+  INSTALL_INTERIOR: [["rate_flat", "pricing.masterWork"]],
+  INSTALL_EXTERIOR: [["rate_per_piece", "pricing.ratePerPiece"]],
+  OTHER: [["base_price", "pricing.basePrice"]],
 };
 
 // «Установка (фикс)» — legacy-вид, новые такие не заводят: для установки есть
@@ -29,10 +39,12 @@ const MACHINES = ["CNC", "LASER"];
 export default function ServiceFormModal({ onClose, onSaved }) {
   const { t } = useTranslation();
   const { toast } = useUI();
-  const [form, setForm] = useState({ name: "", kind: "CUTTING", machine: "CNC", rate: "" });
+  // Ставки держим по ИМЕНИ ПОЛЯ: у отходов их три, и общий `rate` свалил бы
+  // цену за квадрат и цену за штуку в одно число.
+  const [form, setForm] = useState({ name: "", kind: "CUTTING", machine: "CNC", rates: {} });
   const [busy, setBusy] = useState(false);
 
-  const [rateField, rateLabel] = KIND_RATE[form.kind];
+  const rateFields = KIND_RATE[form.kind];
   const isCutting = form.kind === "CUTTING";
 
   async function save() {
@@ -46,7 +58,9 @@ export default function ServiceFormModal({ onClose, onSaved }) {
         name: form.name.trim(),
         kind: form.kind,
         machine: isCutting ? form.machine : "",
-        [rateField]: form.rate === "" ? 0 : form.rate,
+        ...Object.fromEntries(
+          rateFields.map(([key]) => [key, form.rates[key] === undefined || form.rates[key] === "" ? 0 : form.rates[key]])
+        ),
       });
       toast(t("pricing.created"));
       onSaved?.();
@@ -81,7 +95,7 @@ export default function ServiceFormModal({ onClose, onSaved }) {
 
       <div className="field">
         <label>{t("pricing.serviceKindLabel")}</label>
-        <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+        <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value, rates: {} })}>
           {KINDS.map((k) => (
             <option key={k} value={k}>{t(`serviceKind.${k}`)}</option>
           ))}
@@ -100,21 +114,26 @@ export default function ServiceFormModal({ onClose, onSaved }) {
         </div>
       )}
 
-      <div className="field">
-        <label>{t(rateLabel)}</label>
-        <input
-          type="number"
-          value={form.rate}
-          onChange={(e) => setForm({ ...form, rate: e.target.value })}
-          placeholder="0"
-        />
-        {isCutting && (
-          <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("pricing.ratePerPmHint")}</p>
-        )}
-        {form.kind === "ENGRAVING" && (
-          <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("pricing.engravingRateHint")}</p>
-        )}
-      </div>
+      {rateFields.map(([key, label]) => (
+        <div className="field" key={key}>
+          <label>{t(label)}</label>
+          <input
+            type="number"
+            value={form.rates[key] ?? ""}
+            onChange={(e) => setForm({ ...form, rates: { ...form.rates, [key]: e.target.value } })}
+            placeholder="0"
+          />
+          {isCutting && (
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("pricing.ratePerPmHint")}</p>
+          )}
+          {form.kind === "ENGRAVING" && (
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("pricing.engravingRateHint")}</p>
+          )}
+        </div>
+      ))}
+      {form.kind === "WASTE" && (
+        <p className="muted" style={{ fontSize: 12, margin: "-8px 0 0" }}>{t("pricing.wasteRateHint")}</p>
+      )}
     </Modal>
   );
 }
