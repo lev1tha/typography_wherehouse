@@ -398,7 +398,7 @@ class Material(models.Model):
         return self.name
 
 
-def stock_value_total() -> Decimal:
+def stock_value_total(upto=None) -> Decimal:
     """Стоимость всего склада — сумма `Material.stock_value`.
 
     Одна функция на «Обзор» и «Финансы»: две формулы одной цифры уже
@@ -407,11 +407,60 @@ def stock_value_total() -> Decimal:
     Скрытый материал с остатком СЮДА ВХОДИТ — он физически на полке (решение
     18.08, см. `audit/views.py`). Отбор по `quantity > 0` это и даёт: пустой
     материал, скрытый или нет, стоит ноль и так.
+
+    ``upto`` — день, НА КОНЕЦ которого считаем. Без него — «сейчас».
+
+    Зачем отматывать назад. Отчёт за месяц показывал СЕГОДНЯШНИЙ склад, какой
+    бы месяц ни выбрали: открываешь август, где ни одной продажи и ни одного
+    прихода, — выручка 0, закуп 0, а склад 1 184 614. Цифра из другого времени
+    стояла среди месячных и читалась как месячная.
+
+    Как считаем. Остаток на дату — это СУММА ДВИЖЕНИЙ ЖУРНАЛА по этот день
+    включительно, а не сегодняшний остаток минус движения после. Разница видна
+    там, где остаток журналом не объясняется: на проде такой хвост 0.084 кв.м,
+    и при счёте «назад от сегодня» он протягивался в любой прошлый месяц —
+    август показывал 48 сомов вместо нуля. Журнал же начинается 1 сентября, и
+    до него склада не было вовсе.
+
+    Оцениваем по партиям, пришедшим не позже этой даты, и с самых СВЕЖИХ:
+    старые уходят первыми (FIFO), значит на полке остаются последние.
+
+    Это РЕКОНСТРУКЦИЯ, а не снимок: система не хранит, сколько оставалось в
+    каждой партии на каждый день. Порядок списания мог быть не строго FIFO
+    (инвентаризация и отход умеют брать конкретную партию), поэтому цифра
+    прошлого месяца — близкая, но не до копейки. «Сейчас» считается точно, по
+    остаткам самих партий.
     """
-    return sum(
-        (m.stock_value for m in Material.objects.filter(quantity__gt=0).prefetch_related("rolls")),
-        Decimal("0"),
-    )
+    if upto is None or upto >= timezone.localdate():
+        return sum(
+            (m.stock_value for m in Material.objects.filter(quantity__gt=0).prefetch_related("rolls")),
+            Decimal("0"),
+        )
+
+    moved = {
+        row["material"]: row["v"] or Decimal("0")
+        for row in InventoryLog.objects.filter(happened_at__date__lte=upto)
+        .values("material")
+        .annotate(v=models.Sum("quantity_changed"))
+    }
+    total = Decimal("0")
+    for material in Material.objects.prefetch_related("rolls"):
+        left = moved.get(material.id, Decimal("0"))
+        if left <= 0:
+            continue
+        lots = [
+            roll for roll in material.rolls.all()
+            if timezone.localtime(roll.received_at).date() <= upto
+        ]
+        for roll in sorted(lots, key=lambda r: r.received_at, reverse=True):
+            if left <= 0:
+                break
+            take = min(roll.initial_area, left)
+            total += take * roll.cost_per_sqm
+            left -= take
+        # Остаток сверх партий — по последней закупочной, как и «сейчас».
+        total += left * (material.purchase_price or Decimal("0"))
+    return total.quantize(Decimal("0.01"))
 
 
 class MaterialMonthOpening(models.Model):

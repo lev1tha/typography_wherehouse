@@ -14,6 +14,9 @@ import Icon from "../../components/Icon.jsx";
 import MonthPicker from "../../components/MonthPicker.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
+// «2026-08-31» → «31.08.2026»: в подписи плитки дата должна читаться так же,
+// как её пишет заказчик.
+const ru = (iso) => (iso ? iso.split("-").reverse().join(".") : "");
 const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
 // Дробные величины (кв.м, пог.м) — по языку интерфейса: в английской версии
 // «1,11 sq.m» с русской запятой читается как «сто одиннадцать».
@@ -415,7 +418,13 @@ export default function Finance() {
           <Stat
             label={t("finance.stockTitle")}
             value={som(report.stock.value_now)}
-            sub={`${t("finance.stockPurchases")}: ${som(report.stock.purchases)}`}
+            // Склад считается НА КОНЕЦ выбранного месяца. Когда месяц уже
+            // прошёл, дату пишем прямо в подписи: иначе цифра трёхнедельной
+            // давности читается как сегодняшняя.
+            sub={
+              (report.stock.as_of ? `${t("finance.stockAsOf", { date: ru(report.stock.as_of) })} · ` : "") +
+              `${t("finance.stockPurchases")}: ${som(report.stock.purchases)}`
+            }
           />
         )}
         {/* Инвестиции наверху показываем, только когда они есть: плитка с
@@ -476,7 +485,11 @@ export default function Finance() {
             <span>{som(report.stock.purchases)}</span>
           </div>
           <div className="crow">
-            <span className="k">{t("finance.stockValueNow")}</span>
+            <span className="k">
+              {report.stock.as_of
+                ? t("finance.stockValueOn", { date: ru(report.stock.as_of) })
+                : t("finance.stockValueNow")}
+            </span>
             <span>{som(report.stock.value_now)}</span>
           </div>
           {/* Списанное мимо продажи — недостача и брак. Это деньги, которые

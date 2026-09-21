@@ -195,6 +195,10 @@ export default function Dashboard() {
   if (!data) return <p className="muted">{t("common.loading")}</p>;
 
   const som = (v) => `${Math.round(Number(v) || 0).toLocaleString("ru-RU")} сом`;
+  // Дата, на которую посчитан склад: она же стоит в поле «По», если этот день
+  // уже прошёл. Пусто — склад сегодняшний.
+  const stockAsOf =
+    to && to < new Date().toLocaleDateString("sv-SE") ? to.split("-").reverse().join(".") : "";
   const rev = data.revenue;
   const revTotal = Number(rev.total);
   const maxCat = Math.max(1, ...byCategory.map((x) => x.value));
@@ -288,7 +292,14 @@ export default function Dashboard() {
       </div>
 
       <div className="stat-grid" style={{ marginTop: 12 }}>
-        <Stat label={t("dashboard.asset")} value={som(data.unrealised_asset)} />
+        {/* Склад — на конец выбранного периода. Раньше плитка держала
+            сегодняшнюю цифру в любом месяце, и в августе, где ни одной
+            продажи, стояло больше миллиона. */}
+        <Stat
+          label={t("dashboard.asset")}
+          value={som(data.unrealised_asset)}
+          sub={stockAsOf ? t("finance.stockAsOf", { date: stockAsOf }) : undefined}
+        />
         {/* Выручка — стоимость ЗАКАЗОВ периода, а не деньги в ящике: заказ в
             долг входит в неё целиком. Без подписи «получено / долг» плитку
             читают как кассу и не сходятся с ней вчетверо. */}

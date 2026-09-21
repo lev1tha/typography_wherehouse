@@ -870,7 +870,9 @@
     "stockLossesUnknown": "{{n}} write-offs have no recorded cost (before Sep 4) — their money is not in the line above.",
     "investmentTileSub": "not part of profit or “Expenses”",
     "debtNoClient": "of which without a client: {{value}}",
-    "stockWithoutLots": "{{value}} of the stock value is stock with no intake behind it: an inventory count created it, and it is valued at the last purchase price."
+    "stockWithoutLots": "{{value}} of the stock value is stock with no intake behind it: an inventory count created it, and it is valued at the last purchase price.",
+    "stockAsOf": "as of {{date}}",
+    "stockValueOn": "Material in stock as of {{date}}"
   },
   "expenses": {
     "amount": "Amount",

@@ -1,4 +1,5 @@
 from collections import defaultdict
+from datetime import date
 from decimal import Decimal
 
 from django.db.models import DecimalField, F, Sum
@@ -13,6 +14,16 @@ from warehouse.models import InventoryLog, Material, stock_value_total
 
 from .models import AuditLog
 from .serializers import AuditLogSerializer
+
+
+def _parse_day(value):
+    """«2026-08-31» → date. Мусор и пустота — как будто периода нет."""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 _ZERO = Coalesce(Sum("total_price"), Decimal("0"), output_field=DecimalField())
 _REFUNDED = Coalesce(Sum("refunded_amount"), Decimal("0"), output_field=DecimalField())
@@ -85,7 +96,12 @@ class DashboardView(APIView):
         #  · `live_materials` — чем цех торгует. Скрытого тут нет: докупать то,
         #    что убрали из каталога, не нужно.
         live_materials = Material.objects.filter(is_archived=False)
-        stock_value = stock_value_total()
+        # Склад — НА КОНЕЦ ВЫБРАННОГО ПЕРИОДА, а не «всегда сегодняшний».
+        # Плитка стояла среди месячных и показывала сегодняшнюю цифру в любом
+        # месяце: в августе, где не было ни одной продажи, она держала
+        # 1 184 614. Список «на исходе» ниже остаётся «на сейчас» — это про
+        # «что докупить», и вчерашний дефицит там не нужен.
+        stock_value = stock_value_total(_parse_day(date_to))
 
         # Выручка по способам оплаты (нал / MBank / DemirBank / онлайн) — за
         # вычетом возвращённых строк, как «Выручка» в Финансах: до этого Обзор
