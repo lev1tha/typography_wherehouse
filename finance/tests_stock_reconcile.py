@@ -55,6 +55,8 @@ class StockReconcileTests(APITestCase):
         stock = self._stock()
         self.assertEqual(Decimal(str(stock["losses"])), Decimal("200.00"))
         rec = stock["reconcile"]
+        # Периода не задали — цепочка за всю историю, и начинается с нуля.
+        self.assertEqual(Decimal(str(rec["opening"])), Decimal("0.00"))
         self.assertEqual(Decimal(str(rec["purchases"])), Decimal("2000.00"))
         self.assertEqual(Decimal(str(rec["cogs"])), Decimal("400.00"))
         self.assertEqual(Decimal(str(rec["losses"])), Decimal("200.00"))
@@ -100,12 +102,17 @@ class StockReconcileTests(APITestCase):
         self.assertEqual(Decimal(str(rec["stock_without_lots"])), Decimal("0.00"))
         self.assertEqual(Decimal(str(rec["gap"])), Decimal("0.00"))
 
-    def test_reconcile_ignores_the_period_filter(self):
-        """Стоимость склада система знает только «на сейчас» — сравниваем за всё
-        время, иначе строки были бы про разные даты."""
+    def test_reconcile_follows_the_period(self):
+        """Цепочка идёт по выбранному периоду: в месяце без движений всё нули.
+
+        Раньше блок считался за всю историю, потому что остаток система знала
+        только «на сейчас». Из-за этого в пустом месяце строки стояли с
+        суммами за год, а рядом плитки показывали нули.
+        """
         stock = self.client.get(
             self.REPORT, {"date_from": "2020-01-01", "date_to": "2020-01-31"}
         ).data["stock"]
+        rec = stock["reconcile"]
         self.assertEqual(Decimal(str(stock["purchases"])), Decimal("0"))
-        self.assertEqual(Decimal(str(stock["reconcile"]["purchases"])), Decimal("2000.00"))
-        self.assertEqual(Decimal(str(stock["reconcile"]["gap"])), Decimal("0.00"))
+        for key in ("opening", "purchases", "cogs", "losses", "expected", "value_now", "gap"):
+            self.assertEqual(Decimal(str(rec[key])), Decimal("0"), key)

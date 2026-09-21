@@ -480,42 +480,20 @@ export default function Finance() {
         <div className="card" style={{ marginTop: 16 }}>
           <h3>{t("finance.stockTitle")}</h3>
           <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.stockHint")}</p>
-          <div className="crow">
-            <span className="k">{t("finance.stockPurchases")}</span>
-            <span>{som(report.stock.purchases)}</span>
-          </div>
-          <div className="crow">
-            <span className="k">
-              {report.stock.as_of
-                ? t("finance.stockValueOn", { date: ru(report.stock.as_of) })
-                : t("finance.stockValueNow")}
-            </span>
-            <span>{som(report.stock.value_now)}</span>
-          </div>
-          {/* Списанное мимо продажи — недостача и брак. Это деньги, которые
-              ушли со склада, не став ни выручкой, ни себестоимостью: без этой
-              строки закуп и остаток не сходились, и разницу нечем было
-              объяснить. */}
-          {Number(report.stock.losses || 0) > 0 && (
-            <div className="crow">
-              <span className="k">{t("finance.stockLosses")}</span>
-              <span style={{ color: "var(--danger)" }}>− {som(report.stock.losses)}</span>
-            </div>
-          )}
           {report.stock.reconcile && (
             <>
-              <div style={{ borderTop: "1px solid var(--hairline)", marginTop: 10, paddingTop: 8 }}>
-                <strong>{t("finance.stockReconcile")}</strong>
-                <p className="muted" style={{ fontSize: 13, marginTop: 2 }}>
-                  {t("finance.stockReconcileHint")}
-                </p>
-              </div>
-              {/* Строки блока — за ВСЮ историю, поэтому и подпись другая:
-                  «за период» рядом с цифрой за всё время читается как ошибка
-                  ровно в том месте, где заказчик ищет объяснение. */}
+              {/* ЦЕПОЧКА, а не набор цифр: было → пришло → продали → списали →
+                  лежит. Плитка называется «оборот», а показывает остаток, и
+                  заказчик ждал в ней «начало + приходы» (1 544 280), не находя
+                  вычета проданного. Теперь вычет стоит строкой, и остаток
+                  выводится на глазах. */}
               <div className="crow">
-                <span className="k">{t("finance.stockPurchasesAll")}</span>
-                <span>{som(report.stock.reconcile.purchases)}</span>
+                <span className="k">{t("finance.stockOpening")}</span>
+                <span>{som(report.stock.reconcile.opening)}</span>
+              </div>
+              <div className="crow">
+                <span className="k">{t("finance.stockPurchases")}</span>
+                <span>+ {som(report.stock.reconcile.purchases)}</span>
               </div>
               <div className="crow">
                 <span className="k">{t("finance.cogs")}</span>
@@ -530,8 +508,12 @@ export default function Finance() {
                 <span>{som(report.stock.reconcile.expected)}</span>
               </div>
               <div className="crow">
-                <span className="k">{t("finance.stockValueNow")}</span>
-                <span>{som(report.stock.reconcile.value_now)}</span>
+                <span className="k">
+                  {report.stock.as_of
+                    ? t("finance.stockValueOn", { date: ru(report.stock.as_of) })
+                    : t("finance.stockValueNow")}
+                </span>
+                <strong>{som(report.stock.reconcile.value_now)}</strong>
               </div>
               {/* Необъяснённый остаток. Прятать его в разнице двух строк — это
                   и есть «статистика неправильная»: цифра должна стоять на

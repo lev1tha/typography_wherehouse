@@ -1,7 +1,7 @@
 import calendar
 import secrets
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -547,18 +547,26 @@ class FinanceReportView(APIView):
 
         loss_cost, loss_unknown = _losses(d_from, d_to)
 
-        # СХОДИМОСТЬ СКЛАДА — «куда делись деньги», за всю историю, а не за
-        # период: стоимость склада система считает только «на сейчас» (назад по
-        # журналу остатки сознательно не отматываются), и вычитать из неё закуп
-        # одного месяца значит сравнивать разные даты. За всё время равенство
-        # честное, и им же ловятся будущие расхождения.
-        all_purchases = purchases_from_stock(None, None)
-        all_cogs = (
-            TransactionItem.objects.filter(is_returned=False)
-            .exclude(receipt__status=Receipt.Status.CANCELLED)
-            .aggregate(v=_SUM("cost_total"))["v"]
+        # СХОДИМОСТЬ СКЛАДА — «куда делись деньги» ЗА ВЫБРАННЫЙ ПЕРИОД:
+        #
+        #   было на начало + закуп − себестоимость проданного − списано
+        #     = должно лежать на конец
+        #
+        # Раньше блок считался за всю историю, потому что остаток система знала
+        # только «на сейчас». Теперь знает на любой день, и цепочка идёт по
+        # тому же периоду, что и все остальные плитки. Без неё «Склад (оборот)»
+        # показывал остаток, а читался как оборот: заказчик ждал 1 544 280
+        # (начало плюс приходы) и не находил в нём вычета проданного.
+        #
+        # «Весь период» даёт ту же картину за всю историю — выбор месяца её
+        # только сужает.
+        opening = (
+            stock_value_total(d_from - timedelta(days=1)).quantize(Decimal("0.01"))
+            if d_from else Decimal("0.00")
         )
-        all_loss, all_loss_unknown = _losses(None, None)
+        all_purchases = purchases_from_stock(d_from, d_to)
+        all_cogs = cogs
+        all_loss, all_loss_unknown = loss_cost, loss_unknown
 
         # ОСТАТОК СВЕРХ ПАРТИЙ — часть стоимости склада, за которой нет
         # прихода: инвентаризация правит количество, партий не создавая, и
@@ -587,7 +595,7 @@ class FinanceReportView(APIView):
         #    1 184 614. Цифра из другого времени стояла среди месячных.
         value_now = stock_value_total().quantize(Decimal("0.01"))
         value_period = stock_value_total(d_to).quantize(Decimal("0.01"))
-        expected = all_purchases - all_cogs - all_loss
+        expected = opening + all_purchases - all_cogs - all_loss
         stock = {
             "purchases": stock_purchases,
             "value_now": value_period,
@@ -599,18 +607,22 @@ class FinanceReportView(APIView):
             "losses": loss_cost,
             "losses_unknown": loss_unknown,
             "reconcile": {
+                # Сколько лежало на складе в день перед началом периода.
+                "opening": opening,
                 "purchases": all_purchases.quantize(Decimal("0.01")),
                 "cogs": all_cogs,
                 "losses": all_loss,
                 "losses_unknown": all_loss_unknown,
                 "expected": expected.quantize(Decimal("0.01")),
-                "value_now": value_now,
+                # Конец цепочки — остаток на конец ПЕРИОДА, а не «на сегодня»:
+                # иначе строки складывались бы за месяц, а итог был бы за год.
+                "value_now": value_period,
                 # Что не объясняется ни продажей, ни списанием: остаток,
                 # заведённый инвентаризацией без прихода («было на полке до
                 # системы»), приход без цены, старые списания без
                 # себестоимости. Ноль тут — редкость; важно, чтобы цифра
                 # стояла на экране, а не пряталась в разнице двух других.
-                "gap": (expected - value_now).quantize(Decimal("0.01")),
+                "gap": (expected - value_period).quantize(Decimal("0.01")),
                 # Из чего разрыв складывается чаще всего: остаток, у которого
                 # нет прихода (его завела инвентаризация), — он тянет разрыв в
                 # минус, и старые списания без себестоимости — в плюс.

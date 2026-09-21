@@ -84,14 +84,33 @@ class StockValueOnDateTests(APITestCase):
         self.assertEqual(Decimal(str(data["stock"]["value_now"])), stock_value_total())
         self.assertIsNone(data["stock"]["as_of"])
 
-    def test_reconciliation_block_stays_on_today(self):
-        """«Куда делись деньги склада» — про всю историю, остаток в нём сегодняшний."""
+    def test_reconciliation_chain_ends_on_the_period_stock(self):
+        """Цепочка «было → пришло → продали → списали → лежит» идёт по периоду.
+
+        Итог цепочки — остаток на конец ПЕРИОДА, иначе строки складывались бы
+        за месяц, а итог был бы за сегодня.
+        """
         prev_end = self.today.replace(day=1) - timedelta(days=1)
         data = self.client.get(self.REPORT, {
             "date_from": prev_end.replace(day=1).isoformat(), "date_to": prev_end.isoformat(),
         }).data
+        rec = data["stock"]["reconcile"]
+        self.assertEqual(Decimal(str(rec["value_now"])), Decimal("0.00"))
+        self.assertEqual(Decimal(str(rec["opening"])), Decimal("0.00"))
+        self.assertEqual(Decimal(str(rec["gap"])), Decimal("0.00"))
+
+    def test_chain_adds_up_for_the_current_month(self):
+        """было + закуп − продано − списано = лежит на конец."""
+        first = self.today.replace(day=1)
+        rec = self.client.get(self.REPORT, {
+            "date_from": first.isoformat(), "date_to": self.today.isoformat(),
+        }).data["stock"]["reconcile"]
+        chain = (Decimal(str(rec["opening"])) + Decimal(str(rec["purchases"]))
+                 - Decimal(str(rec["cogs"])) - Decimal(str(rec["losses"])))
+        self.assertEqual(chain, Decimal(str(rec["expected"])))
         self.assertEqual(
-            Decimal(str(data["stock"]["reconcile"]["value_now"])), stock_value_total()
+            Decimal(str(rec["expected"])) - Decimal(str(rec["value_now"])),
+            Decimal(str(rec["gap"])),
         )
 
     def test_overview_follows_the_same_period(self):
