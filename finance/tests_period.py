@@ -175,17 +175,36 @@ class PeriodLockTests(APITestCase):
         receipt.refresh_from_db()
         self.assertEqual(receipt.total_price, before)
 
-    def test_old_order_cannot_be_paid_or_refunded(self):
+    def test_old_order_payment_cannot_be_reverted(self):
         receipt = self._old_receipt()
         self._close()
-        self.assertEqual(
-            self.client.post(f"/api/sales/receipts/{receipt.id}/refund/", {},
-                             format="json").status_code, 400
-        )
         self.assertEqual(
             self.client.post(f"/api/sales/receipts/{receipt.id}/unpay/", {},
                              format="json").status_code, 400
         )
+
+    def test_old_order_can_be_refunded_today_without_touching_the_closed_month(self):
+        """Возврат — событие своего дня (решение владельца, 2026-09-27).
+
+        Раньше замок проверялся по дате ЗАКАЗА: вернуть товар из закрытого
+        месяца было нельзя, пока период не откроешь, а открыв — возврат
+        переписывал принятый отчёт. Теперь возврат ложится на сегодня.
+        """
+        receipt = self._old_receipt()
+        report = "/api/finance/report/"
+        closed = {"date_from": self.inside.replace(day=1).isoformat(),
+                  "date_to": self.close_through.isoformat()}
+        before = self.client.get(report, closed).data["revenue"]
+        self._close()
+        r = self.client.post(f"/api/sales/receipts/{receipt.id}/refund/", {}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        # Закрытый месяц не сдвинулся ни на сом…
+        self.assertEqual(self.client.get(report, closed).data["revenue"], before)
+        # …а возврат уменьшил сегодняшний день.
+        today = timezone.localdate().isoformat()
+        now = self.client.get(report, {"date_from": today, "date_to": today}).data
+        self.assertEqual(Decimal(str(now["refunds"])), receipt.total_price)
+        self.assertEqual(Decimal(str(now["revenue"])), -receipt.total_price)
 
     def test_payment_cannot_be_backdated_into_a_closed_period(self):
         receipt = sale_service.create_sale(

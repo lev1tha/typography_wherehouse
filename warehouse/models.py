@@ -751,6 +751,15 @@ class Roll(models.Model):
     # складской операции. По ней же идёт FIFO, поэтому партия, внесённая задним
     # числом, встаёт в очередь на списание по своей настоящей дате.
     received_at = models.DateTimeField(_("дата поступления"), default=timezone.now)
+    # ДОЛГ ПОСТАВЩИКУ за эту партию — сколько ещё не заплатили. Приход «в
+    # долг» одиночной кнопкой раньше не записывал его нигде: система знала,
+    # что материал пришёл, но не знала, что за него должны, и оплату потом
+    # провести было некуда. Ноль — заплатили сразу или способ оплаты не
+    # назвали (старые приходы). У партии из накладной долг живёт в самой
+    # накладной (`Supply.debt`), здесь ноль.
+    supplier_debt = models.DecimalField(
+        _("долг поставщику"), max_digits=12, decimal_places=2, default=Decimal("0"),
+    )
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="rolls",

@@ -964,9 +964,11 @@ def apply_payment(
         created_by=user,
     )
     # Погашение долга — такой же приход денег, как оплата в кассе, и датируется
-    # днём, когда деньги реально принесли.
+    # днём, когда деньги реально принесли. В ящик легло ВСЁ принесённое, вместе
+    # со сдачей: раньше приходовалась только часть в зачёт долга, а выдача
+    # сдачи потом уводила кассу ниже ящика на её сумму.
     cash.receipt_paid(
-        receipt, amount, user=user, happened_on=settled_on,
+        receipt, amount + over, user=user, happened_on=settled_on,
         method=method or receipt.payment_method,
     )
     return amount
@@ -1021,6 +1023,13 @@ def pay_client_debt(
         last = allocations[-1][0]
         last.change_due = last.change_due + change
         last.save(update_fields=["change_due", "updated_at"])
+        # Эти деньги тоже легли в ящик. Раньше в книгу шла только часть,
+        # ушедшая в долги: клиент принёс 3 700 за долг 3 200 — касса +3 200,
+        # а после выдачи сдачи +2 700 при реальных +3 200.
+        cash.receipt_paid(
+            last, change, user=user, happened_on=paid_on or timezone.localdate(),
+            method=method or last.payment_method,
+        )
     return allocations, change
 
 
@@ -1241,6 +1250,36 @@ def receipt_summary(receipt: Receipt) -> str:
     return f"{head}, {receipt.total_price} сом ({lines})" if lines else f"{head}, {receipt.total_price} сом"
 
 
+def return_applied_change(receipt: Receipt) -> Decimal:
+    """Вернуть клиенту сдачу, зачтённую в этот заказ, — если заказа не было
+    (удаление) или денег по нему не брали (откат оплаты).
+
+    Кладём на самый свежий из его ДРУГИХ заказов: выдают сдачу по заказу, и
+    для выдачи важна сумма, а не то, на какой строке она числится. Других
+    заказов нет — оставляем сдачей на этом же. Деньги при этом не двигаются:
+    они лежат в кассе с того раза, когда клиент переплатил.
+    """
+    applied = receipt.change_applied
+    if applied <= 0:
+        return Decimal("0")
+    host = None
+    if receipt.client_id:
+        host = (
+            Receipt.objects.filter(client_id=receipt.client_id)
+            .exclude(pk=receipt.pk)
+            .order_by("-created_at", "-id")
+            .first()
+        )
+    receipt.change_applied = Decimal("0")
+    if host:
+        host.change_due += applied
+        host.save(update_fields=["change_due", "updated_at"])
+    else:
+        receipt.change_due += applied
+    receipt.save(update_fields=["change_applied", "change_due", "updated_at"])
+    return applied
+
+
 @transaction.atomic
 def delete_receipt(receipt: Receipt, *, user=None) -> None:
     """Удалить ошибочно заведённый чек целиком, вернув материал на склад.
@@ -1263,20 +1302,14 @@ def delete_receipt(receipt: Receipt, *, user=None) -> None:
     складовщика такой кнопки нет.
     """
     # Сдача, зачтённая в этот заказ, возвращается клиенту: заказа не было,
-    # значит и тратить её было не на что. Кладём на самый свежий из его
-    # оставшихся заказов — выдают сдачу по заказу, и для выдачи важна сумма, а
-    # не то, на какой строке она числится. Не осталось ни одного заказа —
-    # возвращать некуда, и это видно в журнале действий вместе с удалением.
-    if receipt.change_applied > 0 and receipt.client_id:
-        host = (
-            Receipt.objects.filter(client_id=receipt.client_id)
-            .exclude(pk=receipt.pk)
-            .order_by("-created_at", "-id")
-            .first()
-        )
-        if host:
-            host.change_due += receipt.change_applied
-            host.save(update_fields=["change_due", "updated_at"])
+    # значит и тратить её было не на что.
+    return_applied_change(receipt)
+
+    # Деньги, которые по этому заказу лежат в кассе, уходят встречной записью,
+    # а сами записи остаются в книге (ссылка на чек обнулится): раньше каскад
+    # стирал приход целиком, и удалённый оплаченный заказ на 700 молча
+    # уменьшал кассу — в книге не оставалось ни строки о том, что деньги были.
+    cash.receipt_deleted(receipt, user=user)
 
     # Возвращаем только НЕвозвращённые строки: по возвращённым материал уже
     # вернулся на склад при возврате, второй раз его класть нельзя.
@@ -1323,21 +1356,27 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None) -> Receipt:
 
     excess_before = _excess()
     refunded_total = Decimal("0")
+    # Возврат — событие своего дня: отчёты относят его к периоду, когда его
+    # оформили, а не к месяцу заказа (см. `sales.reporting`).
+    now = timezone.now()
     for item in items:
-        # Restore stock AND book the refund only for a settled sale. An unpaid
-        # order (e.g. a pending online invoice) never deducted stock and collected
-        # no money, so refunding it restores nothing and books 0 — not a phantom
-        # refund of money the customer never paid. For settled sales the refund is
-        # the returned line's value, which keeps the debt formula consistent:
-        # (total_price − refunded_amount) stays equal to the value of kept lines.
+        # Склад возвращаем, только если он списывался (неоплаченный онлайн-счёт
+        # склад не трогал). А вот стоимость строки уходит в `refunded_amount`
+        # ВСЕГДА: это не «сколько денег отдали», а «на сколько стало меньше
+        # заказа» — из неё считаются долг и выручка ((итог − возвращено) =
+        # стоимость оставшихся строк). Раньше у неоплаченного онлайн-заказа
+        # возврат строки её сюда не клал, и клиент оставался должен за товар,
+        # который вернул. Деньги из кассы уходят отдельно и только сверх
+        # принятого (`_excess` ниже): по неоплаченному заказу — ноль.
         if stock_was_deducted:
             _deduct_stock_for_item(item, user, restore=True)
-            # Ровно то, что стояло в чеке за эту строку — вверх до сома, как
-            # `line_total`. Сырое qty × price давало 147.60 против 148 в чеке, и
-            # полностью возвращённый заказ оставлял «долг» в копейки.
-            refunded_total += item.line_total
+        # Ровно то, что стояло в чеке за эту строку — вверх до сома, как
+        # `line_total`. Сырое qty × price давало 147.60 против 148 в чеке, и
+        # полностью возвращённый заказ оставлял «долг» в копейки.
+        refunded_total += item.line_total
         item.is_returned = True
-        item.save(update_fields=["is_returned"])
+        item.returned_at = now
+        item.save(update_fields=["is_returned", "returned_at"])
 
     receipt.refunded_amount += refunded_total
     remaining = receipt.items.filter(is_returned=False).exists()

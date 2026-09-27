@@ -34,6 +34,7 @@ from .sale_service import (
     parse_paid_on,
     receipt_summary,
     refund_receipt,
+    return_applied_change,
     update_receipt_items,
 )
 from .serializers import (
@@ -580,7 +581,10 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     def refund(self, request, pk=None):
         """POST /receipts/<id>/refund/ — refund whole receipt or given items."""
         receipt = self.get_object()
-        ensure_open(timezone.localtime(receipt.created_at), "Оформить возврат по заказу закрытого периода")
+        # Возврат датируется ДНЁМ ОФОРМЛЕНИЯ и двигает цифры этого дня, а не
+        # месяца заказа. Поэтому и замок проверяем по сегодняшней дате: заказ
+        # из закрытого месяца вернуть можно, закрытый отчёт от этого не меняется.
+        ensure_open(timezone.localdate(), "Оформить возврат этой датой")
         serializer = RefundSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
@@ -674,15 +678,25 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             )
 
         returned = receipt.amount_paid
-        # Из кассы уходит всё, что по этому чеку в неё попало: зачтённая сумма
+        # Из кассы уходит всё, что по этому чеку в неё попало: принятые деньги
         # плюс НЕ ВЫДАННАЯ сдача — она физически лежит в ящике и уходит вместе
-        # с откатом (см. обнуление `change_due` ниже).
-        returned_cash = returned + receipt.change_due
+        # с откатом (см. обнуление `change_due` ниже). Часть, закрытая СДАЧЕЙ
+        # с прошлых заказов (`change_applied`), в кассу по этому чеку не
+        # приходила — и уходить ей неоткуда. Раньше она списывалась тоже:
+        # заказ на 60, закрытый сдачей, после отката уводил кассу в −60, а
+        # клиент терял свою сдачу и снова был должен 60 — платил дважды.
+        returned_cash = returned - receipt.change_applied + receipt.change_due
+        own_change = receipt.change_due
+        # Сдача клиента возвращается ему — на другой его заказ, а если других
+        # нет, то сдачей на этот же (`return_applied_change`).
+        return_applied_change(receipt)
+        receipt.refresh_from_db()
         receipt.amount_paid = Decimal("0")
-        # Сдача уходит вместе с оплатой: откат означает «денег не брали», а
-        # сдача — это часть тех же денег. Оставить её значило бы, что цех должен
-        # клиенту сдачу с платежа, которого не было.
-        receipt.change_due = Decimal("0")
+        # Сдача С ЭТОЙ оплаты уходит вместе с ней: откат означает «денег не
+        # брали», а сдача — часть тех же денег. Оставить её значило бы, что цех
+        # должен клиенту сдачу с платежа, которого не было. Возвращённая выше
+        # сдача прошлых заказов остаётся.
+        receipt.change_due = receipt.change_due - own_change
         receipt.payment_status = Receipt.PaymentStatus.PENDING
         receipt.save(
             update_fields=["amount_paid", "change_due", "payment_status", "updated_at"]

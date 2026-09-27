@@ -86,32 +86,97 @@ def change_given(receipt, amount, *, user=None):
     )
 
 
-def refund_paid(receipt, amount, *, user=None):
-    """Возврат клиенту — деньги ушли тем же путём, каким пришли."""
+def held_by_account(receipt) -> dict:
+    """Сколько денег по этому чеку лежит на каждом счёте: приходы минус расходы
+    его записей. {"CASH": 300, "BANK": 507}."""
     from .models import CashEntry
 
-    return money_out(
-        amount, CashEntry.Article.REFUND,
-        payment_method=receipt.payment_method,
-        receipt=receipt, user=user,
+    held = {}
+    for account, kind, amount in CashEntry.objects.filter(receipt=receipt).values_list(
+        "account", "kind", "amount"
+    ):
+        sign = 1 if kind == CashEntry.Kind.IN else -1
+        held[account] = held.get(account, Decimal("0")) + sign * amount
+    return held
+
+
+def take_back(receipt, amount, article, *, user=None, note=""):
+    """Вернуть деньги по чеку — С ТЕХ СЧЕТОВ, куда они по нему пришли.
+
+    Раньше расход писался по способу оплаты ЧЕКА. Но долг часто гасят не тем
+    способом, которым оформляли заказ: заказ «наличными» закрыли переводом на
+    507, откатили оплату — и наличные ушли в −507, а банк остался с деньгами,
+    которых там уже нет. Разошлись оба счёта сразу.
+
+    Берём сначала со счёта способа чека (если по чеку там есть деньги), потом
+    с остальных, где больше. Не хватило (старые чеки без записей в книге) —
+    остаток по способу чека, как было.
+    """
+    left = Decimal(str(amount or 0))
+    if left <= 0:
+        return []
+    own = account_for(receipt.payment_method)
+    held = held_by_account(receipt)
+    order = sorted(held.items(), key=lambda kv: (kv[0] != own, -kv[1]))
+    entries = []
+    for account, value in order:
+        if left <= 0:
+            break
+        take = min(value, left)
+        if take > 0:
+            entries.append(money_out(
+                take, article, account=account, receipt=receipt, user=user, note=note,
+            ))
+            left -= take
+    if left > 0:
+        entries.append(money_out(
+            left, article, account=own, receipt=receipt, user=user, note=note,
+        ))
+    return entries
+
+
+def refund_paid(receipt, amount, *, user=None):
+    """Возврат клиенту — деньги уходят с того счёта, куда пришли."""
+    from .models import CashEntry
+
+    return take_back(
+        receipt, amount, CashEntry.Article.REFUND, user=user,
         note=f"Возврат по заказу №{receipt.order_number}" if receipt.order_number else "",
     )
 
 
-def payment_reverted(receipt, amount, *, user=None):
+def payment_reverted(receipt, amount, *, user=None, note=None):
     """Откат ошибочно принятой оплаты.
 
     Не стираем приход, а пишем встречный расход: кассовая книга не подчищается
-    задним числом, иначе по ней нельзя объяснить, что происходило.
+    задним числом, иначе по ней нельзя объяснить, что происходило. Расход — с
+    того счёта, куда деньги по этому чеку пришли.
     """
     from .models import CashEntry
 
-    return money_out(
-        amount, CashEntry.Article.UNPAY,
-        payment_method=receipt.payment_method,
-        receipt=receipt, user=user,
-        note=f"Откат оплаты по заказу №{receipt.order_number}" if receipt.order_number else "",
-    )
+    if note is None:
+        note = (
+            f"Откат оплаты по заказу №{receipt.order_number}" if receipt.order_number else ""
+        )
+    return take_back(receipt, amount, CashEntry.Article.UNPAY, user=user, note=note)
+
+
+def receipt_deleted(receipt, *, user=None):
+    """Заказ удалили — деньги, лежавшие по нему в кассе, уходят встречной
+    записью на каждом счёте. Сами записи остаются в книге (ссылка на чек
+    обнулится, номер заказа — в примечании): книга не подчищается, иначе
+    остаток сойдётся, а объяснить его будет нечем."""
+    from .models import CashEntry
+
+    label = f"№{receipt.order_number}" if receipt.order_number else "без номера"
+    note = f"Заказ {label} удалён"
+    for account, held in held_by_account(receipt).items():
+        if held > 0:
+            money_out(held, CashEntry.Article.UNPAY, account=account,
+                      receipt=receipt, user=user, note=note)
+        elif held < 0:
+            money_in(-held, CashEntry.Article.UNPAY, account=account,
+                     receipt=receipt, user=user, note=note)
 
 
 def supplier_paid(amount, account, *, roll=None, supply=None, happened_on=None,

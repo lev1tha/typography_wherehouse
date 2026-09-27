@@ -153,9 +153,13 @@ class EdgeRefundTests(APITestCase):
         # Stock must NOT be inflated above the real on-hand quantity.
         self.acrylic.refresh_from_db()
         self.assertEqual(self.acrylic.quantity, Decimal("100.00"))
-        # SUSPECTED BUG: nothing was ever paid, so refunded_amount should be 0;
-        # the implementation still adds line_total to refunded_amount.
-        self.assertEqual(receipt.refunded_amount, Decimal("0"))
+        # `refunded_amount` — на сколько стал меньше заказ, а не сколько денег
+        # отдали: из него считаются долг и выручка. Денег по неоплаченному
+        # счёту не принимали — и из кассы ничего не ушло.
+        self.assertEqual(receipt.refunded_amount, receipt.total_price)
+        self.assertEqual(receipt.debt, Decimal("0"))
+        from finance.models import CashEntry
+        self.assertFalse(CashEntry.objects.filter(receipt=receipt).exists())
 
     # ---- stock restoration precision (whole piece) ------------------------
     def test_whole_piece_stock_restored_exactly(self):

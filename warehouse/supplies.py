@@ -162,6 +162,72 @@ def move_supply_date(supply: Supply, day) -> None:
     supply.inventory_logs.update(happened_at=moment)
 
 
+@transaction.atomic
+def pay_supply(supply: Supply, amount, account, *, paid_on=None, user=None) -> Decimal:
+    """Заплатить поставщику по накладной (часть долга или весь).
+
+    Раньше оплатить накладную можно было только правкой поля «оплачено», и
+    касса этого не видела: долг становился нулём, а 48 000 уходили из ящика
+    без единой строки в книге. Теперь каждая оплата — расход в кассу датой
+    оплаты.
+    """
+    from finance import cash
+
+    locked = Supply.objects.select_for_update().get(pk=supply.pk)
+    amount = Decimal(str(amount))
+    if amount <= 0:
+        raise SupplyError("Сумма должна быть больше нуля.")
+    if account not in ("CASH", "BANK"):
+        raise SupplyError("Укажите, чем платили: наличными или с банка.")
+    if amount > locked.debt:
+        raise SupplyError(f"По накладной долг {locked.debt} — больше заплатить нельзя.")
+    locked.paid_amount += amount
+    locked.paid_account = account
+    locked.save(update_fields=["paid_amount", "paid_account"])
+    label = locked.number or f"#{locked.pk}"
+    cash.supplier_paid(
+        amount, account, supply=locked, happened_on=paid_on,
+        note=f"Оплата накладной {label}", user=user,
+    )
+    return locked.debt
+
+
+def sync_supply_payment(supply: Supply, *, old_amount, old_account, user=None) -> None:
+    """Правку полей оплаты накладной довести до кассы.
+
+    `paid_amount` правится и формой накладной; раньше касса об этом не знала.
+    Разницу пишем движением сегодняшним днём: выросло — расход, уменьшилось —
+    приход обратно (на тот счёт, откуда платили). Сменили счёт при уже
+    уплаченной сумме — деньги переезжают со старого на новый. Старые приходы
+    без счёта (до 19.09 оплаты в кассу не шли) уменьшение не трогает: из
+    кассы по ним ничего не уходило.
+    """
+    from finance import cash
+    from finance.models import CashEntry
+
+    new_amount = supply.paid_amount or Decimal("0")
+    new_account = supply.paid_account or ""
+    old_amount = old_amount or Decimal("0")
+    label = supply.number or f"#{supply.pk}"
+    note = f"Правка оплаты накладной {label}"
+    if old_account and new_account and old_account != new_account and old_amount > 0:
+        cash.money_in(old_amount, CashEntry.Article.SUPPLY, account=old_account,
+                      supply=supply, note=note, user=user)
+        cash.money_out(old_amount, CashEntry.Article.SUPPLY, account=new_account,
+                       supply=supply, note=note, user=user)
+    delta = new_amount - old_amount
+    if delta > 0:
+        if not new_account:
+            raise SupplyError("Укажите, чем платили: наличными или с банка.")
+        cash.money_out(delta, CashEntry.Article.SUPPLY, account=new_account,
+                       supply=supply, note=note, user=user)
+    elif delta < 0:
+        back_to = old_account or new_account
+        if back_to and old_account:
+            cash.money_in(-delta, CashEntry.Article.SUPPLY, account=back_to,
+                          supply=supply, note=note, user=user)
+
+
 def supply_summary(supply: Supply) -> str:
     """Накладная одной строкой — для журнала действий ПЕРЕД отменой: после неё
     от документа не остаётся ничего, и вопрос «что там было» отвечать нечем."""

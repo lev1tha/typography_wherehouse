@@ -200,11 +200,14 @@ class SupplyDocumentTests(APITestCase):
         supply_id = resp.data["id"]
         patch = self.client.patch(
             f"{self.URL}{supply_id}/",
-            {"paid_amount": "10000", "lines": []}, format="json",
+            {"paid_amount": "10000", "paid_account": "CASH", "lines": []}, format="json",
         )
         self.assertEqual(patch.status_code, 200, patch.data)
         self.assertEqual(Decimal(str(patch.data["paid_amount"])), Decimal("10000"))
         self.assertEqual(len(patch.data["lines"]), 2)
+        # Оплата правкой дошла до кассы (аудит 26.09: раньше — мимо).
+        from finance.models import CashEntry
+        self.assertEqual(CashEntry.balance("CASH"), Decimal("-10000"))
 
 
 class SupplierTests(APITestCase):

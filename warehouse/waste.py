@@ -8,8 +8,8 @@
 уме — лишняя работа и лишний повод ошибиться.
 
 Своей механики склада здесь нет: каждая строка уходит тем же путём, что и
-обычное списание (`consume_area` FIFO по партиям, `write_off_roll` по рулону,
-`apply_stock_change` у штучного без партий), пишется в журнал типом «Списание»
+обычное списание (`take_out`: FIFO по партиям или по карточке у штучного без
+партий; `write_off_roll` по рулону), пишется в журнал типом «Списание»
 с причиной «Отход/брак» и СЕБЕСТОИМОСТЬЮ (`InventoryLog.cost`) — иначе на
 вопрос «сколько денег выбросили за месяц» отвечать нечем.
 """
@@ -22,8 +22,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .models import InventoryLog, Material, Roll
-from .rolls import InsufficientStock, compute_area, consume_area, has_lots, write_off_roll
-from .stock import apply_stock_change
+from .rolls import InsufficientStock, compute_area, take_out, write_off_roll
 
 
 class WasteError(Exception):
@@ -156,22 +155,12 @@ def write_off_waste(lines: list[dict], *, user=None, happened_on=None, note: str
                 sheet_count=data.get("sheet_count"), area=data.get("area"),
                 length=data.get("length"), quantity=data.get("quantity"),
             )
-            if material.is_roll_material or has_lots(material):
-                # Лист и штучное с партиями — FIFO по партиям (выбранная —
-                # первой), себестоимость по ним же.
-                consume_area(
-                    material, qty, user=user, reason=reason,
-                    log_type=InventoryLog.Type.WRITE_OFF, happened_at=moment,
-                    preferred_roll=roll,
-                )
-            else:
-                # Штучный без партий: себестоимость — по закупочной из карточки,
-                # другой у такого запаса нет (так же считает `stock_value`).
-                apply_stock_change(
-                    material, -qty, log_type=InventoryLog.Type.WRITE_OFF, reason=reason,
-                    user=user, happened_at=moment,
-                    cost=(qty * (material.purchase_price or Decimal("0"))).quantize(Decimal("0.01")),
-                )
+            # Лист и штучное с партиями — FIFO по партиям (выбранная первой),
+            # штучный без партий — по закупочной из карточки.
+            take_out(
+                material, qty, log_type=InventoryLog.Type.WRITE_OFF, reason=reason,
+                user=user, happened_at=moment, preferred_roll=roll,
+            )
 
         entry = (
             InventoryLog.objects.filter(material=material, id__gt=before, type=InventoryLog.Type.WRITE_OFF)

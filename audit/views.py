@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.permissions import IsAdminOrAccountantRead
+from sales import reporting
 from sales.models import Receipt, TransactionItem
 from warehouse.models import InventoryLog, Material, stock_value_total
 
@@ -25,8 +26,6 @@ def _parse_day(value):
     except ValueError:
         return None
 
-_ZERO = Coalesce(Sum("total_price"), Decimal("0"), output_field=DecimalField())
-_REFUNDED = Coalesce(Sum("refunded_amount"), Decimal("0"), output_field=DecimalField())
 
 
 def _line_sum(items) -> Decimal:
@@ -103,12 +102,16 @@ class DashboardView(APIView):
         # «что докупить», и вчерашний дефицит там не нужен.
         stock_value = stock_value_total(_parse_day(date_to))
 
-        # Выручка по способам оплаты (нал / MBank / DemirBank / онлайн) — за
-        # вычетом возвращённых строк, как «Выручка» в Финансах: до этого Обзор
+        # Выручка по способам оплаты (нал / MBank / DemirBank / онлайн) — той
+        # же формулой, что «Выручка» в Финансах (`sales.reporting`): заказы
+        # периода минус возвраты, оформленные в периоде. До общей формулы Обзор
         # показывал 6 231 там, где Финансы — 5 331 (частичный возврат на 900).
+        d_from, d_to = _parse_day(date_from), _parse_day(date_to)
+
         def rev(method):
-            qs = paid.filter(payment_method=method)
-            return qs.aggregate(v=_ZERO)["v"] - qs.aggregate(v=_REFUNDED)["v"]
+            return reporting.revenue(
+                d_from, d_to, receipts=Receipt.objects.filter(payment_method=method)
+            )
 
         revenue_cash = rev(Receipt.PaymentMethod.CASH)
         revenue_mbank = rev(Receipt.PaymentMethod.MBANK)
@@ -165,29 +168,48 @@ class DashboardView(APIView):
             out["total"] = sum(out.values(), Decimal("0"))
             return out
 
-        # Разбивка выручки — работа против материала — по тем же заказам, что и
-        # выручка выше: все неотменённые, кроме возвращённых строк.
+        # Разбивка выручки — работа против материала — тем же правилом, что и
+        # выручка выше: строки заказов периода, плюс возвращённые позже периода
+        # (тогда они были продажей), минус возвращённые в периоде.
         paid_lines = by_period(
             TransactionItem.objects.filter(is_returned=False).exclude(
                 receipt__status=Receipt.Status.CANCELLED
             ),
             field="receipt__created_at",
         )
-        work_revenue = _line_sum(paid_lines.filter(type=TransactionItem.Type.SERVICE))
-        material_lines = paid_lines.filter(type=TransactionItem.Type.MATERIAL)
-        material_revenue = _line_sum(material_lines)
+        back = reporting.added_back(d_from, d_to)
+        out = reporting.returned_lines(d_from, d_to)
+
+        def lines_money(kind):
+            return (
+                _line_sum(paid_lines.filter(type=kind))
+                + reporting.money(back.filter(type=kind))
+                - reporting.money(out.filter(type=kind))
+            )
+
+        def lines_cost(kind=None):
+            parts = [paid_lines, back, out]
+            if kind:
+                parts = [q.filter(type=kind) for q in parts]
+            return (
+                parts[0].aggregate(v=_COST_SUM)["v"]
+                + reporting.cost(parts[1]) - reporting.cost(parts[2])
+            )
+
+        work_revenue = lines_money(TransactionItem.Type.SERVICE)
+        material_revenue = lines_money(TransactionItem.Type.MATERIAL)
         # Себестоимость проданного материала — по ТЕМ ЖЕ строкам, что и выручка
         # (тот же период, только оплаченные и невозвращённые). Цифра снята в
         # момент списания со склада: для рулонных — по FIFO-партиям, откуда
         # материал реально ушёл. Одна выручка без неё не отвечала на вопрос
         # «сколько на материале заработали»: 149 232 сом продали — а купили их
         # почём?
-        material_cost = material_lines.aggregate(v=_COST_SUM)["v"]
+        material_cost = lines_cost(TransactionItem.Type.MATERIAL)
         # Себестоимость ВСЕГО проданного — той же формулой, что в «Финансах»
         # (`cogs`): вместе со строками работы, у которых своя себестоимость по
         # техкарте. Блок «Сколько заработали на материале» ниже по-прежнему
         # считает только материал — он и отвечает на вопрос про материал.
-        cogs_total = paid_lines.aggregate(v=_COST_SUM)["v"]
+        cogs_total = lines_cost()
 
         service_items = by_period(
             TransactionItem.objects.filter(
@@ -209,9 +231,8 @@ class DashboardView(APIView):
             for recipe in item.service.recipes.all():
                 materials_consumed += recipe_consumption(recipe, item)
 
-        refunded_total = by_period(Receipt.objects.all()).aggregate(
-            v=Coalesce(Sum("refunded_amount"), Decimal("0"), output_field=DecimalField())
-        )["v"]
+        # Возвраты, ОФОРМЛЕННЫЕ в периоде, — по дате возврата, как в выручке.
+        refunded_total = reporting.refunds(d_from, d_to)
 
         # СПИСАНО МИМО ПРОДАЖИ — недостача по инвентаризации и брак.
         #
@@ -364,16 +385,25 @@ class ClientPurchasesView(APIView):
         # материала на …» над ней — на проде 19.09 это 467 263 против 474 274.
         # Разницу в 7 011 объяснить было нечем, и обе цифры выглядели
         # неправильными, хотя каждая считалась верно.
+        #
+        # Возвраты — по дате возврата, как во всех денежных цифрах
+        # (`sales.reporting`): строка, возвращённая позже периода, в нём ещё
+        # продажа; возвращённая в периоде — минус у того клиента, чей заказ.
         by_client = {}
-        lines = TransactionItem.objects.filter(
-            type=TransactionItem.Type.MATERIAL,
-            is_returned=False,
-            receipt__in=live,
-        ).values_list("receipt__client", "quantity", "price_per_item")
-        for client_id, qty, price in lines:
-            acc = by_client.setdefault(client_id, {"spend": Decimal("0"), "qty": Decimal("0")})
-            acc["spend"] += TransactionItem(quantity=qty, price_per_item=price).line_total
-            acc["qty"] += qty
+        d_from, d_to = _parse_day(date_from), _parse_day(date_to)
+        material = TransactionItem.Type.MATERIAL
+        signed = [
+            (1, TransactionItem.objects.filter(type=material, is_returned=False, receipt__in=live)),
+            (1, reporting.added_back(d_from, d_to).filter(type=material)),
+            (-1, reporting.returned_lines(d_from, d_to).filter(type=material)),
+        ]
+        for sign, lines in signed:
+            for client_id, qty, price in lines.values_list(
+                "receipt__client", "quantity", "price_per_item"
+            ):
+                acc = by_client.setdefault(client_id, {"spend": Decimal("0"), "qty": Decimal("0")})
+                acc["spend"] += sign * TransactionItem(quantity=qty, price_per_item=price).sold_total
+                acc["qty"] += sign * qty
 
         # Attach client display data + order count, then sort in Python (small set).
         from clients.models import Client

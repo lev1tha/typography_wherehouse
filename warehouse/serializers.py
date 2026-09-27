@@ -403,6 +403,8 @@ class RollSerializer(serializers.ModelSerializer):
     cost_per_sqm = serializers.SerializerMethodField()
     cost_per_pm = serializers.SerializerMethodField()
     purchase_cost = serializers.SerializerMethodField()
+    # Долг поставщику за партию — тоже деньги, складовщику не показываем.
+    supplier_debt = serializers.SerializerMethodField()
     material_name = serializers.CharField(source="material.name", read_only=True)
     production_name = serializers.CharField(
         source="production.name", read_only=True, default=None
@@ -426,6 +428,9 @@ class RollSerializer(serializers.ModelSerializer):
 
     def get_purchase_cost(self, obj):
         return obj.purchase_cost if _sees_money(self.context) else None
+
+    def get_supplier_debt(self, obj):
+        return obj.supplier_debt if _sees_money(self.context) else None
 
     class Meta:
         model = Roll
@@ -455,6 +460,7 @@ class RollSerializer(serializers.ModelSerializer):
             "shortfall",
             "purchase_cost",
             "cost_per_sqm",
+            "supplier_debt",
             "received_at",
         ]
 

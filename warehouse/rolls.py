@@ -55,6 +55,7 @@ def receive_lot(
     declared_length=None,
     production=None,
     paid_account=None,
+    on_credit=False,
 ) -> Roll:
     """Receive a new lot (roll or sheets). Computes area from dimensions unless
     `area` is given directly; then creates the lot and refreshes material stock.
@@ -62,6 +63,9 @@ def receive_lot(
     ``received_at`` — дата поступления; поставки часто вносят задним числом.
     По ней же идёт FIFO, поэтому партия встаёт в очередь по своей настоящей
     дате, а не по моменту ввода.
+
+    ``on_credit`` — при приёмке сказали «в долг»: вся стоимость партии встаёт
+    долгом поставщику (`Roll.supplier_debt`), гасится потом `pay_lot_supplier`.
     """
     if area is None:
         area = compute_area(form, width=width, length=length, height=height, sheet_count=sheet_count)
@@ -85,6 +89,7 @@ def receive_lot(
         # Заявленная поставщиком длина — рядом с принятой. Без этой пары
         # систематический недолив не виден ни в одном отчёте.
         declared_length=declared_length,
+        supplier_debt=Decimal(purchase_cost) if on_credit else Decimal("0"),
         created_by=user,
     )
     if received_at:
@@ -144,6 +149,39 @@ def receive_lot(
             user=user,
         )
     return roll
+
+
+class SupplierPaymentError(Exception):
+    """Оплату поставщику провести нельзя — с человеческим объяснением."""
+
+
+@transaction.atomic
+def pay_lot_supplier(roll: Roll, amount, account, *, paid_on=None, user=None) -> Decimal:
+    """Заплатить поставщику за партию, взятую в долг.
+
+    Деньги уходят из кассы или со счёта (`account`) датой оплаты, долг партии
+    уменьшается. Больше долга не платим: переплату поставщику система не
+    ведёт, а молча записанная она увела бы кассу ниже ящика.
+    """
+    from finance import cash
+
+    locked = Roll.objects.select_for_update().get(pk=roll.pk)
+    amount = Decimal(str(amount))
+    if amount <= 0:
+        raise SupplierPaymentError("Сумма должна быть больше нуля.")
+    if account not in ("CASH", "BANK"):
+        raise SupplierPaymentError("Укажите, чем платили: наличными или с банка.")
+    if amount > locked.supplier_debt:
+        raise SupplierPaymentError(
+            f"По этой партии долг {locked.supplier_debt} — больше заплатить нельзя."
+        )
+    locked.supplier_debt -= amount
+    locked.save(update_fields=["supplier_debt"])
+    cash.supplier_paid(
+        amount, account, roll=locked, happened_on=paid_on,
+        note=f"Долг за {locked.material.name}: {locked.dimensions_label}", user=user,
+    )
+    return locked.supplier_debt
 
 
 # Backwards-compatible alias.
@@ -492,6 +530,10 @@ def stocktake_roll(roll: Roll, counted_metres: Decimal, *, reason_code, note="",
     )
     # В журнале склада промер тоже виден движением — иначе остаток меняется, а
     # в ленте движений пусто, и склад перестаёт сходиться сам с собой.
+    #
+    # Недостача по промеру — деньги: себестоимость пропавших метров по цене
+    # ЭТОГО рулона. Без неё недомер уходил в «списано без себестоимости» и в
+    # прибыль не попадал никогда.
     if delta_area:
         InventoryLog.objects.create(
             type=InventoryLog.Type.ADJUSTMENT,
@@ -502,6 +544,11 @@ def stocktake_roll(roll: Roll, counted_metres: Decimal, *, reason_code, note="",
                 f"Промер рулона {locked_roll.code or f'№{locked_roll.pk}'}: "
                 f"было {expected} м, намерено {counted} м "
                 f"({act.get_reason_code_display()})"
+            ),
+            cost=(
+                (-delta_area * locked_roll.cost_per_sqm).quantize(Decimal("0.01"))
+                if delta_area < 0
+                else None
             ),
             created_by=user,
         )
@@ -648,6 +695,41 @@ def has_lots(material: Material) -> bool:
     return material.rolls.filter(remaining_area__gt=0).exists()
 
 
+def take_out(material: Material, qty: Decimal, *, log_type: str, reason: str = "",
+             user=None, happened_at=None, preferred_roll=None) -> Decimal:
+    """Убрать материал со склада МИМО продажи (брак, недостача, отход) и вернуть,
+    во сколько он обошёлся.
+
+    Один путь на всех, кто списывает: развилка «через партии или по карточке»
+    жила в каждом вызывающем своя, и в списании брака её не было вовсе. Штучный
+    товар с партиями уходил одним числом остатка: партия продолжала числить
+    выброшенную штуку, а себестоимость в журнал не писалась — брак на 800 сом
+    уходил из склада и не появлялся ни в «Списано», ни в прибыли, только в
+    строке «Не объяснено».
+
+    Площадной и штучный с партиями — FIFO по партиям (`consume_area`, выбранная
+    партия первой), себестоимость по ним же. Штучный без партий — по закупочной
+    из карточки: другой цены у такого запаса нет (так же его оценивает
+    `Material.stock_value`).
+    """
+    from .stock import apply_stock_change
+
+    qty = Decimal(qty)
+    if qty <= 0:
+        return Decimal("0")
+    if material.is_roll_material or has_lots(material):
+        return consume_area(
+            material, qty, user=user, reason=reason, log_type=log_type,
+            happened_at=happened_at, preferred_roll=preferred_roll,
+        )
+    cost = (qty * (material.purchase_price or Decimal("0"))).quantize(Decimal("0.01"))
+    apply_stock_change(
+        material, -qty, log_type=log_type, reason=reason, user=user,
+        happened_at=happened_at, cost=cost,
+    )
+    return cost
+
+
 def lots_area(material: Material) -> Decimal:
     """Сумма остатков всех партий материала, кв.м — то, что реально лежит по
     рулонам. `Material.quantity` обязан с ней сходиться; когда не сходится,
@@ -687,6 +769,13 @@ def reconcile_with_lots(material: Material, *, user=None) -> Decimal:
         raise NothingToReconcile(
             f"«{locked.name}»: остаток сходится с рулонами ({target} кв.м) — сводить нечего."
         )
+    # Снятый хвост оценивался последней закупочной (`Material.stock_value`) —
+    # по ней же и уходит: иначе склад дешевеет, а в «Списано» ноль.
+    tail_cost = (
+        (-delta * (locked.purchase_price or Decimal("0"))).quantize(Decimal("0.01"))
+        if delta < 0
+        else None
+    )
     locked.quantity = target
     locked.save(update_fields=["quantity", "updated_at"])
     InventoryLog.objects.create(
@@ -697,6 +786,7 @@ def reconcile_with_lots(material: Material, *, user=None) -> Decimal:
             f"Сведение остатка с рулонами: было {target - delta} кв.м, "
             f"по рулонам {target} кв.м"
         ),
+        cost=tail_cost,
         created_by=user,
     )
     material.refresh_from_db()

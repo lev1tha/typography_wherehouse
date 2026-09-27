@@ -180,6 +180,14 @@ export default function DailyProfitChart({ year: propYear, month: propMonth, rel
               <span className="k">{t("finance.expenses")}</span>
               <strong>{som(Number(data.totals.variable) + Number(data.totals.fixed))}</strong>
             </span>
+            {/* Брак и недостача — своей строкой: они вычитаются из прибыли,
+                как и в плитке месяца, и без неё итог не складывался бы. */}
+            {Number(data.totals.losses || 0) > 0 && (
+              <span>
+                <span className="k">{t("finance.lossesShort")}</span>
+                <strong>{som(data.totals.losses)}</strong>
+              </span>
+            )}
             <span>
               <span className="k">{t("finance.profit")}</span>
               <strong style={{ color: Number(data.totals.profit) >= 0 ? "var(--ok)" : "var(--danger)" }}>

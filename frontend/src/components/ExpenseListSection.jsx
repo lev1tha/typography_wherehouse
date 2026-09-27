@@ -130,9 +130,12 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, rel
 
   const kindSelect = (value, onChange) => (
     <select value={value} onChange={(e) => onChange(Number(e.target.value))}>
-      {kinds.map((k) => (
-        <option key={k.id} value={k.id}>{k.name}</option>
-      ))}
+      {/* В «Закуп материала» трату не перенести — сервер её не примет. */}
+      {kinds
+        .filter((k) => k.code !== "MATERIAL_PURCHASE" || k.id === value)
+        .map((k) => (
+          <option key={k.id} value={k.id}>{k.name}</option>
+        ))}
     </select>
   );
 

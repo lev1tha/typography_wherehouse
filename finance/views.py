@@ -18,6 +18,7 @@ from rest_framework.views import APIView
 from accounts.models import User
 from accounts.permissions import IsAdminOrAccountantRead, SeesMoney
 from audit.models import AuditLog
+from sales import reporting
 from sales.models import Receipt, TransactionItem
 from services.models import PrintingService
 from warehouse.models import InventoryLog, Material, Roll, Supply, stock_value_total
@@ -125,23 +126,6 @@ def _filter_by_month(qs, request, field):
     return qs.filter(**{f"{field}__year": year, f"{field}__month": month})
 
 
-def _prorate_factor(d_from, d_to):
-    """Доля «месяца» в выбранном периоде [d_from, d_to] включительно: за каждый
-    день берём 1/дней_в_его_месяце и суммируем. Полный календарный месяц → 1.0,
-    половина месяца → ~0.5, период из нескольких месяцев → сумма их долей. Нужна,
-    чтобы постоянные (месячные) расходы — аренда/коммуналка/зарплата — за неполный
-    период показывались пропорционально, как в дневном графике, а не целиком."""
-    factor = Decimal("0")
-    y, m = d_from.year, d_from.month
-    while (y, m) <= (d_to.year, d_to.month):
-        dim = calendar.monthrange(y, m)[1]
-        lo = max(d_from, date(y, m, 1))
-        hi = min(d_to, date(y, m, dim))
-        factor += Decimal((hi - lo).days + 1) / Decimal(dim)
-        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
-    return factor
-
-
 class ExpenseKindViewSet(viewsets.ModelViewSet):
     """Справочник видов расхода — строк финотчёта. Admin-only.
 
@@ -177,6 +161,22 @@ class ExpenseKindViewSet(viewsets.ModelViewSet):
             return Response({"archived": True}, status=status.HTTP_200_OK)
         kind.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def perform_update(self, serializer):
+        # «Входит в прибыль» и блок меняют прибыль ВСЕХ месяцев, где есть траты
+        # этого вида, — в том числе закрытых. Раньше замок это пропускал: трату
+        # в закрытый месяц не внести, а снять у аренды галочку можно, и
+        # принятая прибыль сентября вырастала на 25 000.
+        kind = serializer.instance
+        data = serializer.validated_data
+        changes_profit = (
+            ("in_profit" in data and data["in_profit"] != kind.in_profit)
+            or ("block" in data and data["block"] != kind.block)
+        )
+        if changes_profit:
+            first = kind.entries.order_by("spent_at").values_list("spent_at", flat=True).first()
+            ensure_open(first, "Менять, входит ли вид в прибыль, когда по нему есть траты закрытого периода,")
+        serializer.save()
 
     @action(detail=True, methods=["post"])
     def restore(self, request, pk=None):
@@ -371,12 +371,41 @@ class FinanceSettingsView(APIView):
         return Response(serializer.data)
 
 
-class FinanceReportView(APIView):
-    """GET /api/finance/report/ — P&L like the client's Excel: materials / fixed /
-    variable costs with totals, plus revenue, outstanding client debt and profit.
+def supplier_debts():
+    """Кому и сколько должен цех за материал — накладные и партии «в долг»."""
+    rows = []
+    for supply in Supply.objects.select_related("supplier").prefetch_related("lines"):
+        debt = supply.debt
+        if debt > 0:
+            rows.append({
+                "kind": "SUPPLY",
+                "id": supply.id,
+                "label": f"Накладная {supply.number or f'#{supply.id}'}",
+                "supplier": supply.supplier.name if supply.supplier_id else "",
+                "date": supply.received_on,
+                "debt": debt,
+            })
+    for lot in Roll.objects.filter(supplier_debt__gt=0).select_related("material"):
+        rows.append({
+            "kind": "LOT",
+            "id": lot.id,
+            "label": f"{lot.material.name} · {lot.dimensions_label}",
+            "supplier": lot.code,
+            "date": timezone.localtime(lot.received_at).date(),
+            "debt": lot.supplier_debt,
+        })
+    rows.sort(key=lambda r: (r["date"], r["kind"], r["id"]))
+    return {"total": sum((r["debt"] for r in rows), Decimal("0")), "rows": rows}
 
-    Manual inputs come from FinanceSettings; «остаток на конец» = live stock value;
-    variable costs = sum of Expense rows by category."""
+
+class FinanceReportView(APIView):
+    """GET /api/finance/report/ — отчёт как Excel заказчика: блоки «Материалы»,
+    «Постоянные», «Переменные», «Инвестиции» с подытогами, выручка, долг
+    клиентов, склад (оборот) с цепочкой на конец периода, долг поставщикам и
+    прибыль = выручка − себестоимость − расходы − списанное со склада.
+
+    Период — `date_from`/`date_to`; продажи по дате заказа, возвраты — по дате
+    возврата (`sales.reporting`)."""
 
     permission_classes = [IsAdminOrAccountantRead]
 
@@ -416,7 +445,15 @@ class FinanceReportView(APIView):
         ):
             spent_by_kind[row["kind_id"]] = row["v"]
 
-        kinds = list(ExpenseKind.objects.filter(is_archived=False))
+        # Скрытый вид остаётся в отчёте, пока в периоде по нему есть траты.
+        # «Удалить» вид с историей его прячет, а не удаляет — и если бы отчёт
+        # брал только видимые, аренда прошлых месяцев исчезала бы из прибыли
+        # одним нажатием (+25 000 к сентябрю), хотя деньги давно ушли, а
+        # график по дням продолжал бы их считать.
+        kinds = [
+            k for k in ExpenseKind.objects.all()
+            if not k.is_archived or spent_by_kind.get(k.id)
+        ]
 
         # Что система считает сама, чтобы это не пришлось вбивать руками.
         # Закуп материала складывается из приходов на склад: каждое поступление
@@ -472,13 +509,10 @@ class FinanceReportView(APIView):
         }
 
         # Себестоимость проданного: закупочная стоимость материала, ушедшего в
-        # заказы за период (FIFO по партиям, зафиксирована в момент продажи).
-        cogs = by_created(
-            TransactionItem.objects.filter(is_returned=False).exclude(
-                receipt__status=Receipt.Status.CANCELLED
-            ),
-            field="receipt__created_at",
-        ).aggregate(v=_SUM("cost_total"))["v"]
+        # заказы за период (FIFO по партиям, зафиксирована в момент продажи),
+        # минус себестоимость возвращённого В ЭТОМ периоде — возврат двигает
+        # период, когда его оформили, а не месяц заказа (`sales.reporting`).
+        cogs = reporting.cogs(d_from, d_to)
 
         # --- Блок «Материалы» ------------------------------------------------
         # Расход материала в прибыли — СЕБЕСТОИМОСТЬ ПРОДАННОГО, а не закуп
@@ -508,18 +542,18 @@ class FinanceReportView(APIView):
         }
 
         # --- Склад (оборот) --------------------------------------------------
-        # Деньги, вложенные в материал. Закуп за период — сколько переложили из
-        # кассы в склад (авто по приходам + ручные записи вида «Закуп»);
-        # стоимость склада — сколько лежит на полках СЕЙЧАС, по ценам партий
-        # (штучные без партий — по закупочной из карточки). Именно «сейчас», а
-        # не «на конец периода»: отматывать остатки назад по журналу система
-        # сознательно не берётся (см. складской лист).
-        purchase_kind_id = next(
-            (k.id for k in kinds if k.code == ExpenseKind.MATERIAL_PURCHASE), None
-        )
-        stock_purchases = auto_by_code[ExpenseKind.MATERIAL_PURCHASE] + spent_by_kind.get(
-            purchase_kind_id, Decimal("0")
-        )
+        # Деньги, вложенные в материал. Закуп за период — сколько материала
+        # ПРИШЛО на склад (по приходам, у каждого своя цена); стоимость склада —
+        # сколько лежит на полках на конец периода, по ценам партий (штучные
+        # без партий — по закупочной из карточки).
+        #
+        # Закуп в плитке — ТА ЖЕ цифра, что «пришло» в цепочке ниже. Раньше к
+        # плитке прибавлялись ручные траты вида «Закуп материала», а к цепочке
+        # нет: оплату долга поставщику, внесённую такой тратой, плитка считала
+        # вторым закупом (1 742 977 против 1 694 977 на одном экране). Новые
+        # траты этого вида не заводятся (оплата поставщику — в приходе или
+        # накладной), старые остались справочной строкой блока «Материалы».
+        stock_purchases = auto_by_code[ExpenseKind.MATERIAL_PURCHASE]
         # СПИСАНО МИМО ПРОДАЖИ — недостача по инвентаризации и брак. Это
         # деньги: на проде 19.09 правки остатка вынесли со склада материала на
         # 103 424 сома, и не было экрана, где эта сумма хоть раз появлялась.
@@ -531,6 +565,10 @@ class FinanceReportView(APIView):
         # площадных — по партиям, у штучных — по закупочной. У записей до
         # 04.09 (поля тогда не было) её нет, и выдумывать её мы не станем —
         # такие записи считаем отдельно и показываем как «без себестоимости».
+        #
+        # С 2026-09-27 эти деньги ВЫЧИТАЮТСЯ ИЗ ПРИБЫЛИ (см. `profit` ниже).
+        # Пока они стояли «справочно», брак и недостача уходили со склада, не
+        # трогая прибыль: за сентябрь так ушло 113 327 при прибыли 196 650.
         def _losses(d1, d2):
             qs = InventoryLog.objects.filter(
                 type__in=[InventoryLog.Type.ADJUSTMENT, InventoryLog.Type.WRITE_OFF],
@@ -586,14 +624,10 @@ class FinanceReportView(APIView):
         # считала штучные партии дважды: приход партии поднимает и её остаток,
         # и `quantity` материала. На проде 15.09 — 1 386 543 против 1 180 737.
         #
-        # ДВЕ РАЗНЫЕ ДАТЫ, и путать их нельзя:
-        #  · `value_now` — «сейчас», им сходится блок «Куда делись деньги
-        #    склада»: он про всю историю, и остаток в нём тоже сегодняшний;
-        #  · `value_period` — на конец ВЫБРАННОГО периода, он и стоит плиткой.
-        #    Раньше плитка показывала сегодняшний склад в любом месяце: откроешь
-        #    август, где ни продаж, ни приходов, — везде нули, а склад
-        #    1 184 614. Цифра из другого времени стояла среди месячных.
-        value_now = stock_value_total().quantize(Decimal("0.01"))
+        # Склад — на конец ВЫБРАННОГО периода: и плиткой, и концом цепочки.
+        # Раньше плитка показывала сегодняшний склад в любом месяце: откроешь
+        # август, где ни продаж, ни приходов, — везде нули, а склад 1 184 614.
+        # Цифра из другого времени стояла среди месячных.
         value_period = stock_value_total(d_to).quantize(Decimal("0.01"))
         expected = opening + all_purchases - all_cogs - all_loss
         stock = {
@@ -602,8 +636,8 @@ class FinanceReportView(APIView):
             # На какой день посчитан склад: null — на сегодня. Интерфейс по
             # этому полю и подписывает плитку, чтобы дата была видна.
             "as_of": d_to.isoformat() if (d_to and d_to < timezone.localdate()) else None,
-            # Потери периода — справочно, в прибыль не входят (это уже
-            # случилось со складом, а не трата месяца).
+            # Потери периода — брак и недостача по себестоимости. Входят в
+            # прибыль отдельной строкой (`losses` верхнего уровня).
             "losses": loss_cost,
             "losses_unknown": loss_unknown,
             "reconcile": {
@@ -636,16 +670,17 @@ class FinanceReportView(APIView):
         # валовой прибыли, и класть её ещё и сюда значило бы вычесть дважды.
         total_expenses = materials["total"] + total_fixed + operating_variable
 
-        # Выручка = ВСЕ заказы периода, кроме отменённых, за вычетом возвратов.
-        # Раньше считались только полностью оплаченные чеки плюс предоплаты по
-        # открытым: заказ, отданный в долг, в выручку не попадал вовсе — работа
-        # сделана, материал списан, а в отчёте её нет. Долг от этого не исчез,
-        # он показан отдельной строкой: сколько из выручки уже на руках
-        # (`revenue_paid`), а сколько ещё должны (`client_debt`).
+        # Выручка = ВСЕ заказы периода (по дате заказа) минус возвраты,
+        # оформленные в этом периоде (по дате возврата). Заказ, отданный в
+        # долг, — тоже выручка: работа сделана, материал списан. Сколько из неё
+        # уже на руках (`revenue_paid`) и сколько ещё должны (`client_debt`) —
+        # отдельными строками, по заказам периода и на сегодня.
+        #
+        # Возврат по заказу прошлого месяца уменьшает выручку ЭТОГО: раньше он
+        # вычитался из месяца заказа, и принятый отчёт менялся задним числом.
         live = by_created(Receipt.objects.exclude(status=Receipt.Status.CANCELLED))
-        revenue = live.aggregate(v=_SUM("total_price"))["v"] - live.aggregate(
-            v=_SUM("refunded_amount")
-        )["v"]
+        revenue = reporting.revenue(d_from, d_to)
+        refunds = reporting.refunds(d_from, d_to)
         # Сколько денег по этим заказам реально приняли — включая предоплаты.
         #
         # По каждому чеку берём НЕ БОЛЬШЕ его вклада в выручку: возврат уменьшает
@@ -708,24 +743,38 @@ class FinanceReportView(APIView):
         offcut_cost = Decimal("0")
         for item in (
             by_created(
-                TransactionItem.objects.filter(
-                    is_returned=False, used_width__isnull=False
-                ).exclude(receipt__status=Receipt.Status.CANCELLED),
+                TransactionItem.objects.filter(used_width__isnull=False),
                 field="receipt__created_at",
             )
-            .select_related("material", "roll")
+            .select_related("material", "roll", "receipt")
         ):
-            offcut_area += item.offcut_area
-            offcut_cost += item.offcut_cost
+            # Обрезок строки, возвращённой ПОЗЖЕ периода, в периоде был.
+            # `offcut_area` у возвращённой строки даёт ноль — считаем по живой.
+            if reporting.counts_at(item, d_to):
+                was = item.is_returned
+                item.is_returned = False
+                offcut_area += item.offcut_area
+                offcut_cost += item.offcut_cost
+                item.is_returned = was
         cutting_area = Decimal("0")
         cutting_pm = Decimal("0")
+
+        def is_cut(i):
+            return (
+                i.type == TransactionItem.Type.SERVICE
+                and i.service_id
+                and i.service.kind == "CUTTING"
+            )
+
+        # Заказы периода — в любом статусе: возвращённый ПОЗЖЕ заказ в своём
+        # месяце был работой. Строки берём живые на конец периода; возврат,
+        # оформленный в периоде, их уже убрал.
         cut_receipts = (
             by_created(
                 Receipt.objects.filter(
                     items__type=TransactionItem.Type.SERVICE,
                     items__service__kind="CUTTING",
-                    items__is_returned=False,
-                ).exclude(status=Receipt.Status.CANCELLED)
+                )
             )
             .distinct()
             .select_related("cashier")
@@ -735,14 +784,9 @@ class FinanceReportView(APIView):
             items = list(r.items.all())
             # Строки работы мастера. Их количество — это и есть длина реза в
             # погонных метрах, из неё же складывается сумма.
-            cut_lines = [
-                i
-                for i in items
-                if i.type == TransactionItem.Type.SERVICE
-                and not i.is_returned
-                and i.service_id
-                and i.service.kind == "CUTTING"
-            ]
+            cut_lines = [i for i in items if is_cut(i) and reporting.counts_at(i, d_to)]
+            if not cut_lines:
+                continue
             # Площадь резаного материала этого чека. Продажа по кв.м даёт её
             # прямо в количестве; продажа листами — через площадь листа; рулон —
             # длина × ширина полотна. Штучный материал (крепёж) площади не имеет
@@ -777,7 +821,7 @@ class FinanceReportView(APIView):
                 # целого сома. Через `quantity × price` отчёт расходился с
                 # чеками на копейки, и сверка «по бумаге» переставала сходиться
                 # ровно там, где заказчик её и делает.
-                rev = line.line_total
+                rev = line.sold_total
                 cut_by_machine[machine] += rev
                 pm_by_machine[machine] += line.quantity
                 cutting_total += rev
@@ -804,6 +848,17 @@ class FinanceReportView(APIView):
                 pm_by_user[r.cashier_id] += line.quantity
                 rev_by_user[r.cashier_id] += rev
             cutting_area += area
+
+        # Возвраты работы, оформленные в периоде, по заказам ПРОШЛЫХ периодов:
+        # деньги уходят из этого периода, со станка и сотрудника того заказа.
+        # Метры и площадь не трогаем — резали тогда, и работа была.
+        for line in reporting.prior_returns(d_from, d_to).select_related("service", "receipt"):
+            if not is_cut(line):
+                continue
+            machine = line.service.machine or ""
+            cut_by_machine[machine] -= line.sold_total
+            cutting_total -= line.sold_total
+            rev_by_user[line.receipt.cashier_id] -= line.sold_total
 
         # Строки — станки, по которым в периоде что-то резали. «Без станка» —
         # старые чеки, оформленные до разделения, если у их услуги станок не
@@ -898,7 +953,14 @@ class FinanceReportView(APIView):
                 "gross_margin": revenue - cogs,
                 "investments": investments,
                 "total_expenses": total_expenses,
+                # Брак и недостача периода по себестоимости — вычитаются из
+                # прибыли своей строкой. Это не «Расходы»: из кассы эти деньги
+                # не уходят, они ушли со склада. `unknown` — записи без
+                # себестоимости (до 04.09), в сумму не входят.
+                "losses": {"cost": loss_cost, "unknown": loss_unknown},
                 "revenue": revenue,
+                # Возвраты, оформленные в периоде, — уже вычтены из выручки.
+                "refunds": refunds,
                 # Из чего складывается выручка: сколько уже на руках и сколько
                 # ещё должны. Одной суммы мало — «выручка 300 000» при 200 000
                 # долга и «выручка 300 000» деньгами это разные месяцы.
@@ -908,12 +970,15 @@ class FinanceReportView(APIView):
                 # Она ВНУТРИ `client_debt`, а не рядом — иначе итог долга
                 # пришлось бы складывать глазами.
                 "anonymous_debt": anonymous_debt,
-                # Прибыль = ВАЛОВАЯ ПРИБЫЛЬ − расходы. Цифра та же, что и по
-                # прежней формуле (выручка − расходы с себестоимостью внутри):
-                # алгебраически это одно и то же. Изменилось, из чего она
-                # складывается на экране — и это была вся суть просьбы.
-                "profit": (revenue - cogs) - total_expenses,
+                # Прибыль = ВАЛОВАЯ ПРИБЫЛЬ − расходы − списано со склада (брак,
+                # недостача). Пятая редакция формулы (2026-09-27): потери
+                # раньше стояли справочно и прибыль не трогали.
+                "profit": (revenue - cogs) - total_expenses - loss_cost,
                 "cutting": cutting,
+                # Долг поставщикам НА СЕГОДНЯ — зеркало долга клиентов: сколько
+                # цех должен за материал, взятый в долг. Раньше приход «в долг»
+                # не оставлял следа, а оплату было некуда провести.
+                "suppliers": supplier_debts(),
                 "period": {
                     "from": d_from.isoformat() if d_from else None,
                     "to": d_to.isoformat() if d_to else None,
@@ -923,15 +988,15 @@ class FinanceReportView(APIView):
 
 
 class DailyReportView(APIView):
-    """GET /api/finance/daily/?year=&month= — day-by-day P&L for one calendar
-    month, so the admin can see which days were profitable and which weren't
-    (a month-end total hides that a single bad day happened).
+    """GET /api/finance/daily/?year=&month= — прибыль по дням одного месяца:
+    итог месяца прячет, что один день был провальным.
 
-    Revenue and variable expenses come straight from their dated records
-    (Receipt.created_at, Expense.spent_at). Fixed monthly costs (rent/utilities/
-    internet/other) are a single ongoing manual figure with no date of their
-    own, so they are split evenly across the days of the shown month — a day
-    only counts as profitable once its share of rent is covered too."""
+    Выручка и себестоимость — заказы дня минус возвраты, оформленные в этот
+    день (`sales.reporting`); переменные траты и списания со склада — своим
+    днём. Постоянные (аренда, зарплата, связь) вносятся записями с датой, но
+    размазываются по дням месяца поровну: день прибылен, только когда покрыл
+    и свою долю аренды. Итог под графиком — та же формула, что у плиток
+    «Финансов» за месяц."""
 
     permission_classes = [IsAdminOrAccountantRead]
 
@@ -961,21 +1026,24 @@ class DailyReportView(APIView):
         ).aggregate(v=_SUM("amount"))["v"]
         fixed_share = fixed_total / days_in_month
 
-        live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED).filter(
-            created_at__date__gte=first_day, created_at__date__lt=next_month_first
-        )
-        # Выручка дня — все заказы этого дня, кроме отменённых, минус возвраты.
-        # Та же формула, что в отчёте за месяц: раньше здесь (как и там) в
-        # выручку шли только оплаченные чеки и предоплаты, и день, отработанный
-        # в долг, выглядел убыточным.
-        revenue_by_day = defaultdict(lambda: Decimal("0"))
-        by_day = (
-            live.annotate(day=TruncDate("created_at"))
-            .values("day")
-            .annotate(v=_SUM("total_price"), refunds=_SUM("refunded_amount"))
-        )
-        for row in by_day:
-            revenue_by_day[row["day"]] += row["v"] - row["refunds"]
+        last_day = next_month_first - timedelta(days=1)
+        # Выручка и себестоимость дня — заказы этого дня минус возвраты,
+        # оформленные в этот день (`sales.reporting`). Та же формула, что в
+        # отчёте за месяц: заказ в долг — тоже выручка, а возврат по заказу
+        # прошлого месяца ложится на свой день, а не переписывает тот месяц.
+        revenue_by_day, cogs_by_day = reporting.by_day(first_day, last_day)
+
+        # СПИСАНО СО СКЛАДА (брак, недостача) — своим днём, как в отчёте за
+        # месяц: там эти деньги вычитаются из прибыли, значит и здесь.
+        losses_by_day = defaultdict(lambda: Decimal("0"))
+        for log in InventoryLog.objects.filter(
+            type__in=[InventoryLog.Type.ADJUSTMENT, InventoryLog.Type.WRITE_OFF],
+            quantity_changed__lt=0,
+            cost__isnull=False,
+            happened_at__date__gte=first_day,
+            happened_at__date__lte=last_day,
+        ).only("happened_at", "cost"):
+            losses_by_day[timezone.localtime(log.happened_at).date()] += log.cost
 
         variable_by_day = defaultdict(lambda: Decimal("0"))
         # Переменные и транспорт падают на свой день. Вложения (оборудование/
@@ -993,24 +1061,10 @@ class DailyReportView(APIView):
 
         # СЕБЕСТОИМОСТЬ ПРОДАННОГО идёт СВОЕЙ строкой, не в «переменных»
         # (решение владельца, 2026-08-27): это деньги оборота, а не расход.
-        # Прибыль дня = выручка − себестоимость − переменные − доля постоянных,
-        # то есть та же цифра, что и раньше, но разложенная как в плитках.
-        # График обязан жить по правилу плиток, иначе он не «второй взгляд»,
-        # а второй ответ на тот же вопрос.
-        cogs_by_day = defaultdict(lambda: Decimal("0"))
-        cogs_rows = (
-            TransactionItem.objects.filter(
-                is_returned=False,
-                receipt__created_at__date__gte=first_day,
-                receipt__created_at__date__lt=next_month_first,
-            )
-            .exclude(receipt__status=Receipt.Status.CANCELLED)
-            .annotate(day=TruncDate("receipt__created_at"))
-            .values("day")
-            .annotate(v=_SUM("cost_total"))
-        )
-        for row in cogs_rows:
-            cogs_by_day[row["day"]] += row["v"]
+        # Прибыль дня = выручка − себестоимость − переменные − доля постоянных
+        # − списанное, то есть та же формула, что у плиток месяца. График
+        # обязан жить по правилу плиток, иначе он не «второй взгляд», а второй
+        # ответ на тот же вопрос.
 
         rows = []
         for day_num in range(1, days_in_month + 1):
@@ -1018,6 +1072,7 @@ class DailyReportView(APIView):
             revenue = revenue_by_day.get(d, Decimal("0"))
             variable = variable_by_day.get(d, Decimal("0"))
             day_cogs = cogs_by_day.get(d, Decimal("0"))
+            day_losses = losses_by_day.get(d, Decimal("0"))
             # A day that hasn't happened yet has no profit/loss to show — it
             # would otherwise always render "in the red" for its unearned share
             # of rent before any business was even done that day.
@@ -1029,7 +1084,11 @@ class DailyReportView(APIView):
                 "cogs": day_cogs,
                 "variable": variable,
                 "fixed_share": fixed_share,
-                "profit": None if future else revenue - day_cogs - variable - fixed_share,
+                "losses": day_losses,
+                "profit": (
+                    None if future
+                    else revenue - day_cogs - variable - fixed_share - day_losses
+                ),
             })
 
         # ИТОГ под графиком — за МЕСЯЦ ЦЕЛИКОМ, той же формулой, что плитки
@@ -1042,12 +1101,14 @@ class DailyReportView(APIView):
         month_revenue = sum((r["revenue"] for r in rows), Decimal("0"))
         month_variable = sum((r["variable"] for r in rows), Decimal("0"))
         month_cogs = sum((r["cogs"] for r in rows), Decimal("0"))
+        month_losses = sum((r["losses"] for r in rows), Decimal("0"))
         totals = {
             "revenue": month_revenue,
             "cogs": month_cogs,
             "variable": month_variable,
             "fixed": fixed_total,
-            "profit": month_revenue - month_cogs - month_variable - fixed_total,
+            "losses": month_losses,
+            "profit": month_revenue - month_cogs - month_variable - fixed_total - month_losses,
         }
 
         return Response({
@@ -1104,11 +1165,31 @@ class MaterialReportView(APIView):
                 qs = qs.filter(receipt__created_at__date__lte=d_to)
             return qs
 
-        live = Receipt.objects.exclude(status=Receipt.Status.CANCELLED)
+        # Заказы периода — в ЛЮБОМ статусе, строки — живые на конец периода:
+        # возврат относится к дню, когда его оформили (`sales.reporting`), и
+        # поздний возврат месяц заказа не переписывает. Возвраты, оформленные
+        # в периоде по заказам ПРОШЛЫХ периодов, вычитаются ниже — так столбцы
+        # таблицы сходятся с выручкой и «Резкой, всего» в отчёте.
+        period_receipts = Receipt.objects.all()
         if d_from:
-            live = live.filter(created_at__date__gte=d_from)
+            period_receipts = period_receipts.filter(created_at__date__gte=d_from)
         if d_to:
-            live = live.filter(created_at__date__lte=d_to)
+            period_receipts = period_receipts.filter(created_at__date__lte=d_to)
+        prior_returns = reporting.prior_returns(d_from, d_to)
+
+        def is_cut(i):
+            return (
+                i.type == TransactionItem.Type.SERVICE
+                and i.service_id
+                and i.service.kind == "CUTTING"
+            )
+
+        def cut_material(items):
+            # Работу относим к материалу того же чека — живому, а если его
+            # вернули, то всё равно к нему: резали именно его.
+            mats = [i for i in items if i.type == TransactionItem.Type.MATERIAL and i.material_id]
+            live_mat = next((i.material for i in mats if not i.is_returned), None)
+            return live_mat or (mats[0].material if mats else None)
 
         # Сумма резки по материалу: работу «Резка» каждого чека относим к
         # материалу этого же чека (как в разбивке по категориям).
@@ -1117,35 +1198,20 @@ class MaterialReportView(APIView):
         own_material_cut = Decimal("0")
         own_material_orders = set()
         cut_receipts = (
-            live.filter(
+            period_receipts.filter(
                 items__type=TransactionItem.Type.SERVICE,
                 items__service__kind="CUTTING",
-                items__is_returned=False,
             )
             .distinct()
             .prefetch_related("items__material", "items__service")
         )
         for r in cut_receipts:
             items = list(r.items.all())
-            cut_rev = sum(
-                (
-                    i.line_total
-                    for i in items
-                    if i.type == TransactionItem.Type.SERVICE
-                    and not i.is_returned
-                    and i.service_id
-                    and i.service.kind == "CUTTING"
-                ),
-                Decimal("0"),
-            )
-            mat = next(
-                (
-                    i.material
-                    for i in items
-                    if i.type == TransactionItem.Type.MATERIAL and not i.is_returned and i.material_id
-                ),
-                None,
-            )
+            live_cuts = [i for i in items if is_cut(i) and reporting.counts_at(i, d_to)]
+            if not live_cuts:
+                continue
+            cut_rev = sum((i.sold_total for i in live_cuts), Decimal("0"))
+            mat = cut_material(items)
             # Резка СВОЕГО материала клиента: строки материала в чеке нет, и
             # отнести работу не к чему. Раньше такая сумма просто выпадала из
             # таблицы, и столбец «Резка» не сходился с плиткой «Резка, всего» в
@@ -1157,6 +1223,16 @@ class MaterialReportView(APIView):
             else:
                 own_material_cut += cut_rev
                 own_material_orders.add(r.id)
+        for line in prior_returns.select_related("service").prefetch_related(
+            "receipt__items__material"
+        ):
+            if not is_cut(line):
+                continue
+            mat = cut_material(list(line.receipt.items.all()))
+            if mat:
+                cut_by_mat[mat.id] -= line.sold_total
+            else:
+                own_material_cut -= line.sold_total
 
         # Продажи материалов: площадь, листы, метры, сумма материала, число
         # заказов. У рулона единица — погонные метры (`metres`), площадь —
@@ -1169,18 +1245,16 @@ class MaterialReportView(APIView):
                 "mat_rev": Decimal("0"), "orders": set(),
             }
         )
-        mat_items = (
+        mat_items = by_receipt_date(
             TransactionItem.objects.filter(
-                type=TransactionItem.Type.MATERIAL, is_returned=False, material__isnull=False
-            )
-            .exclude(receipt__status=Receipt.Status.CANCELLED)
-            .select_related("material", "roll")
+                type=TransactionItem.Type.MATERIAL, material__isnull=False
+            ).select_related("material", "roll", "receipt")
         )
-        mat_items = by_receipt_date(mat_items)
-        for it in mat_items:
+
+        def add_line(it, sign):
             m = it.material
             a = agg[m.id]
-            q = it.quantity
+            q = it.quantity * sign
             if it.sale_mode == TransactionItem.SaleMode.METER:
                 a["metres"] += q
                 a["area"] += q * it.roll_width
@@ -1194,8 +1268,19 @@ class MaterialReportView(APIView):
                     a["metres"] += to_units(m, q, width=it.roll_width)
                 elif m.piece_area:
                     a["sheets"] += q / m.piece_area
-            a["mat_rev"] += it.line_total   # как в чеке: округление вверх
-            a["orders"].add(it.receipt_id)
+            a["mat_rev"] += it.sold_total * sign   # как в чеке: округление вверх
+
+        for it in mat_items:
+            if not reporting.counts_at(it, d_to):
+                continue
+            add_line(it, 1)
+            agg[it.material_id]["orders"].add(it.receipt_id)
+        # Возврат материала по заказу прошлого периода — минус в периоде
+        # возврата: материал вернулся на полку тогда же.
+        for it in prior_returns.filter(
+            type=TransactionItem.Type.MATERIAL, material__isnull=False
+        ).select_related("material", "roll"):
+            add_line(it, -1)
 
         # Поступление за период: приход по складским логам (и партии рулонов,
         # и обычный приход пишут SUPPLY с положительным количеством). Заодно

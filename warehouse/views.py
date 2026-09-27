@@ -30,8 +30,25 @@ from .models import (
     Supplier,
     Supply,
 )
-from .rolls import InsufficientStock, receive_lot, stocktake_roll, write_off_roll
-from .supplies import SupplyError, move_supply_date, post_supply, supply_summary, unpost_supply
+from .rolls import (
+    InsufficientStock,
+    SupplierPaymentError,
+    has_lots,
+    pay_lot_supplier,
+    receive_lot,
+    stocktake_roll,
+    take_out,
+    write_off_roll,
+)
+from .supplies import (
+    SupplyError,
+    move_supply_date,
+    pay_supply,
+    post_supply,
+    supply_summary,
+    sync_supply_payment,
+    unpost_supply,
+)
 from .waste import WasteError, waste_summary, write_off_waste
 from .serializers import (
     build_ref_index,
@@ -64,6 +81,18 @@ def _as_moment(day):
     if not day:
         return None
     return timezone.make_aware(datetime.combine(day, datetime.min.time()))
+
+
+def _parse_day(raw):
+    """Дата оплаты из запроса: пусто — None («сегодня»), кривая или будущая —
+    False (этих денег ещё нет, а молча подставить сегодня — потерять дату)."""
+    if raw in (None, ""):
+        return None
+    try:
+        day = date.fromisoformat(str(raw))
+    except ValueError:
+        return False
+    return False if day > timezone.localdate() else day
 
 
 def _paid_account(data):
@@ -325,6 +354,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
             user=request.user,
             received_at=_as_moment(data.get("happened_on")),
             paid_account=_paid_account(data),
+            on_credit=data.get("payment") == "DEBT",
         )
         return Response(
             MaterialSerializer(roll.material, context={"request": request}).data
@@ -378,6 +408,15 @@ class MaterialViewSet(viewsets.ModelViewSet):
                     material, delta, user=request.user,
                     reason=reason, log_type=InventoryLog.Type.ADJUSTMENT,
                 )
+            material.refresh_from_db()
+        elif delta < 0 and has_lots(material):
+            # Недостача у штучного с партиями — из партий, по их ценам. Одним
+            # числом остатка партия продолжала бы числить пропавшие штуки, и
+            # следующая продажа брала бы себестоимость из партии, которой нет.
+            take_out(
+                material, -delta, user=request.user,
+                reason=reason, log_type=InventoryLog.Type.ADJUSTMENT,
+            )
             material.refresh_from_db()
         else:
             material = apply_stock_change(
@@ -462,6 +501,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
             user=request.user,
             declared_length=data.get("declared_length"),
             paid_account=_paid_account(data),
+            on_credit=data.get("payment") == "DEBT",
         )
         note = (
             f"Поступление «{roll.material.name}»: {roll.dimensions_label} = "
@@ -504,21 +544,15 @@ class MaterialViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if material.is_roll_material:
-            from .rolls import consume_area
-            consume_area(
-                material, Decimal(data["quantity"]), user=request.user,
-                reason=reason, log_type=InventoryLog.Type.WRITE_OFF,
-            )
-            material.refresh_from_db()
-        else:
-            material = apply_stock_change(
-                material,
-                -Decimal(data["quantity"]),
-                log_type=InventoryLog.Type.WRITE_OFF,
-                reason=reason,
-                user=request.user,
-            )
+        # Брак — это деньги: себестоимость уходит в журнал (`InventoryLog.cost`)
+        # и оттуда в прибыль. Штучный с партиями списывается ИЗ ПАРТИИ, а не
+        # одним числом остатка: иначе партия числила бы выброшенную штуку, а
+        # себестоимость не писалась — брак пропадал со склада мимо всех цифр.
+        take_out(
+            material, Decimal(data["quantity"]), user=request.user,
+            reason=reason, log_type=InventoryLog.Type.WRITE_OFF,
+        )
+        material.refresh_from_db()
         AuditLog.record(
             request.user,
             f"{reason} «{material.name}» — {data['quantity']}",
@@ -649,6 +683,33 @@ class RollViewSet(viewsets.ReadOnlyModelViewSet):
             f"в рулоне осталось {roll.metres_remaining} м",
         )
         return Response(RollSerializer(roll).data)
+
+
+    @action(detail=True, methods=["post"], url_path="pay-supplier", permission_classes=[IsAdmin])
+    def pay_supplier(self, request, pk=None):
+        """POST /rolls/<id>/pay-supplier/ {amount?, account, paid_on?} — заплатить
+        поставщику за партию, взятую в долг. Пустая сумма — весь долг."""
+        roll = self.get_object()
+        paid_on = _parse_day(request.data.get("paid_on"))
+        if paid_on is False:
+            return Response({"detail": "Некорректная дата оплаты."}, status=status.HTTP_400_BAD_REQUEST)
+        ensure_open(paid_on or timezone.localdate(), "Провести оплату этой датой")
+        raw = request.data.get("amount")
+        try:
+            amount = roll.supplier_debt if raw in (None, "") else Decimal(str(raw))
+            left = pay_lot_supplier(
+                roll, amount, request.data.get("account"), paid_on=paid_on, user=request.user,
+            )
+        except (SupplierPaymentError, ArithmeticError, ValueError) as e:
+            text = str(e) if isinstance(e, SupplierPaymentError) else "Некорректная сумма."
+            return Response({"detail": text}, status=status.HTTP_400_BAD_REQUEST)
+        AuditLog.record(
+            request.user,
+            f"Оплата поставщику за партию «{roll.material.name}» {roll.dimensions_label}: "
+            f"{amount} сом, долг остался {left}",
+        )
+        roll.refresh_from_db()
+        return Response(RollSerializer(roll, context={"request": request}).data)
 
 
 class RollStocktakeViewSet(viewsets.ReadOnlyModelViewSet):
@@ -876,7 +937,30 @@ class SupplyViewSet(viewsets.ModelViewSet):
             ensure_open(supply.received_on, "Перенести накладную из закрытого периода")
             ensure_open(new_day, "Перенести накладную в закрытый период")
         old_day = supply.received_on
-        response = super().update(request, *args, **kwargs)
+        old_paid, old_account = supply.paid_amount, supply.paid_account
+        pays = "paid_amount" in request.data or "paid_account" in request.data
+        if pays and not request.user.is_admin_role:
+            return Response(
+                {"detail": "Оплату поставщику проводит администратор."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if pays:
+            ensure_open(timezone.localdate(), "Провести оплату сегодняшним днём")
+        with transaction.atomic():
+            response = super().update(request, *args, **kwargs)
+            if pays and response.status_code == 200:
+                supply.refresh_from_db()
+                # Оплата, изменённая правкой, обязана дойти до кассы — иначе
+                # долг становится нулём, а деньги уходят из ящика без строки
+                # в книге (аудит 26.09: 48 000 мимо кассы).
+                try:
+                    sync_supply_payment(
+                        supply, old_amount=old_paid, old_account=old_account,
+                        user=request.user,
+                    )
+                except SupplyError as e:
+                    transaction.set_rollback(True)
+                    return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         if moved and response.status_code == 200:
             supply.refresh_from_db()
             move_supply_date(supply, new_day)
@@ -887,6 +971,30 @@ class SupplyViewSet(viewsets.ModelViewSet):
             )
             response.data = self.get_serializer(self.get_queryset().get(pk=supply.pk)).data
         return response
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
+    def pay(self, request, pk=None):
+        """POST /supplies/<id>/pay/ {amount?, account, paid_on?} — заплатить
+        поставщику по накладной. Пустая сумма — весь долг."""
+        supply = self.get_object()
+        paid_on = _parse_day(request.data.get("paid_on"))
+        if paid_on is False:
+            return Response({"detail": "Некорректная дата оплаты."}, status=status.HTTP_400_BAD_REQUEST)
+        ensure_open(paid_on or timezone.localdate(), "Провести оплату этой датой")
+        raw = request.data.get("amount")
+        try:
+            amount = supply.debt if raw in (None, "") else Decimal(str(raw))
+            left = pay_supply(
+                supply, amount, request.data.get("account"), paid_on=paid_on, user=request.user,
+            )
+        except (SupplyError, ArithmeticError, ValueError) as e:
+            text = str(e) if isinstance(e, SupplyError) else "Некорректная сумма."
+            return Response({"detail": text}, status=status.HTTP_400_BAD_REQUEST)
+        AuditLog.record(
+            request.user,
+            f"Оплата по накладной {supply.number or f'#{supply.pk}'}: {amount} сом, долг остался {left}",
+        )
+        return Response(self.get_serializer(self.get_queryset().get(pk=supply.pk)).data)
 
     def destroy(self, request, *args, **kwargs):
         if not request.user.is_admin_role:

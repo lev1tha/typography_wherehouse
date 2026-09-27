@@ -114,16 +114,25 @@ def collect_flows(materials):
             material, roll["initial_area"], width=roll["width"]
         )
 
+    # Продажа — месяцем ЗАКАЗА, возврат — месяцем ВОЗВРАТА (минусом): так же
+    # считают деньги (`sales.reporting`). Раньше возвращённая строка просто
+    # исчезала из месяца заказа, и остаток на начало следующих месяцев
+    # переписывался задним числом.
     items = (
         TransactionItem.objects.filter(
-            type=TransactionItem.Type.MATERIAL, is_returned=False, material__isnull=False
+            type=TransactionItem.Type.MATERIAL, material__isnull=False
         )
-        .exclude(receipt__status=Receipt.Status.CANCELLED)
         .select_related("material", "receipt", "roll")
     )
     for item in items:
         material = by_id.get(item.material_id)
         if not material:
+            continue
+        # Отменённый заказ без даты возврата и строка, возвращённая до
+        # появления даты, — как раньше: в продажах их нет.
+        if item.is_returned and item.returned_at is None:
+            continue
+        if not item.is_returned and item.receipt.status == Receipt.Status.CANCELLED:
             continue
         # Продажа листом целиком уже хранится в штуках — это и есть единица
         # счёта; рулон метрами — в метрах; продажа по площади хранится в кв.м
@@ -137,8 +146,11 @@ def collect_flows(materials):
             qty = to_units(material, qty, width=item.roll_width)
         else:
             qty = to_units(material, qty)
-        day = item.receipt.created_at.date()
+        day = timezone.localtime(item.receipt.created_at)
         sold[material.id][(day.year, day.month)] += qty
+        if item.is_returned and item.returned_at:
+            back = timezone.localtime(item.returned_at)
+            sold[material.id][(back.year, back.month)] -= qty
 
     return received, sold
 

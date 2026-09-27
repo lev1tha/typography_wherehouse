@@ -390,9 +390,16 @@ class ExpenseKindAPITests(APITestCase):
         ad.refresh_from_db()
         self.assertTrue(ad.is_archived)
         self.assertEqual(ExpenseEntry.objects.filter(kind=ad).count(), 1)
-        # Скрытый вид пропадает из отчёта и из списка.
+        # Скрытый вид пропадает из списка, но НЕ из отчёта за месяц, где по
+        # нему есть траты: иначе «удалить» одним нажатием стирало бы расход
+        # прошлых месяцев и поднимало их прибыль (аудит 26.09: +25 000).
         rep = self.client.get("/api/finance/report/", {"date_from": "2026-06-01", "date_to": "2026-06-30"})
-        self.assertFalse([x for x in rep.data["fixed"]["rows"] if x["name"] == "Реклама"])
+        row = next(x for x in rep.data["fixed"]["rows"] if x["name"] == "Реклама")
+        self.assertEqual(Decimal(str(row["amount"])), Decimal("500"))
+        self.assertEqual(Decimal(str(rep.data["fixed"]["total"])), Decimal("500"))
+        # В месяце без его трат скрытого вида в отчёте нет.
+        july = self.client.get("/api/finance/report/", {"date_from": "2026-07-01", "date_to": "2026-07-31"})
+        self.assertFalse([x for x in july.data["fixed"]["rows"] if x["name"] == "Реклама"])
         self.assertFalse([x for x in self.client.get(self.URL).data if x["name"] == "Реклама"])
         self.assertTrue([x for x in self.client.get(self.URL, {"archived": "1"}).data if x["name"] == "Реклама"])
 
@@ -617,8 +624,15 @@ class MaterialsBlockTests(APITestCase):
         self.assertEqual(Decimal(str(row_by_code(m, "TRANSPORT")["amount"])), Decimal("300"))
         # В итоге блока — транспорт и себестоимость проданного (продаж нет: 0).
         self.assertEqual(Decimal(str(m["total"])), Decimal("300"))
-        # Закуп ушёл в оборот — секцию «Склад».
-        self.assertEqual(Decimal(str(data["stock"]["purchases"])), Decimal("5000"))
+        # «Закуп» в секции «Склад» — только приходы на склад, та же цифра, что
+        # «пришло» в цепочке. Ручная трата вида «Закуп» остаётся справочной
+        # строкой блока: прибавленная к плитке, она задваивала закуп, когда ею
+        # гасили долг поставщику (аудит 26.09).
+        self.assertEqual(Decimal(str(data["stock"]["purchases"])), Decimal("0"))
+        self.assertEqual(
+            Decimal(str(data["stock"]["purchases"])),
+            Decimal(str(data["stock"]["reconcile"]["purchases"])),
+        )
 
     def test_block_has_no_stock_balances(self):
         """Остатков в блоке нет ни строками, ни в ответе API."""

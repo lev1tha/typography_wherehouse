@@ -676,7 +676,7 @@
     "onCredit": "On credit",
     "paymentNeeded": "Pick how it was paid — this decides whether money leaves the cash book.",
     "paymentHint": "An expense of {{sum}} som will be written to the cash book.",
-    "onCreditHint": "The material arrived, the money did not leave — nothing is written to the cash book."
+    "onCreditHint": "The material arrived, the money did not leave — the debt appears in “Finance → Owed to suppliers”; pay it from there."
   },
   "journal": {
     "title": "Journal",
@@ -777,7 +777,7 @@
     "tabReport": "Report",
     "tabPurchases": "Purchases",
     "dailyTitle": "By day",
-    "dailyHint": "Rent, utilities and internet are month-long costs, so they are split evenly across the days. A day is in the red if its revenue did not cover the cost of materials sold, that day's spending and its share of these costs.",
+    "dailyHint": "Rent, utilities and internet are month-long costs, so they are split evenly across the days. A day is in the red if its revenue did not cover the cost of materials sold, that day's spending, stock written off and its share of these costs. A refund falls on the day it was made.",
     "dailyHoverHint": "Hover a bar to see the day",
     "m1": "January",
     "m2": "February",
@@ -846,8 +846,8 @@
     "revenuePaid": "Paid",
     "revenueDebt": "On credit",
     "revenueTitle": "Revenue for the period",
-    "dailySubtitle": "Each day's profit: the day's revenue minus the cost of materials sold, that day's spending and the daily share of fixed costs. Green — the day is in the black, red — in the red.",
-    "revenueHint": "Revenue is the sum of all orders of the period by order date, except cancelled ones. Whether an order is paid does not change revenue: unpaid orders are shown separately as “on credit”.",
+    "dailySubtitle": "Each day's profit: the day's revenue minus the cost of materials sold, that day's spending, stock written off and the daily share of fixed costs. Green — the day is in the black, red — in the red.",
+    "revenueHint": "Revenue is the sum of all orders of the period by order date, minus refunds made in this period. Whether an order is paid does not change revenue: unpaid orders are shown separately as “on credit”.",
     "offcuts": "Of that, into offcuts",
     "masterShare": "Master's pay at {{pct}} % of cutting work: {{sum}}.",
     "masterShareHint": "For reference — not part of profit; salaries are entered as records.",
@@ -858,7 +858,7 @@
     "cogsRow": "Cost of materials sold",
     "cogsRowHint": "Computed automatically from lots at the moment of sale. For reference: not counted in the block total or in expenses",
     "stockTitle": "Stock (working capital)",
-    "stockHint": "How the money in material moved over the selected period: what was on hand at the start, what came in, what left through orders and write-offs, what remains at the end. This is not an expense — material reduces profit as it is sold, through “Cost of goods sold”.",
+    "stockHint": "How the money in material moved over the selected period: what was on hand at the start, what came in, what left through orders and write-offs, what remains at the end. Purchases are not an expense — material reduces profit as it is sold, through “Cost of goods sold”. Written-off stock (defects, shortages) is deducted from profit.",
     "stockPurchases": "Material purchased this period",
     "stockOpening": "On hand at the start of the period",
     "stockPurchasesAll": "Material purchases, all time",
@@ -873,7 +873,10 @@
     "debtNoClient": "of which without a client: {{value}}",
     "stockWithoutLots": "{{value}} of the stock value is stock with no intake behind it: an inventory count created it, and it is valued at the last purchase price.",
     "stockAsOf": "as of {{date}}",
-    "stockValueOn": "Material in stock as of {{date}}"
+    "stockValueOn": "Material in stock as of {{date}}",
+    "refundsInPeriod": "refunds",
+    "profitFormulaLosses": "{{gross}} − expenses {{expenses}} − written off {{losses}}",
+    "lossesShort": "Written off"
   },
   "expenses": {
     "amount": "Amount",
@@ -979,7 +982,8 @@
     "periodHint": "Spending from {{from}} to {{to}}",
     "allTimeHint": "All spending, all time",
     "notInProfitHint": "does not reduce profit",
-    "investmentHint": "Investments are not part of profit or “Expenses” — they have their own section."
+    "investmentHint": "Investments are not part of profit or “Expenses” — they have their own section.",
+    "purchaseIsAuto": "Purchases are counted automatically from stock intake. Pay suppliers in “Owed to suppliers”; record off-stock purchases as a variable expense."
   },
   "stockSheet": {
     "title": "Stock by material",
@@ -1167,7 +1171,7 @@
     "addIn": "Money in",
     "addOut": "Money out",
     "count": "Count the cash",
-    "hint": "How much money there is right now. Payments, change, refunds and expenses from Finance are written by the system — you enter only what it cannot know: cash purchases, collection, deposits.",
+    "hint": "How much money there is right now. Payments, change, refunds, expenses from Finance and supplier payments are written by the system — you enter only what it cannot know: collection, deposits, off-stock purchases.",
     "totalHint": "cash and bank together",
     "turnover": "for the period: +{{in}} · −{{out}}",
     "notePh": "what exactly for",
@@ -1197,7 +1201,7 @@
     "close": "Lock the period",
     "open_": "Unlock",
     "closedThrough": "Locked through {{date}}",
-    "hint": "After closing, the orders, payments, expenses, cash entries and deliveries of this period become read-only. The report for a closed month no longer changes by itself.",
+    "hint": "After closing, the orders, payments, expenses, cash entries and deliveries of this period become read-only. The report for a closed month no longer changes by itself. A refund on an order from a closed month is recorded today and leaves the closed month untouched.",
     "open": "Period is open — anything can be edited retroactively.",
     "closed": "Period closed through {{date}}",
     "opened": "Period opened — retroactive edits are allowed again"
@@ -1251,5 +1255,22 @@
     "system": "System",
     "light": "Light",
     "dark": "Dark"
+  },
+  "suppliersDebt": {
+    "title": "Owed to suppliers",
+    "tileSub": "as of today, for material on credit",
+    "hint": "Delivery notes and intakes taken on credit. A payment made here goes out of cash or bank on the payment date.",
+    "total": "Total owed",
+    "pay": "Pay",
+    "payTitle": "Supplier payment",
+    "owed": "Owed",
+    "tooMuch": "You cannot pay more than is owed.",
+    "account": "Paid from",
+    "chooseAccount": "— choose —",
+    "cash": "Cash",
+    "bank": "Bank",
+    "left": "Still owed",
+    "closed": "The debt will be closed",
+    "paid": "Supplier payment recorded"
   }
 }

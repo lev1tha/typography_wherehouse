@@ -133,7 +133,13 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
         {!kind.in_profit && ` · ${t("kinds.notInProfitHint")}`}
       </p>
 
-      {!readOnly && (
+      {/* Закуп материала руками не вносится: система считает его по приходам,
+          а ручная запись ложилась в «Закуп» второй раз. Оплата поставщику —
+          в «Долге поставщикам». */}
+      {!readOnly && kind.code === "MATERIAL_PURCHASE" && (
+        <p className="muted" style={{ fontSize: 13 }}>{t("kinds.purchaseIsAuto")}</p>
+      )}
+      {!readOnly && kind.code !== "MATERIAL_PURCHASE" && (
       <div className="card" style={{ margin: "10px 0 14px", background: "var(--primary-soft)" }}>
         <div className="row">
           <div className="field grow">

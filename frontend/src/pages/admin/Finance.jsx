@@ -12,6 +12,7 @@ import ExpenseKindModal from "../../components/ExpenseKindModal.jsx";
 import ExpenseListSection from "../../components/ExpenseListSection.jsx";
 import Icon from "../../components/Icon.jsx";
 import MonthPicker from "../../components/MonthPicker.jsx";
+import PaySupplierModal from "../../components/PaySupplierModal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
 // «2026-08-31» → «31.08.2026»: в подписи плитки дата должна читаться так же,
@@ -87,6 +88,8 @@ export default function Finance() {
   // Открытые диалоги: записи вида и настройка вида.
   const [openKind, setOpenKind] = useState(null);
   const [editKind, setEditKind] = useState(null); // {kind} | {block} для нового
+  // Строка «Долга поставщикам», которую оплачивают, — накладная или партия.
+  const [paying, setPaying] = useState(null);
   // Счётчик правок: по нему перезагружается график по дням, чтобы он не спорил
   // со сводкой после добавления траты.
   const [revision, setRevision] = useState(0);
@@ -376,7 +379,13 @@ export default function Finance() {
         <Stat
           label={t("finance.revenue")}
           value={som(report.revenue)}
-          sub={`${t("finance.revenuePaid")}: ${som(report.revenue_paid)} · ${t("finance.revenueDebt")}: ${som(report.client_debt)}`}
+          // Возвраты — днём возврата: по заказу прошлого месяца они уменьшают
+          // ЭТОТ месяц, и без этой строки выручка не сходилась бы с
+          // «оплачено + в долг» ровно на их сумму.
+          sub={
+            `${t("finance.revenuePaid")}: ${som(report.revenue_paid)} · ${t("finance.revenueDebt")}: ${som(report.client_debt)}` +
+            (Number(report.refunds || 0) > 0 ? ` · ${t("finance.refundsInPeriod")}: −${som(report.refunds)}` : "")
+          }
         />
         {/* Прибыль ДО расходов — между выручкой и расходами, потому что там она
             и стоит в расчёте: выручка − себестоимость = она, дальше минус
@@ -393,10 +402,22 @@ export default function Finance() {
           })}
         />
         <Stat label={t("finance.expenses")} value={som(report.total_expenses)} />
+        {/* Прибыль — из чего она сложилась, одной строкой под цифрой: брак и
+            недостача вычитаются из неё с 2026-09-27, и без подписи прибыль
+            «вдруг» становилась меньше «прибыли до расходов минус расходы». */}
         <Stat
           label={t("finance.profit")}
           value={som(report.profit)}
           color={Number(report.profit) >= 0 ? "ok" : "danger"}
+          sub={
+            Number(report.losses?.cost || 0) > 0
+              ? t("finance.profitFormulaLosses", {
+                  gross: som(report.gross_margin),
+                  expenses: som(report.total_expenses),
+                  losses: som(report.losses.cost),
+                })
+              : undefined
+          }
         />
         <Stat
           label={t("finance.clientDebt")}
@@ -425,6 +446,16 @@ export default function Finance() {
               (report.stock.as_of ? `${t("finance.stockAsOf", { date: ru(report.stock.as_of) })} · ` : "") +
               `${t("finance.stockPurchases")}: ${som(report.stock.purchases)}`
             }
+          />
+        )}
+        {/* Долг поставщикам — зеркало долга клиентов, на сегодня. Плитка только
+            когда он есть; список с кнопкой «Оплатить» — в карточке ниже. */}
+        {Number(report.suppliers?.total || 0) > 0 && (
+          <Stat
+            label={t("suppliersDebt.title")}
+            value={som(report.suppliers.total)}
+            color="danger"
+            sub={t("suppliersDebt.tileSub")}
           />
         )}
         {/* Инвестиции наверху показываем, только когда они есть: плитка с
@@ -541,6 +572,36 @@ export default function Finance() {
               )}
             </>
           )}
+        </div>
+      )}
+
+      {/* ДОЛГ ПОСТАВЩИКАМ: накладные и партии, взятые в долг. Раньше приход
+          «в долг» не оставлял следа, а накладную «оплачивали» правкой поля —
+          деньги уходили из ящика мимо кассовой книги. Оплата отсюда пишет
+          расход в кассу датой оплаты. */}
+      {(report.suppliers?.rows || []).length > 0 && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <h3>{t("suppliersDebt.title")}</h3>
+          <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("suppliersDebt.hint")}</p>
+          {report.suppliers.rows.map((r) => (
+            <div className="crow" key={`${r.kind}-${r.id}`}>
+              <span className="k">
+                {r.label}
+                <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>
+                  {ru(String(r.date))}{r.supplier ? ` · ${r.supplier}` : ""}
+                </div>
+              </span>
+              <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <strong style={{ color: "var(--danger)" }}>{som(r.debt)}</strong>
+                {!readOnly && (
+                  <button className="secondary" onClick={() => setPaying(r)}>
+                    {t("suppliersDebt.pay")}
+                  </button>
+                )}
+              </span>
+            </div>
+          ))}
+          {totalRow(t("suppliersDebt.total"), report.suppliers.total)}
         </div>
       )}
 
@@ -824,6 +885,16 @@ export default function Finance() {
           onEditKind={(k) => {
             setOpenKind(null);
             setEditKind({ kind: k });
+          }}
+        />
+      )}
+      {paying && (
+        <PaySupplierModal
+          row={paying}
+          onClose={() => setPaying(null)}
+          onPaid={() => {
+            setPaying(null);
+            reloadAll();
           }}
         />
       )}

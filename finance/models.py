@@ -231,8 +231,14 @@ class CashEntry(models.Model):
     note = models.CharField(_("примечание"), max_length=255, blank=True)
     # Чем вызвана запись, если её сделала система. Ссылка, а не текст: из кассы
     # видно, по какому заказу пришли деньги, и наоборот.
+    #
+    # SET_NULL, а не каскад: удаление заказа не стирает из книги деньги,
+    # которые по нему приходили. Раньше каскад уносил приход целиком, и
+    # удалённый оплаченный заказ на 700 молча уменьшал кассу без единой строки.
+    # Теперь удаление пишет встречную запись (`sales.sale_service.delete_receipt`),
+    # а обе строки остаются в книге с номером заказа в примечании.
     receipt = models.ForeignKey(
-        "sales.Receipt", on_delete=models.CASCADE, null=True, blank=True,
+        "sales.Receipt", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="cash_entries", verbose_name=_("чек"),
     )
     supply = models.ForeignKey(
