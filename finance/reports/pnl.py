@@ -418,9 +418,17 @@ def pnl_year(year: int) -> dict:
     add("gross", "Валовая прибыль", gross, kind="total", level=0, hint="gross")
     add("gross_pct", "Валовая маржа, %", [pct(g, r) for g, r in zip(gross, revenue)], kind="percent")
 
-    # Операционные расходы: блоки и виды, которые были хоть в одном месяце.
+    # Операционные расходы: все действующие статьи блоков «Материалы»,
+    # «Постоянные», «Переменные» — даже пустые, как строки в Excel владельца
+    # (так было и до 2026-10-07), — плюс скрытые и «Инвестиции дешевле порога»,
+    # если по ним в году что-то было.
     kind_values = defaultdict(lambda: [ZERO] * 12)
     kind_meta = {}
+    for k in ExpenseKind.objects.filter(
+        role=ExpenseKind.Role.OPEX, is_archived=False,
+        block__in=[ExpenseKind.Block.MATERIALS, ExpenseKind.Block.FIXED, ExpenseKind.Block.VARIABLE],
+    ):
+        kind_meta[k.id] = (k.block, k.name, k.position)
     for i, p in enumerate(per):
         for block in p["opex"]["blocks"]:
             for r in block["rows"]:

@@ -154,6 +154,7 @@ def cash_flow_year(year: int) -> dict:
                 slot["values"][i] = line["amount"]
     # Строки, которые владелец ждёт видеть всегда — даже пустыми.
     for key, label in (("clients", "Поступления от клиентов"),
+                       ("refunds", "Возвраты клиентам"),
                        ("suppliers", "Оплата поставщикам за материал")):
         table.setdefault((chart.OPERATING, key), {
             "label": label, "order": LINE_ORDER[key], "values": [ZERO] * 12,

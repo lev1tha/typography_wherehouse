@@ -530,3 +530,21 @@ class AccruedBasisFilterTests(PnlCase):
         by_paid = self.client.get(url, sep).data
         self.assertEqual([r["id"] for r in by_period], [entry.id])
         self.assertEqual(by_paid, [])
+
+
+class AlwaysShownRowsTests(APITestCase):
+    """Пустые строки, которые владелец привык видеть в своём листе Excel, не
+    пропадают: все действующие статьи расходов в ОПиУ и «Возвраты клиентам»
+    в ОДДС (так было и до переделки, найдено прогоном на копии прода)."""
+
+    def test_empty_expense_kinds_stay_in_the_pnl(self):
+        from finance.reports.pnl import pnl_year
+
+        keys = {r["key"] for r in pnl_year(2025)["rows"]}
+        for code in ("RENT", "TRANSPORT", "CUTTER", "VAR_OTHER", "FIXED_OTHER"):
+            self.assertIn(f"kind:{ExpenseKind.objects.get(code=code).id}", keys, code)
+        self.assertIn("block:VARIABLE", keys)
+
+    def test_refunds_row_stays_in_the_cash_flow(self):
+        keys = {r["key"] for r in cash_flow_year(2025)["rows"]}
+        self.assertTrue({"operating:clients", "operating:refunds", "operating:suppliers"} <= keys)
