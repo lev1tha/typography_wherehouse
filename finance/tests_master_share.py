@@ -20,6 +20,11 @@ class MasterShareTests(APITestCase):
     def setUp(self):
         self.admin = User.objects.create_user(username="ms_admin", password="x", role=User.Role.ADMIN)
         self.store = User.objects.create_user(username="ms_store", password="x", role=User.Role.STOREKEEPER)
+        # Налог с выручки (4 % с 10.2026) этот тест не проверяет — его держат
+        # finance/tests_reports_calc.py.
+        from finance.models import TaxRate
+
+        TaxRate.objects.all().delete()
         self.sheet = Material.objects.create(
             name="Акрил", unit=Material.Unit.SQM, is_roll_material=True,
             sheet_width=Decimal("1.22"), sheet_height=Decimal("2.44"),

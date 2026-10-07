@@ -30,6 +30,11 @@ class EdgeFinanceTests(APITestCase):
             username="fin_store", password="x", role=User.Role.STOREKEEPER
         )
         self.client.force_authenticate(self.admin)
+        # Налог с выручки (4 % с 10.2026) этот тест не проверяет — его держат
+        # finance/tests_reports_calc.py.
+        from finance.models import TaxRate
+
+        TaxRate.objects.all().delete()
 
         self.client_obj = Client.objects.create(
             type=Client.Type.PHYSICAL, full_name="Заказчик", phone="+700001"

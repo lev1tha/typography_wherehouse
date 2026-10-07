@@ -21,7 +21,9 @@ class Receipt(models.Model):
         REFUNDED = "REFUNDED", _("Возвращено")
         PARTIALLY_REFUNDED = "PARTIALLY_REFUNDED", _("Частичный возврат")
 
-    # Статусы, при которых по чеку ещё может быть долг клиента.
+    # Статусы, при которых по чеку ещё может быть долг клиента. Долг бывает
+    # только у ПРОДАЖИ — чека с датой признания выручки: неоплаченный
+    # онлайн-счёт в долгах не числится (2026-10-07, D-7).
     OWING_STATUSES = (PaymentStatus.PENDING, PaymentStatus.PARTIALLY_REFUNDED)
 
     class Status(models.TextChoices):
@@ -195,6 +197,11 @@ class Receipt(models.Model):
         if self.status == self.Status.CANCELLED:
             return Decimal("0")
         if self.payment_status not in self.OWING_STATUSES:
+            return Decimal("0")
+        # Неоплаченный онлайн-счёт — не долг (2026-10-07, D-7): клиент ещё не
+        # купил, а только получил ссылку на оплату. Оплатить его в кассе можно
+        # (`apply_payment` смотрит на `receipt_owed`), в долгах он не числится.
+        if self.revenue_recognized_at is None:
             return Decimal("0")
         owed = self.total_price - self.amount_paid - self.refunded_amount
         return owed if owed > Decimal("0") else Decimal("0")

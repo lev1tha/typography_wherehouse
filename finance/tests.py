@@ -7,7 +7,14 @@ from rest_framework.test import APITestCase
 from accounts.models import User
 from sales.models import Receipt
 
-from .models import ExpenseEntry, ExpenseKind
+from .models import ExpenseEntry, ExpenseKind, TaxRate
+
+
+def no_tax():
+    """Убрать налог с выручки (4 % с 10.2026, D-19) для тестов, которые не про
+    него: они продают сегодняшним днём и сверяют прибыль без налога. Налог
+    держат свои тесты — `tests_reports_calc`."""
+    TaxRate.objects.all().delete()
 
 
 def kind(code):
@@ -44,9 +51,10 @@ class DailyReportTests(APITestCase):
         # created_at is auto_now_add — must be back-dated via a plain UPDATE.
         # An aware midnight (not a bare date) avoids Django's naive-datetime
         # warning under USE_TZ=True and round-trips correctly through TruncDate.
-        Receipt.objects.filter(pk=r.pk).update(
-            created_at=timezone.make_aware(datetime.combine(day, datetime.min.time()))
-        )
+        # Дата признания выручки — следом (её держит `save`, а UPDATE его
+        # обходит): по ней продажа ложится в отчёты.
+        moment = timezone.make_aware(datetime.combine(day, datetime.min.time()))
+        Receipt.objects.filter(pk=r.pk).update(created_at=moment, revenue_recognized_at=moment)
         return r
 
     def _expense(self, *, day, amount, code="VAR_OTHER"):
@@ -92,8 +100,8 @@ class DailyReportTests(APITestCase):
         self._expense(day=date(2026, 6, 10), amount="50")
         self._expense(day=date(2026, 6, 11), amount="20")
         _, rows = self._rows(2026, 6)
-        self.assertEqual(Decimal(str(rows[10]["variable"])), Decimal("200"))
-        self.assertEqual(Decimal(str(rows[11]["variable"])), Decimal("20"))
+        self.assertEqual(Decimal(str(rows[10]["opex"])), Decimal("200"))
+        self.assertEqual(Decimal(str(rows[11]["opex"])), Decimal("20"))
 
     # ---- fixed-cost proration --------------------------------------------
     def test_fixed_costs_split_evenly_across_month(self):
@@ -101,11 +109,13 @@ class DailyReportTests(APITestCase):
         self._fixed(day=date(2026, 6, 1), amount="300")
         data, rows = self._rows(2026, 6)
         self.assertEqual(data["days_in_month"], 30)
+        # С 2026-10-07 расходы дня — одной колонкой `opex` (постоянные в ней
+        # по-прежнему поровну по дням месяца).
         for row in data["rows"]:
-            self.assertEqual(Decimal(str(row["fixed_share"])), Decimal("10"))
+            self.assertEqual(Decimal(str(row["opex"])), Decimal("10"))
         # No revenue anywhere -> every day is exactly its fixed share in the red.
         self.assertEqual(Decimal(str(rows[1]["profit"])), Decimal("-10"))
-        self.assertEqual(Decimal(str(data["totals"]["fixed"])), Decimal("300"))
+        self.assertEqual(Decimal(str(data["totals"]["opex"])), Decimal("300"))
 
     def test_profit_positive_and_negative_days(self):
         self._fixed(day=date(2026, 6, 1), amount="300")  # 10/day in June
@@ -124,7 +134,7 @@ class DailyReportTests(APITestCase):
         data, _ = self._rows(2026, 6)
         totals = data["totals"]
         self.assertEqual(Decimal(str(totals["revenue"])), Decimal("1000"))
-        self.assertEqual(Decimal(str(totals["fixed"])), Decimal("300"))
+        self.assertEqual(Decimal(str(totals["opex"])), Decimal("300"))
         self.assertEqual(Decimal(str(totals["profit"])), Decimal("700"))  # 1000 - 0 - 300
 
     # ---- future days ---------------------------------------------------
@@ -148,7 +158,7 @@ class DailyReportTests(APITestCase):
             else:
                 self.assertIsNotNone(row["profit"], f"day {day_num} is past/today")
         totals = data["totals"]
-        self.assertEqual(Decimal(str(totals["fixed"])), Decimal("310"))
+        self.assertEqual(Decimal(str(totals["opex"])), Decimal("310"))
         self.assertEqual(Decimal(str(totals["profit"])), Decimal("-310"))
 
     # ---- month/year boundaries -----------------------------------------
@@ -202,14 +212,14 @@ class DailyReportTests(APITestCase):
         entry("SALARY", "600", date(2026, 6, 15), name="Мастер")
         data, _ = self._rows(2026, 6)
         # (300 + 600) / 30 дней = 30 в день, независимо от даты самой выплаты.
-        self.assertEqual(Decimal(str(data["totals"]["fixed"])), Decimal("900"))
+        self.assertEqual(Decimal(str(data["totals"]["opex"])), Decimal("900"))
         for row in data["rows"]:
-            self.assertEqual(Decimal(str(row["fixed_share"])), Decimal("30"))
+            self.assertEqual(Decimal(str(row["opex"])), Decimal("30"))
 
     def test_fixed_expense_of_other_month_not_counted(self):
         self._fixed(day=date(2026, 5, 31), amount="3000")
         data, _ = self._rows(2026, 6)
-        self.assertEqual(Decimal(str(data["totals"]["fixed"])), Decimal("0"))
+        self.assertEqual(Decimal(str(data["totals"]["opex"])), Decimal("0"))
 
 
 def row_by_code(block, code):
@@ -446,6 +456,7 @@ class CogsTests(APITestCase):
 
         self.admin = User.objects.create_user(username="c_admin", password="x", role=User.Role.ADMIN)
         self.client.force_authenticate(self.admin)
+        no_tax()
 
         self.mat = Material.objects.create(
             name="Акрил", unit=Material.Unit.SQM,
@@ -552,9 +563,9 @@ class CogsTests(APITestCase):
         r = self.client.get("/api/finance/daily/", {"year": today.year, "month": today.month})
         self.assertEqual(r.status_code, 200, r.data)
         row = next(x for x in r.data["rows"] if x["day"] == today.day)
-        # Себестоимость дня — своей строкой, в «переменных» её нет.
+        # Себестоимость дня — своей строкой, в расходах её нет.
         self.assertEqual(Decimal(str(row["cogs"])), Decimal("400"))
-        self.assertEqual(Decimal(str(row["variable"])), Decimal("0"))
+        self.assertEqual(Decimal(str(row["opex"])), Decimal("0"))
 
         # Итог графика сходится с плитками месяца: тот же состав, та же прибыль.
         report = self._report()
@@ -578,7 +589,7 @@ class CogsTests(APITestCase):
         r = self.client.get("/api/finance/daily/", {"year": today.year, "month": today.month})
         row = next(x for x in r.data["rows"] if x["day"] == today.day)
         # Только трата: закуп партии из setUp — оборот, не расход дня.
-        self.assertEqual(Decimal(str(row["variable"])), Decimal("700"))
+        self.assertEqual(Decimal(str(row["opex"])), Decimal("700"))
         self.assertEqual(
             Decimal(str(r.data["totals"]["variable"])),
             Decimal(str(self._report()["total_expenses"])),
@@ -680,17 +691,27 @@ class MaterialsBlockTests(APITestCase):
         self.assertEqual(Decimal(str(m["total"])), Decimal("500"))
 
     def test_investments_shown_but_not_in_profit(self):
-        entry("EQUIPMENT", "9000", timezone.localdate())
+        """Покупка от порога (20 000, D-22) — актив: в «Расходы» не входит, в
+        прибыль идёт амортизацией со следующего месяца. Дешевле порога — сразу
+        расход месяца."""
+        entry("EQUIPMENT", "30000", timezone.localdate())
         entry("CUTTER", "100", timezone.localdate())
         data = self._report()
         # Оборудование — в СВОЁМ блоке «Инвестиции», не в переменных…
         self.assertEqual(
-            Decimal(str(row_by_code(data["investments"], "EQUIPMENT")["amount"])), Decimal("9000")
+            Decimal(str(row_by_code(data["investments"], "EQUIPMENT")["amount"])), Decimal("30000")
         )
         self.assertEqual(Decimal(str(data["variable"]["total"])), Decimal("100"))
-        self.assertEqual(Decimal(str(data["investments"]["total"])), Decimal("9000"))
+        self.assertEqual(Decimal(str(data["investments"]["total"])), Decimal("30000"))
+        self.assertEqual(Decimal(str(data["investments"]["capitalized"])), Decimal("30000"))
         # …и в «Расходы» не входит: там переменные (100), и всё.
         self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("100"))
+
+    def test_cheap_equipment_is_an_expense_of_the_month(self):
+        entry("EQUIPMENT", "9000", timezone.localdate())
+        data = self._report()
+        self.assertEqual(Decimal(str(data["investments"]["expensed"])), Decimal("9000"))
+        self.assertEqual(Decimal(str(data["total_expenses"])), Decimal("9000"))
 
     def test_profit_uses_cogs_not_purchases(self):
         data = self._report()
@@ -773,9 +794,8 @@ class MaterialStockReportTests(APITestCase):
             total_price=Decimal("400") * sheets, amount_paid=Decimal("400") * sheets,
             stock_deducted=True,
         )
-        Receipt.objects.filter(pk=receipt.pk).update(
-            created_at=timezone.make_aware(datetime.combine(day, datetime.min.time()))
-        )
+        moment = timezone.make_aware(datetime.combine(day, datetime.min.time()))
+        Receipt.objects.filter(pk=receipt.pk).update(created_at=moment, revenue_recognized_at=moment)
         TransactionItem.objects.create(
             receipt=receipt, type=TransactionItem.Type.MATERIAL, material=self.material,
             quantity=Decimal(sheets), price_per_item=Decimal("400"),
@@ -1026,6 +1046,7 @@ class ProfitBeforeExpensesTests(APITestCase):
             username="pbe_admin", password="x", role=User.Role.ADMIN
         )
         self.client.force_authenticate(self.admin)
+        no_tax()
         self.mat = Material.objects.create(
             name="Акрил", unit=Material.Unit.SQM, is_roll_material=True,
             intake_form=Material.IntakeForm.SHEET,

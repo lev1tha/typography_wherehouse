@@ -1,7 +1,9 @@
 """Деньги периода по чекам — одно правило для всех отчётов.
 
-ПРОДАЖА относится к дню ЗАКАЗА, ВОЗВРАТ — к дню, когда его оформили (решение
-владельца, 2026-09-27). Раньше возврат вычитался из месяца заказа: отчёт,
+ПРОДАЖА относится к дню ПРИЗНАНИЯ ВЫРУЧКИ (`Receipt.revenue_recognized_at`), ВОЗВРАТ —
+к дню, когда его оформили (решение владельца, 2026-09-27). У обычного заказа день
+признания — день заказа; у онлайн-заказа — день подтверждения оплаты, а
+неоплаченный онлайн-счёт в выручку не входит вовсе (2026-10-07, D-7/D-14). Раньше возврат вычитался из месяца заказа: отчёт,
 который уже посмотрели и приняли, назавтра показывал другую выручку, а по
 заказу из закрытого месяца возврат не оформлялся вовсе, пока период не
 откроешь.
@@ -35,6 +37,24 @@ from .models import Receipt, TransactionItem
 
 ZERO = Decimal("0")
 
+# Дата, по которой продажа ложится в отчёты, — у чека и у строк чека.
+SOLD_ON = "revenue_recognized_at"
+LINE_SOLD_ON = "receipt__revenue_recognized_at"
+
+
+def sold_receipts(qs=None):
+    """Чеки, ставшие продажей: не отменённые и с датой признания."""
+    qs = Receipt.objects.all() if qs is None else qs
+    return qs.exclude(status=Receipt.Status.CANCELLED).filter(revenue_recognized_at__isnull=False)
+
+
+def sold_lines(qs=None):
+    """Строки таких чеков."""
+    qs = TransactionItem.objects.all() if qs is None else qs
+    return qs.exclude(receipt__status=Receipt.Status.CANCELLED).filter(
+        receipt__revenue_recognized_at__isnull=False
+    )
+
 
 def _between(qs, field, d_from, d_to):
     if d_from:
@@ -45,12 +65,14 @@ def _between(qs, field, d_from, d_to):
 
 
 def _dated_returns():
-    return TransactionItem.objects.filter(is_returned=True, returned_at__isnull=False)
+    return TransactionItem.objects.filter(
+        is_returned=True, returned_at__isnull=False, receipt__revenue_recognized_at__isnull=False,
+    )
 
 
 def added_back(d_from=None, d_to=None):
-    """Возвращённые строки заказов периода — в периоде заказа они продажа."""
-    return _between(_dated_returns(), "receipt__created_at", d_from, d_to)
+    """Возвращённые строки продаж периода — в периоде продажи они продажа."""
+    return _between(_dated_returns(), LINE_SOLD_ON, d_from, d_to)
 
 
 def returned_lines(d_from=None, d_to=None):
@@ -66,7 +88,7 @@ def prior_returns(d_from, d_to):
     """
     if not d_from:
         return TransactionItem.objects.none()
-    return returned_lines(d_from, d_to).filter(receipt__created_at__date__lt=d_from)
+    return returned_lines(d_from, d_to).filter(**{f"{LINE_SOLD_ON}__date__lt": d_from})
 
 
 def counts_at(item, d_to) -> bool:
@@ -76,6 +98,8 @@ def counts_at(item, d_to) -> bool:
     вернули ПОЗЖЕ периода: тогда в периоде она была продажей. Нужен
     `select_related("receipt")` или загруженный чек.
     """
+    if item.receipt.revenue_recognized_at is None:
+        return False      # неоплаченный онлайн-счёт — ещё не продажа
     if item.is_returned:
         if d_to is None or item.returned_at is None:
             return False
@@ -107,12 +131,7 @@ def _SUM(field):
 
 def revenue(d_from=None, d_to=None, receipts=None) -> Decimal:
     """Выручка периода. `receipts` — сузить до части чеков (способ оплаты)."""
-    base_qs = _between(
-        (receipts if receipts is not None else Receipt.objects.all()).exclude(
-            status=Receipt.Status.CANCELLED
-        ),
-        "created_at", d_from, d_to,
-    )
+    base_qs = _between(sold_receipts(receipts), SOLD_ON, d_from, d_to)
     agg = base_qs.aggregate(t=_SUM("total_price"), r=_SUM("refunded_amount"))
     back = added_back(d_from, d_to)
     out = returned_lines(d_from, d_to)
@@ -123,12 +142,7 @@ def revenue(d_from=None, d_to=None, receipts=None) -> Decimal:
 
 
 def cogs(d_from=None, d_to=None) -> Decimal:
-    base = _between(
-        TransactionItem.objects.filter(is_returned=False).exclude(
-            receipt__status=Receipt.Status.CANCELLED
-        ),
-        "receipt__created_at", d_from, d_to,
-    )
+    base = _between(sold_lines(TransactionItem.objects.filter(is_returned=False)), LINE_SOLD_ON, d_from, d_to)
     return cost(base) + cost(added_back(d_from, d_to)) - cost(returned_lines(d_from, d_to))
 
 
@@ -140,29 +154,26 @@ def refunds(d_from=None, d_to=None) -> Decimal:
 def by_day(d_from, d_to):
     """Выручка и себестоимость по дням: ({дата: выручка}, {дата: себестоимость}).
 
-    Продажа — днём заказа, возврат — днём возврата (местное время)."""
+    Продажа — днём признания выручки, возврат — днём возврата (местное время)."""
     rev = defaultdict(lambda: ZERO)
     cst = defaultdict(lambda: ZERO)
 
     def day_of(moment):
         return timezone.localtime(moment).date()
 
-    for r in _between(
-        Receipt.objects.exclude(status=Receipt.Status.CANCELLED), "created_at", d_from, d_to
-    ).only("created_at", "total_price", "refunded_amount"):
-        rev[day_of(r.created_at)] += r.total_price - r.refunded_amount
-    for it in _between(
-        TransactionItem.objects.filter(is_returned=False).exclude(
-            receipt__status=Receipt.Status.CANCELLED
-        ),
-        "receipt__created_at", d_from, d_to,
-    ).select_related("receipt").only("cost_total", "receipt__created_at"):
-        cst[day_of(it.receipt.created_at)] += it.cost_total
-    for it in added_back(d_from, d_to).select_related("receipt").only(
-        "quantity", "price_per_item", "cost_total", "receipt__created_at"
+    for r in _between(sold_receipts(), SOLD_ON, d_from, d_to).only(
+        SOLD_ON, "total_price", "refunded_amount"
     ):
-        rev[day_of(it.receipt.created_at)] += it.sold_total
-        cst[day_of(it.receipt.created_at)] += it.cost_total
+        rev[day_of(r.revenue_recognized_at)] += r.total_price - r.refunded_amount
+    for it in _between(
+        sold_lines(TransactionItem.objects.filter(is_returned=False)), LINE_SOLD_ON, d_from, d_to,
+    ).select_related("receipt").only("cost_total", LINE_SOLD_ON):
+        cst[day_of(it.receipt.revenue_recognized_at)] += it.cost_total
+    for it in added_back(d_from, d_to).select_related("receipt").only(
+        "quantity", "price_per_item", "cost_total", LINE_SOLD_ON
+    ):
+        rev[day_of(it.receipt.revenue_recognized_at)] += it.sold_total
+        cst[day_of(it.receipt.revenue_recognized_at)] += it.cost_total
     for it in returned_lines(d_from, d_to).only(
         "quantity", "price_per_item", "cost_total", "returned_at"
     ):

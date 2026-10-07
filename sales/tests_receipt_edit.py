@@ -247,7 +247,8 @@ class ReceiptFilterTests(APITestCase):
             total_price=Decimal("100"),
             amount_paid=Decimal("100"),
         )
-        Receipt.objects.filter(pk=r.pk).update(created_at=day_to_moment(date.fromisoformat(day)))
+        moment = day_to_moment(date.fromisoformat(day))
+        Receipt.objects.filter(pk=r.pk).update(created_at=moment, revenue_recognized_at=moment)
         r.refresh_from_db()
         return r
 

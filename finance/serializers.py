@@ -13,7 +13,7 @@ from .models import (
     PeriodLock,
     TaxRate,
 )
-from .periods import add_months, month_start, months_between, parse_month
+from .periods import month_start, parse_month
 
 
 class MonthField(serializers.Field):
@@ -158,22 +158,6 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Срок службы — хотя бы один месяц.")
         return value
 
-    @staticmethod
-    def life_cap(kind, spent_at):
-        """Наибольший срок службы покупки, месяцев. None — без ограничения.
-
-        Улучшение арендованного цеха служит не дольше аренды (D-13): месяцев от
-        начала амортизации (следующий месяц после покупки) до месяца окончания
-        аренды включительно, но не меньше одного. Аренда не указана — 60.
-        """
-        if kind.code != ExpenseKind.IMPROVEMENT:
-            return None
-        lease_until = FinanceSettings.load().lease_until
-        if not lease_until:
-            return DEFAULT_USEFUL_LIFE_MONTHS
-        left = months_between(add_months(spent_at, 1), lease_until)
-        return max(1, min(left, DEFAULT_USEFUL_LIFE_MONTHS))
-
     def validate(self, attrs):
         inst = self.instance
         kind = attrs.get("kind", inst.kind if inst else None)
@@ -214,7 +198,7 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
             attrs["depreciate_until"] = None
             return attrs
 
-        cap = self.life_cap(kind, spent_at)
+        cap = ExpenseEntry.life_cap(kind, spent_at)
         default = cap or DEFAULT_USEFUL_LIFE_MONTHS
         life = attrs.get("useful_life_months")
         if life is None:

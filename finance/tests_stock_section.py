@@ -21,6 +21,11 @@ class StockSectionTests(APITestCase):
     def setUp(self):
         self.admin = User.objects.create_user(username="ss_admin", password="x", role=User.Role.ADMIN)
         self.client.force_authenticate(self.admin)
+        # Налог с выручки (4 % с 10.2026) этот тест не проверяет — его держат
+        # finance/tests_reports_calc.py.
+        from finance.models import TaxRate
+
+        TaxRate.objects.all().delete()
         self.sheet = Material.objects.create(
             name="Акрил", unit=Material.Unit.SQM, is_roll_material=True,
             price_per_sqm=Decimal("1000"),

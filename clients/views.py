@@ -103,6 +103,7 @@ class ClientViewSet(viewsets.ModelViewSet):
             When(
                 Q(receipts__payment_status__in=Receipt.OWING_STATUSES)
                 & ~Q(receipts__status=Receipt.Status.CANCELLED)
+                & Q(receipts__revenue_recognized_at__isnull=False)
                 & Q(
                     receipts__total_price__gt=F("receipts__amount_paid")
                     + F("receipts__refunded_amount")

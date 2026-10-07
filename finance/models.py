@@ -212,10 +212,44 @@ class ExpenseEntry(models.Model):
     def is_capitalized(self) -> bool:
         return self.useful_life_months is not None
 
+    @staticmethod
+    def life_cap(kind, spent_at):
+        """Наибольший срок службы покупки, месяцев. None — без ограничения.
+
+        Улучшение арендованного цеха служит не дольше аренды (D-13): месяцев от
+        начала амортизации (следующий месяц после покупки) до месяца окончания
+        аренды включительно, но не меньше одного. Аренда не указана — 60.
+        Свои виды «Инвестиций» — как оборудование, без ограничения (D-26).
+        """
+        from .periods import add_months, months_between
+
+        if kind.code != ExpenseKind.IMPROVEMENT:
+            return None
+        lease_until = FinanceSettings.load().lease_until
+        if not lease_until:
+            return DEFAULT_USEFUL_LIFE_MONTHS
+        left = months_between(add_months(spent_at, 1), lease_until)
+        return max(1, min(left, DEFAULT_USEFUL_LIFE_MONTHS))
+
+    @classmethod
+    def default_life(cls, kind, spent_at) -> int:
+        return cls.life_cap(kind, spent_at) or DEFAULT_USEFUL_LIFE_MONTHS
+
     def save(self, *args, **kwargs):
         # «За какой месяц» всегда первым числом; не указан — месяц оплаты.
-        from .periods import month_start
+        from .periods import local_day, month_start
 
+        self.spent_at = local_day(self.spent_at)
+        # Капвложение, заведённое мимо формы (скриптом, миграцией, тестом), —
+        # тем же правилом порога, что и в форме (D-22): иначе станок за
+        # 300 000 молча стал бы расходом месяца.
+        if (
+            self._state.adding
+            and self.useful_life_months is None
+            and self.kind.role == ExpenseKind.Role.CAPEX
+            and self.amount >= FinanceSettings.load().capitalization_threshold
+        ):
+            self.useful_life_months = self.default_life(self.kind, self.spent_at)
         self.period = month_start(self.period or self.spent_at)
         if self.depreciate_until:
             self.depreciate_until = month_start(self.depreciate_until)

@@ -223,6 +223,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 When(
                     Q(payment_status__in=Receipt.OWING_STATUSES)
                     & ~Q(status=Receipt.Status.CANCELLED)
+                    & Q(revenue_recognized_at__isnull=False)
                     & Q(total_price__gt=F("amount_paid") + F("refunded_amount")),
                     then=F("total_price") - F("amount_paid") - F("refunded_amount"),
                 ),
@@ -254,7 +255,9 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             .count()
         )
         debt = Decimal("0")
-        pending = active.filter(payment_status__in=Receipt.OWING_STATUSES).values_list(
+        pending = active.filter(
+            payment_status__in=Receipt.OWING_STATUSES, revenue_recognized_at__isnull=False
+        ).values_list(
             "total_price", "amount_paid", "refunded_amount"
         )
         for total, paid, refunded in pending:

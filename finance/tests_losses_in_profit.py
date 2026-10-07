@@ -49,8 +49,11 @@ class LossesInProfitTests(APITestCase):
         self.assertEqual(
             Decimal(str(after["profit"])), Decimal(str(before["profit"])) - Decimal("800")
         )
-        # «Прибыль до расходов» потери не трогают — у неё свой вопрос.
-        self.assertEqual(after["gross_margin"], before["gross_margin"])
+        # С 2026-10-07 потери — в себестоимости, до валовой прибыли (D-15):
+        # валовая прибыль падает на те же 800.
+        self.assertEqual(
+            Decimal(str(after["gross_margin"])), Decimal(str(before["gross_margin"])) - Decimal("800")
+        )
 
     def test_stock_chain_explains_the_loss_instead_of_the_gap(self):
         before = self.client.get(REPORT, self.month).data["stock"]["reconcile"]

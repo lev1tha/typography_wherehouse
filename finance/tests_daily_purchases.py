@@ -60,7 +60,7 @@ class DailyPurchasesTests(APITestCase):
         self.assertEqual(self._supply().status_code, 201)
         daily = self._daily()
         # Закупа нет НИ В ОДНОМ дне: день прихода накладной — не провальный день.
-        total_daily = sum(Decimal(str(x["variable"])) for x in daily["rows"])
+        total_daily = sum(Decimal(str(x["opex"])) for x in daily["rows"])
         self.assertEqual(total_daily, Decimal("0"))
         # Плитки согласны: расходов нет, закуп — в секции «Склад» (оборот).
         report = self._report()
@@ -84,7 +84,7 @@ class DailyPurchasesTests(APITestCase):
         )
         daily = self._daily()
         report = self._report()
-        self.assertEqual(Decimal(str(daily["totals"]["fixed"])), Decimal("30000"))
+        self.assertEqual(Decimal(str(daily["totals"]["opex"])), Decimal("30000"))
         self.assertEqual(
             Decimal(str(daily["totals"]["profit"])), Decimal(str(report["profit"]))
         )

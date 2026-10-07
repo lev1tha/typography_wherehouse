@@ -1,4 +1,5 @@
-"""ОПиУ и ОДДС по месяцам года (просьба владельца, 2026-09-27).
+"""ОПиУ и ОДДС по месяцам года (просьба владельца, 2026-09-27; с 2026-10-07 —
+`finance/reports`).
 
 Главное, что держат эти тесты: ОПиУ не «второй ответ» на вопрос о прибыли —
 каждый месяц в нём ровно та же прибыль, что «Сводка» (отчёт «Финансов») за этот
@@ -92,7 +93,7 @@ class StatementsTests(APITestCase):
             quantity_changed=Decimal("-1"), cost=Decimal("100"), happened_at=noon(self.april),
         )
         data = self.client.get(PNL, {"year": self.year}).data
-        profit = row(data, "profit")
+        profit = row(data, "net")
         for month in (3, 4, 5):
             self.assertEqual(
                 Decimal(str(profit["values"][month - 1])),
@@ -120,7 +121,8 @@ class StatementsTests(APITestCase):
         self.assertEqual(
             cogs,
             Decimal(str(row(data, "cogs_material")["values"][m]))
-            + Decimal(str(row(data, "cogs_services")["values"][m])),
+            + Decimal(str(row(data, "cogs_services")["values"][m]))
+            + Decimal(str(row(data, "losses")["values"][m])),
         )
 
     def test_year_total_is_the_sum_of_months(self):
@@ -141,11 +143,14 @@ class StatementsTests(APITestCase):
         ExpenseEntry.objects.create(kind=ad, amount=Decimal("70"), spent_at=self.march)
         ad.is_archived = True
         ad.save()
-        self._expense("EQUIPMENT", 5000, self.march)
+        # Станок от порога капвложения — актив (D-22): в месяце покупки прибыль
+        # не трогает, со следующего — амортизация 50 000 / 60 = 833,33.
+        self._expense("EQUIPMENT", 50000, self.march)
         data = self.client.get(PNL, {"year": self.year}).data
         self.assertEqual(Decimal(str(row(data, f"kind:{ad.id}")["values"][2])), Decimal("-70"))
-        self.assertEqual(Decimal(str(row(data, "investments")["values"][2])), Decimal("5000"))
-        self.assertEqual(Decimal(str(row(data, "profit")["values"][2])), Decimal("-70"))
+        self.assertEqual(Decimal(str(row(data, "capex")["values"][2])), Decimal("50000"))
+        self.assertEqual(Decimal(str(row(data, "net")["values"][2])), Decimal("-70"))
+        self.assertEqual(Decimal(str(row(data, "depreciation")["values"][3])), Decimal("-833.33"))
 
     def test_future_months_are_flagged(self):
         this_year = timezone.localdate().year
@@ -158,7 +163,7 @@ class StatementsTests(APITestCase):
     def test_cash_flow_balances_month_by_month(self):
         self._sale(self.march, qty=2, paid="1000")          # принесли 1000 за 600 — 400 сдачей
         self._expense("RENT", 250, self.march)
-        self._expense("EQUIPMENT", 300, self.april, account="BANK")
+        self._expense("EQUIPMENT", 30000, self.april, account="BANK")
         CashEntry.objects.create(account="CASH", kind="OUT", article="OWNER_OUT",
                                  amount=Decimal("100"), happened_on=self.april)
         CashEntry.objects.create(account="BANK", kind="IN", article="LOAN_IN",
@@ -180,7 +185,7 @@ class StatementsTests(APITestCase):
     def test_cash_flow_puts_each_movement_in_its_activity(self):
         self._sale(self.march, qty=2, paid="1000")
         self._expense("RENT", 250, self.march)
-        self._expense("EQUIPMENT", 300, self.april, account="BANK")
+        self._expense("EQUIPMENT", 30000, self.april, account="BANK")
         CashEntry.objects.create(account="CASH", kind="OUT", article="OWNER_OUT",
                                  amount=Decimal("100"), happened_on=self.april)
         data = self.client.get(CASH_FLOW, {"year": self.year}).data
@@ -189,7 +194,7 @@ class StatementsTests(APITestCase):
         m, a = 2, 3
         self.assertEqual(Decimal(str(row(data, "operating:clients")["values"][m])), Decimal("1000"))
         self.assertEqual(Decimal(str(row(data, f"operating:kind:{rent.id}")["values"][m])), Decimal("-250"))
-        self.assertEqual(Decimal(str(row(data, f"investing:kind:{equipment.id}")["values"][a])), Decimal("-300"))
+        self.assertEqual(Decimal(str(row(data, f"investing:kind:{equipment.id}")["values"][a])), Decimal("-30000"))
         self.assertEqual(Decimal(str(row(data, "financing:owner_out")["values"][a])), Decimal("-100"))
         # Операционный поток марта = клиенты − аренда.
         self.assertEqual(Decimal(str(row(data, "section:operating")["values"][m])), Decimal("750"))
