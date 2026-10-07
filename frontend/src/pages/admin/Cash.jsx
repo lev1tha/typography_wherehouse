@@ -16,17 +16,21 @@ import { useUI } from "../../components/UIProvider.jsx";
 // «сколько сейчас должно быть в ящике» ответить было нечем. Это то, чем в 1С
 // закрывают день, поэтому остаток стоит первым, а книга под ним.
 //
-// Оплаты, сдачу, возвраты и откаты система пишет сама; руками вносят то, чего
-// она знать не может: закуп за наличные, зарплату, инкассацию.
+// Оплаты, сдачу, возвраты, откаты и траты «Финансов» система пишет сама;
+// руками вносят то, чего она знать не может: деньги владельца, займы,
+// переводы между кассой и банком.
 
 const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
 const today = () => new Date().toLocaleDateString("sv-SE");
 
 // Статьи, которые можно вносить руками. Оплаты и сдача сюда не входят: их
 // пишет система по чекам, и ручная запись развела бы кассу с продажами.
+// Расход цеха и зарплата — тоже нет (с 2026-09-27): их вносят в «Финансах»,
+// иначе деньги уходили бы из кассы мимо ОПиУ. Деньги владельца и займы —
+// финансовая деятельность в ОДДС, им нужны свои статьи.
 const MANUAL_ARTICLES = {
-  IN: ["DEPOSIT", "TRANSFER", "OTHER"],
-  OUT: ["SUPPLY", "EXPENSE", "SALARY", "TRANSFER", "OTHER"],
+  IN: ["DEPOSIT", "LOAN_IN", "TRANSFER", "OTHER"],
+  OUT: ["OWNER_OUT", "LOAN_OUT", "SUPPLY", "TRANSFER", "OTHER"],
 };
 
 function periodParams({ year, month }) {
@@ -278,6 +282,9 @@ export default function Cash() {
               </select>
             </div>
           </div>
+          {entry.kind === "OUT" && (
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("cash.expensesViaFinance")}</p>
+          )}
           <div className="row">
             <div className="field grow" style={{ margin: 0 }}>
               <label>{t("cash.amount")}</label>

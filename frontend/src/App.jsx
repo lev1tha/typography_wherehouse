@@ -11,7 +11,6 @@ import Stock from "./pages/admin/Stock.jsx";
 import Pricing from "./pages/admin/Pricing.jsx";
 import Cash from "./pages/admin/Cash.jsx";
 import Clients from "./pages/admin/Clients.jsx";
-import ReferralRequests from "./pages/admin/ReferralRequests.jsx";
 import Receipts from "./pages/admin/Receipts.jsx";
 import Supplies from "./pages/admin/Supplies.jsx";
 import Finance from "./pages/admin/Finance.jsx";
@@ -37,7 +36,6 @@ const ADMIN_NAV = [
     items: [
       { to: "/admin/dashboard", label: "nav.dashboard", icon: "dashboard" },
       { to: "/admin/pricing", label: "nav.pricing", icon: "tag" },
-      { to: "/admin/referral-requests", label: "nav.referralRequests", icon: "shuffle" },
     ],
   },
 ];
@@ -115,7 +113,6 @@ export default function App() {
         <Route path="/admin/supply" element={<Navigate to="/admin/catalog?tab=movement" replace />} />
         <Route path="/admin/pricing" element={<Pricing />} />
         <Route path="/admin/clients" element={<Clients />} />
-        <Route path="/admin/referral-requests" element={<ReferralRequests />} />
         <Route path="/admin/receipts" element={<Receipts />} />
         <Route
           path="/admin/finance"

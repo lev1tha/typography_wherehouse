@@ -8,7 +8,7 @@ referral persists, and a referral is locked once set.
 from rest_framework.test import APITestCase
 
 from accounts.models import User
-from clients.models import Client, ReferralChangeRequest
+from clients.models import Client
 
 
 class ClientNameEditTests(APITestCase):
@@ -121,8 +121,10 @@ class ReferralAPITests(APITestCase):
         self.assertEqual(detail["referrals"]["list"][0]["display_name"], "Боб")
 
 
-class ReferralChangeRequestTests(APITestCase):
-    """Storekeeper files a change request; admin approves or rejects it."""
+class ReferralLockTests(APITestCase):
+    """Реферер зафиксирован после установки: складовщик его не меняет, админ —
+    меняет напрямую. Очередь заявок на смену убрана по просьбе владельца
+    (2026-09-27): ей почти не пользовались."""
 
     def setUp(self):
         self.store = User.objects.create_user(
@@ -137,64 +139,10 @@ class ReferralChangeRequestTests(APITestCase):
         self.carol = Client.objects.create(
             type=Client.Type.PHYSICAL, full_name="Кэрол", phone="+710003"
         )
-        # Bob already has Alice as referrer (locked).
         self.bob = Client.objects.create(
             type=Client.Type.PHYSICAL, full_name="Боб", phone="+710002",
             referred_by=self.alice,
         )
-
-    def _request_change(self, to_client):
-        return self.client.post(
-            f"/api/clients/clients/{self.bob.id}/request-referral-change/",
-            {"referred_by": to_client.id, "reason": "ошиблись"}, format="json",
-        )
-
-    def test_storekeeper_files_pending_request(self):
-        self.client.force_authenticate(self.store)
-        r = self._request_change(self.carol)
-        self.assertEqual(r.status_code, 201)
-        self.assertEqual(r.data["status"], "PENDING")
-        # Referrer not changed yet.
-        self.bob.refresh_from_db()
-        self.assertEqual(self.bob.referred_by_id, self.alice.id)
-        self.assertEqual(
-            ReferralChangeRequest.objects.filter(client=self.bob).count(), 1
-        )
-
-    def test_duplicate_pending_rejected(self):
-        self.client.force_authenticate(self.store)
-        self.assertEqual(self._request_change(self.carol).status_code, 201)
-        r = self._request_change(self.carol)
-        self.assertEqual(r.status_code, 400)
-
-    def test_admin_approve_applies_change(self):
-        self.client.force_authenticate(self.store)
-        req_id = self._request_change(self.carol).data["id"]
-        self.client.force_authenticate(self.admin)
-        r = self.client.post(f"/api/clients/referral-requests/{req_id}/approve/")
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.data["status"], "APPROVED")
-        self.bob.refresh_from_db()
-        self.assertEqual(self.bob.referred_by_id, self.carol.id)
-
-    def test_admin_reject_keeps_referrer(self):
-        self.client.force_authenticate(self.store)
-        req_id = self._request_change(self.carol).data["id"]
-        self.client.force_authenticate(self.admin)
-        r = self.client.post(
-            f"/api/clients/referral-requests/{req_id}/reject/",
-            {"reason": "нет оснований"}, format="json",
-        )
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.data["status"], "REJECTED")
-        self.bob.refresh_from_db()
-        self.assertEqual(self.bob.referred_by_id, self.alice.id)
-
-    def test_storekeeper_cannot_approve(self):
-        self.client.force_authenticate(self.store)
-        req_id = self._request_change(self.carol).data["id"]
-        r = self.client.post(f"/api/clients/referral-requests/{req_id}/approve/")
-        self.assertEqual(r.status_code, 403)
 
     def test_admin_can_change_referrer_directly(self):
         self.client.force_authenticate(self.admin)
@@ -206,14 +154,25 @@ class ReferralChangeRequestTests(APITestCase):
         self.bob.refresh_from_db()
         self.assertEqual(self.bob.referred_by_id, self.carol.id)
 
-    def test_pending_request_exposed_in_client_detail(self):
+    def test_storekeeper_cannot_change_a_locked_referrer(self):
         self.client.force_authenticate(self.store)
-        self._request_change(self.carol)
-        detail = self.client.get(f"/api/clients/clients/{self.bob.id}/").data
-        self.assertIsNotNone(detail["pending_referral_request"])
-        self.assertEqual(
-            detail["pending_referral_request"]["new_referred_by"], self.carol.id
+        r = self.client.patch(
+            f"/api/clients/clients/{self.bob.id}/",
+            {"referred_by": self.carol.id}, format="json",
         )
+        self.assertEqual(r.status_code, 400)
+        self.bob.refresh_from_db()
+        self.assertEqual(self.bob.referred_by_id, self.alice.id)
+
+    def test_change_request_queue_is_gone(self):
+        self.client.force_authenticate(self.store)
+        r = self.client.post(
+            f"/api/clients/clients/{self.bob.id}/request-referral-change/",
+            {"referred_by": self.carol.id}, format="json",
+        )
+        self.assertEqual(r.status_code, 404)
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(self.client.get("/api/clients/referral-requests/").status_code, 404)
 
 
 class ClientListFilteringTests(APITestCase):
@@ -325,6 +284,17 @@ class ClientListFilteringTests(APITestCase):
         # Без периода — вся история.
         full = self.client.get(f"{self.URL}{self.a.id}/").data
         self.assertEqual(len(full["orders"]), 2)
+
+    def test_card_for_day_without_orders_is_empty_not_404(self):
+        # Фильтр «День» в карточке: в этот день клиент ничего не брал. Раньше
+        # период сужал и карточку — она отвечала 404 «клиент не найден».
+        r = self.client.get(
+            f"{self.URL}{self.a.id}/", {"date_from": "2026-08-01", "date_to": "2026-08-01"}
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["orders"], [])
+        # Шапка карточки (заказов, долг) — по-прежнему за всё время.
+        self.assertEqual(r.data["stats"]["orders_count"], 2)
 
     def test_filter_only_debtors(self):
         rows = self.client.get(self.URL, {"has_debt": 1}).data["results"]

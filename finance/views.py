@@ -371,10 +371,29 @@ class FinanceSettingsView(APIView):
         return Response(serializer.data)
 
 
+def _supply_line_label(line) -> str:
+    """Как строка накладной была принята: «Лист 1.22×2.44 ×10», «12 м», «50 шт»."""
+    if line.roll_id:
+        return line.roll.dimensions_label
+    n = lambda v: format(Decimal(v).normalize(), "f")  # noqa: E731
+    if line.form == "SHEET" and line.width and line.height and line.sheet_count:
+        return f"Лист {n(line.width)}×{n(line.height)} ×{n(line.sheet_count)}"
+    if line.form == "ROLL" and line.length:
+        return f"{n(line.length)} м"
+    return f"{n(line.quantity)} {line.material.get_unit_display()}"
+
+
 def supplier_debts():
-    """Кому и сколько должен цех за материал — накладные и партии «в долг»."""
+    """Кому и сколько должен цех за материал — накладные и партии «в долг».
+
+    С ДОКУМЕНТОМ на каждой строке: номер, поставщик, дата, сумма, сколько
+    заплачено и что именно пришло. Одной цифрой «должны 22 550» долг не
+    доказать — владелец спрашивал «за что?», а накладной видно не было."""
     rows = []
-    for supply in Supply.objects.select_related("supplier").prefetch_related("lines"):
+    supplies = Supply.objects.select_related("supplier", "created_by").prefetch_related(
+        "lines__material", "lines__roll"
+    )
+    for supply in supplies:
         debt = supply.debt
         if debt > 0:
             rows.append({
@@ -383,16 +402,31 @@ def supplier_debts():
                 "label": f"Накладная {supply.number or f'#{supply.id}'}",
                 "supplier": supply.supplier.name if supply.supplier_id else "",
                 "date": supply.received_on,
+                "total": supply.total_cost,
+                "paid": supply.paid_amount,
                 "debt": debt,
+                "note": supply.note,
+                "created_by": supply.created_by.username if supply.created_by_id else "",
+                "lines": [
+                    {"material": line.material.name, "what": _supply_line_label(line), "cost": line.cost}
+                    for line in supply.lines.all()
+                ],
             })
-    for lot in Roll.objects.filter(supplier_debt__gt=0).select_related("material"):
+    for lot in Roll.objects.filter(supplier_debt__gt=0).select_related("material", "created_by"):
         rows.append({
             "kind": "LOT",
             "id": lot.id,
-            "label": f"{lot.material.name} · {lot.dimensions_label}",
+            "label": f"Приход «{lot.material.name}»",
             "supplier": lot.code,
             "date": timezone.localtime(lot.received_at).date(),
+            "total": lot.purchase_cost,
+            "paid": lot.purchase_cost - lot.supplier_debt,
             "debt": lot.supplier_debt,
+            "note": "",
+            "created_by": lot.created_by.username if lot.created_by_id else "",
+            "lines": [
+                {"material": lot.material.name, "what": lot.dimensions_label, "cost": lot.purchase_cost}
+            ],
         })
     rows.sort(key=lambda r: (r["date"], r["kind"], r["id"]))
     return {"total": sum((r["debt"] for r in rows), Decimal("0")), "rows": rows}
@@ -985,6 +1019,46 @@ class FinanceReportView(APIView):
                 },
             }
         )
+
+
+def _year_param(request):
+    """?year= → год; пусто или мусор — текущий."""
+    try:
+        year = int(request.query_params.get("year") or timezone.localdate().year)
+    except (TypeError, ValueError):
+        return None
+    return year if 2000 <= year <= 2100 else None
+
+
+class PnlView(APIView):
+    """GET /api/finance/pnl/?year= — ОПиУ по месяцам года (см. `statements`).
+
+    Каждый месяц — та же прибыль, что отчёт «Финансов» за этот месяц."""
+
+    permission_classes = [IsAdminOrAccountantRead]
+
+    def get(self, request):
+        from .statements import pnl_year
+
+        year = _year_param(request)
+        if year is None:
+            return Response({"detail": "Некорректный год."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(pnl_year(year))
+
+
+class CashFlowView(APIView):
+    """GET /api/finance/cash-flow/?year= — ОДДС по месяцам года, прямым
+    методом по кассовой книге (см. `statements`)."""
+
+    permission_classes = [IsAdminOrAccountantRead]
+
+    def get(self, request):
+        from .statements import cash_flow_year
+
+        year = _year_param(request)
+        if year is None:
+            return Response({"detail": "Некорректный год."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(cash_flow_year(year))
 
 
 class DailyReportView(APIView):

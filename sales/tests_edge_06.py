@@ -136,34 +136,6 @@ class EdgeClientsTests(APITestCase):
         self.assertEqual(client_debt(self.company), Decimal("0"))
         self.assertEqual(Decimal(str(self._serialize(self.company)["debt"])), Decimal("0"))
 
-    # ---------- request-referral-change endpoint ----------
-
-    def test_request_referral_change_self_referral_400(self):
-        r = self.client.post(
-            f"/api/clients/clients/{self.alice.id}/request-referral-change/",
-            {"referred_by": self.alice.id}, format="json",
-        )
-        self.assertEqual(r.status_code, 400)
-        self.assertIn("referred_by", r.data)
-
-    def test_request_referral_change_same_referrer_400(self):
-        self.lower.referred_by = self.alice
-        self.lower.save()
-        r = self.client.post(
-            f"/api/clients/clients/{self.lower.id}/request-referral-change/",
-            {"referred_by": self.alice.id}, format="json",
-        )
-        self.assertEqual(r.status_code, 400)
-        self.assertIn("referred_by", r.data)
-
-    def test_request_referral_change_unknown_referrer_400(self):
-        r = self.client.post(
-            f"/api/clients/clients/{self.lower.id}/request-referral-change/",
-            {"referred_by": 999999}, format="json",
-        )
-        self.assertEqual(r.status_code, 400)
-        self.assertIn("referred_by", r.data)
-
     # ---------- locked referral via PATCH ----------
 
     def test_storekeeper_cannot_change_locked_referral(self):

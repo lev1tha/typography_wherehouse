@@ -28,7 +28,8 @@ export default function MonthPicker({ value, onChange, label, years = 3 }) {
 
   return (
     <div className="field" style={{ margin: 0 }}>
-      <label>{label ?? t("common.month")}</label>
+      {/* label={false} — без подписи, когда рядом уже есть кнопка «Месяц». */}
+      {label !== false && <label>{label ?? t("common.month")}</label>}
       {/* nowrap и явные ширины: в .toolbar у select'ов min-width 150px, и без
           этого стрелки с годом переносились на отдельные строки. */}
       <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "nowrap" }}>

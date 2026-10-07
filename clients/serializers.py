@@ -4,7 +4,7 @@ from django.db.models import Count, Q, Sum
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Client, ReferralChangeRequest
+from .models import Client
 
 
 def client_ltv(client) -> Decimal:
@@ -102,9 +102,9 @@ class ClientSerializer(serializers.ModelSerializer):
                     break
                 seen.add(node.pk)
                 node, hops = node.referred_by, hops + 1
-        # Referral is locked once set. Storekeepers cannot change or clear it —
-        # they must file a ReferralChangeRequest for an admin to approve. Admins
-        # are the approval authority, so they may override it directly.
+        # Реферер зафиксирован после установки: складовщик его не меняет и не
+        # очищает, админ — меняет напрямую в карточке. Очередь заявок на смену
+        # убрана по просьбе владельца (2026-09-27): ей почти не пользовались.
         if self.instance and self.instance.referred_by_id is not None:
             if not value or value.pk != self.instance.referred_by_id:
                 request = self.context.get("request")
@@ -113,8 +113,7 @@ class ClientSerializer(serializers.ModelSerializer):
                 )
                 if not is_admin:
                     raise serializers.ValidationError(
-                        "Реферал зафиксирован. Изменить его может только администратор "
-                        "— подайте заявку на смену."
+                        "Реферал зафиксирован. Изменить его может только администратор."
                     )
         return value
 
@@ -160,45 +159,6 @@ class ClientSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class ReferralChangeRequestSerializer(serializers.ModelSerializer):
-    """Read-only view of a referral-change request for the moderation queue."""
-
-    client_name = serializers.CharField(source="client.display_name", read_only=True)
-    new_referred_by_name = serializers.CharField(
-        source="new_referred_by.display_name", read_only=True, default=None
-    )
-    previous_referred_by_name = serializers.CharField(
-        source="previous_referred_by.display_name", read_only=True, default=None
-    )
-    status_display = serializers.CharField(source="get_status_display", read_only=True)
-    requested_by_name = serializers.CharField(
-        source="requested_by.username", read_only=True, default=None
-    )
-    reviewed_by_name = serializers.CharField(
-        source="reviewed_by.username", read_only=True, default=None
-    )
-
-    class Meta:
-        model = ReferralChangeRequest
-        fields = [
-            "id",
-            "client",
-            "client_name",
-            "new_referred_by",
-            "new_referred_by_name",
-            "previous_referred_by",
-            "previous_referred_by_name",
-            "status",
-            "status_display",
-            "requested_by",
-            "requested_by_name",
-            "reviewed_by_name",
-            "reviewed_at",
-            "reason",
-            "created_at",
-        ]
-
-
 class ClientDetailSerializer(ClientSerializer):
     """Includes purchase statistics / LTV and the referral chain for CRM."""
 
@@ -206,7 +166,6 @@ class ClientDetailSerializer(ClientSerializer):
     referrals = serializers.SerializerMethodField()
     orders = serializers.SerializerMethodField()
     payments = serializers.SerializerMethodField()
-    pending_referral_request = serializers.SerializerMethodField()
 
     class Meta(ClientSerializer.Meta):
         fields = ClientSerializer.Meta.fields + [
@@ -214,7 +173,6 @@ class ClientDetailSerializer(ClientSerializer):
             "referrals",
             "orders",
             "payments",
-            "pending_referral_request",
         ]
 
     def get_payments(self, obj):
@@ -285,6 +243,9 @@ class ClientDetailSerializer(ClientSerializer):
                 "order_number": r.order_number,
                 "title": r.title,
                 "created_at": r.created_at,
+                # Нужен итогу за период в карточке: отменённый заказ не
+                # считается в «заказов», как и в списке клиентов.
+                "status": r.status,
                 "total_price": r.total_price,
                 # Сколько по заказу реально приняли. Нужно акту сверки: платёж,
                 # принятый в момент продажи, записи `sales.Payment` не создаёт —
@@ -299,12 +260,6 @@ class ClientDetailSerializer(ClientSerializer):
                 "items": items,
             })
         return rows
-
-    def get_pending_referral_request(self, obj):
-        req = obj.referral_requests.filter(
-            status=ReferralChangeRequest.Status.PENDING
-        ).first()
-        return ReferralChangeRequestSerializer(req).data if req else None
 
     def get_stats(self, obj):
         from sales.models import Receipt

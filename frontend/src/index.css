@@ -2344,3 +2344,102 @@ label {
     z-index: 55;
   }
 }
+
+/* ОПиУ и ОДДС: строки — статьи, колонки — месяцы года. Первая колонка
+   прилипает при прокрутке вбок, иначе в декабре уже не видно, какая это
+   строка. Вид строки — по её роли в отчёте (итог, подытог, статья, %). */
+.stmt-table th,
+.stmt-table td {
+  min-width: 84px;
+}
+.stmt-table .stmt-label {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+  min-width: 240px;
+  max-width: 320px;
+  white-space: normal;
+  text-align: left;
+}
+.stmt-table thead th {
+  background: var(--canvas);
+}
+.stmt-table thead th.stmt-label {
+  background: var(--canvas);
+  z-index: 2;
+}
+.stmt-table .stmt-total-col {
+  background: var(--primary-soft);
+  font-weight: 600;
+}
+.stmt-table .stmt-future {
+  color: var(--ink-faint);
+}
+.stmt-table td.stmt-neg {
+  color: var(--danger);
+}
+.stmt-table tr.stmt-total td,
+.stmt-table tr.stmt-subtotal td,
+.stmt-table tr.stmt-balance td {
+  font-weight: 600;
+}
+.stmt-table tr.stmt-total td,
+.stmt-table tr.stmt-balance td {
+  border-top: 1px solid var(--hairline);
+}
+.stmt-table tr.stmt-group td {
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+.stmt-table tr.stmt-grand td {
+  font-weight: 700;
+  background: var(--primary-soft);
+  color: var(--accent-strong);
+}
+/* Прилипшая клетка должна быть непрозрачной, иначе под ней просвечивают
+   уехавшие колонки: полупрозрачный оттенок кладём поверх фона карточки. */
+.stmt-table tr.stmt-grand td.stmt-label {
+  background: linear-gradient(var(--primary-soft), var(--primary-soft)), var(--surface);
+}
+.stmt-table tr.stmt-percent td,
+.stmt-table tr.stmt-note td {
+  color: var(--ink-muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* «Материалы» в «Финансах»: маржа и склад — две колонки рядом (у них общая
+   строка — себестоимость проданного), на узком экране одна под другой. */
+.mat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 32px;
+}
+@media (max-width: 900px) {
+  .mat-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.mat-sub {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin: 8px 0 2px;
+}
+.crow.mat-result {
+  border-top: 1px solid var(--hairline);
+  margin-top: 4px;
+  padding-top: 8px;
+}
+/* Сумма в строке не переносится: длинная подсказка слева сжимала колонку, и
+   «− 47 сом» разваливалось на две строки. */
+.mat-grid .crow > span:last-child,
+.mat-grid .crow > strong:last-child {
+  white-space: nowrap;
+}
+button.ghost.kind-row > span:last-child {
+  white-space: nowrap;
+}

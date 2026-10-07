@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     CashEntryViewSet,
+    CashFlowView,
     PeriodLockView,
     CompanyProfileView,
     DailyReportView,
@@ -12,6 +13,7 @@ from .views import (
     FinanceSettingsView,
     FinanceUnlockView,
     MaterialReportView,
+    PnlView,
 )
 
 router = DefaultRouter()
@@ -23,6 +25,8 @@ urlpatterns = [
     path("report/", FinanceReportView.as_view(), name="finance-report"),
     path("material-report/", MaterialReportView.as_view(), name="finance-material-report"),
     path("daily/", DailyReportView.as_view(), name="finance-daily"),
+    path("pnl/", PnlView.as_view(), name="finance-pnl"),
+    path("cash-flow/", CashFlowView.as_view(), name="finance-cash-flow"),
     path("settings/", FinanceSettingsView.as_view(), name="finance-settings"),
     path("company/", CompanyProfileView.as_view(), name="finance-company"),
     path("period/", PeriodLockView.as_view(), name="finance-period"),

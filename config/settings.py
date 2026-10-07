@@ -14,7 +14,7 @@ env = environ.Env(
     DEBUG=(bool, True),
     SECRET_KEY=(str, "django-insecure-change-me-in-production"),
     ALLOWED_HOSTS=(list, ["*"]),
-    CORS_ALLOWED_ORIGINS=(list, ["http://localhost:5173", "http://127.0.0.1:5173"]),
+    CORS_ALLOWED_ORIGINS=(list, ["http://localhost:5710", "http://127.0.0.1:5710"]),
     # Прод: домены, которым доверяем CSRF-проверку (со схемой), напр.
     # https://chpucenter.com,https://www.chpucenter.com
     CSRF_TRUSTED_ORIGINS=(list, []),
@@ -35,7 +35,7 @@ env = environ.Env(
     PAYMENT_API_KEY=(str, ""),
     PAYMENT_API_SECRET=(str, ""),
     PAYMENT_WEBHOOK_SECRET=(str, ""),
-    SITE_BASE_URL=(str, "http://localhost:8000"),
+    SITE_BASE_URL=(str, "http://localhost:8710"),
     # Separate password gating the admin Finance & analytics screens.
     FINANCE_PASSWORD=(str, "finance123"),
 )

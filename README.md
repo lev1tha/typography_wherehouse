@@ -137,11 +137,14 @@ python manage.py runserver
 ```bash
 cd frontend
 npm install
-npm run dev          # http://localhost:5173 (проксирует /api на Django :8000)
+npm run dev          # http://localhost:5710 (проксирует /api на Django :8710)
 ```
 
-Сначала поднимите Django на `127.0.0.1:8000` — Vite проксирует туда `/api` и
-`/media`. Вход: `admin / admin12345` (Админ) или `storekeeper / store12345`.
+Сначала поднимите Django (`python manage.py runserver` — сам встаёт на
+`127.0.0.1:8710`) — Vite проксирует туда `/api` и `/media`. Порты у проекта
+свои, не 8000/5173: рядом работают другие проекты. Заняты и эти —
+`BACKEND_PORT=… python manage.py runserver` и `BACKEND_PORT=… npm run dev`
+(фронт найдёт бэкенд по той же переменной), фронт — `FRONTEND_PORT=…`. Вход: `admin / admin12345` (Админ) или `storekeeper / store12345`.
 
 **Реализовано:** JWT-вход с роль-маршрутизацией (Админ / Складовщик / Клиент),
 переключатель языков (RU/KY/EN, i18next), адаптивный layout (бургер-меню,

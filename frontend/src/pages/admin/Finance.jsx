@@ -7,12 +7,14 @@ import api from "../../api/api.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import DailyProfitChart from "../../components/DailyProfitChart.jsx";
 import DataTable from "../../components/DataTable.jsx";
+import FinanceStatement from "../../components/FinanceStatement.jsx";
 import ExpenseKindFormModal from "../../components/ExpenseKindFormModal.jsx";
 import ExpenseKindModal from "../../components/ExpenseKindModal.jsx";
 import ExpenseListSection from "../../components/ExpenseListSection.jsx";
 import Icon from "../../components/Icon.jsx";
 import MonthPicker from "../../components/MonthPicker.jsx";
 import PaySupplierModal from "../../components/PaySupplierModal.jsx";
+import SupplierDebtModal from "../../components/SupplierDebtModal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 
 // «2026-08-31» → «31.08.2026»: в подписи плитки дата должна читаться так же,
@@ -79,6 +81,23 @@ export default function Finance() {
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // Вкладка раздела: сводка за месяц (как было), ОПиУ и ОДДС по месяцам года.
+  // Помним выбор между заходами — владелец обычно смотрит одно и то же.
+  const [tab, setTabState] = useState(() => {
+    try {
+      return localStorage.getItem("financeTab") || "summary";
+    } catch {
+      return "summary";
+    }
+  });
+  function setTab(value) {
+    setTabState(value);
+    try {
+      localStorage.setItem("financeTab", value);
+    } catch {
+      /* приватный режим — просто не запоминаем */
+    }
+  }
   const [report, setReport] = useState(null);
   const reportFor = useRef("");   // какой месяц ждём — чтобы не осел ответ устаревшего запроса
   const [settings, setSettings] = useState(null);
@@ -88,7 +107,8 @@ export default function Finance() {
   // Открытые диалоги: записи вида и настройка вида.
   const [openKind, setOpenKind] = useState(null);
   const [editKind, setEditKind] = useState(null); // {kind} | {block} для нового
-  // Строка «Долга поставщикам», которую оплачивают, — накладная или партия.
+  // «Долг поставщикам»: открыт ли список документов и какую строку оплачивают.
+  const [debtsOpen, setDebtsOpen] = useState(false);
   const [paying, setPaying] = useState(null);
   // Счётчик правок: по нему перезагружается график по дням, чтобы он не спорил
   // со сводкой после добавления траты.
@@ -352,6 +372,7 @@ export default function Finance() {
     <>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end", gap: 12 }}>
         <h1 style={{ margin: 0 }}>{t("nav.finance")}</h1>
+        {tab === "summary" && (
         <div className="row" style={{ gap: 10, alignItems: "flex-end", margin: 0 }}>
           <MonthPicker value={period} onChange={setPeriod} />
           <button
@@ -367,7 +388,26 @@ export default function Finance() {
             {period.month ? t("finance.allTime") : t("finance.thisMonth")}
           </button>
         </div>
+        )}
       </div>
+
+      <div className="tabs" style={{ marginTop: 12, marginBottom: 12 }}>
+        {[
+          ["summary", t("statements.tabSummary")],
+          ["pnl", t("statements.tabPnl")],
+          ["cash", t("statements.tabCashFlow")],
+        ].map(([key, label]) => (
+          <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "pnl" && <FinanceStatement kind="pnl" />}
+      {tab === "cash" && <FinanceStatement kind="cash-flow" />}
+
+      {tab === "summary" && (
+      <>
       <p className="muted" style={{ marginTop: 4 }}>
         {period.month ? t("finance.periodHint") : t("finance.allTimeActive")}
       </p>
@@ -448,16 +488,6 @@ export default function Finance() {
             }
           />
         )}
-        {/* Долг поставщикам — зеркало долга клиентов, на сегодня. Плитка только
-            когда он есть; список с кнопкой «Оплатить» — в карточке ниже. */}
-        {Number(report.suppliers?.total || 0) > 0 && (
-          <Stat
-            label={t("suppliersDebt.title")}
-            value={som(report.suppliers.total)}
-            color="danger"
-            sub={t("suppliersDebt.tileSub")}
-          />
-        )}
         {/* Инвестиции наверху показываем, только когда они есть: плитка с
             вечным нулём — шум. Свой блок ниже виден всегда. */}
         {Number(report.investments?.total) > 0 && (
@@ -471,137 +501,126 @@ export default function Finance() {
 
       <DailyProfitChart year={period.year} month={period.month} reloadKey={revision} />
 
-      {/* Три блока с подытогами — структура как в Excel заказчика. Порядок
-          строк «Материалов» тоже его: начало · закуп · конец · транспорт ·
-          долг, поэтому известные виды расставлены поимённо, а свои добавленные
-          идут следом. */}
+      {/* МАТЕРИАЛЫ — одна карточка вместо трёх (просьба владельца 27.09):
+          раньше «Материалы», «Склад (оборот)» и «Себестоимость и маржа» стояли
+          врозь, и себестоимость проданного повторялась трижды. Себестоимость —
+          мост между двумя вопросами, поэтому они стоят рядом: слева «сколько
+          осталось от выручки после материала», справа «куда делся материал
+          на складе». Ниже — то, что по материалу уходит из кассы, и долги. */}
       {report.materials && (
         <div className="card" style={{ marginTop: 16 }}>
           {blockHead(t("finance.blockMaterials"))}
-          {/* Расход материала в прибыли — СЕБЕСТОИМОСТЬ ПРОДАННОГО (решение
-              заказчика, 2026-08-24), а не закуп: деньги, переложенные в склад,
-              месяц убыточным не делают. Строка закупа осталась справочной —
-              видна здесь, а считается в карточке «Склад (оборот)» ниже. */}
-          <div className="crow">
+          <div className="mat-grid">
+            <div>
+              <div className="mat-sub">{t("finance.matMarginTitle")}</div>
+              <div className="crow">
+                <span className="k">{t("finance.revenueAll")}</span>
+                <span>{som(report.revenue)}</span>
+              </div>
+              {/* Расход материала в прибыли — СЕБЕСТОИМОСТЬ ПРОДАННОГО (решение
+                  заказчика, 2026-08-24), а не закуп: деньги, переложенные в
+                  склад, месяц убыточным не делают. */}
+              <div className="crow">
+                <span className="k">
+                  {t("finance.cogs")}
+                  <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{t("finance.cogsRowHint")}</div>
+                </span>
+                <span style={{ color: "var(--danger)" }}>− {som(report.cogs)}</span>
+              </div>
+              <div className="crow mat-result">
+                <strong>{t("finance.grossMargin")}</strong>
+                <strong style={{ color: Number(report.gross_margin) >= 0 ? "var(--ok)" : "var(--danger)" }}>
+                  {som(report.gross_margin)}
+                </strong>
+              </div>
+              {/* Обрезки — часть этой же себестоимости, которая до клиента не
+                  дошла: «сколько я подарил». Только когда ширину изделия
+                  называли, иначе «0» означал бы «отхода нет». */}
+              {Number(report.offcuts?.area) > 0 && (
+                <div className="crow">
+                  <span className="k">{t("finance.offcuts")}</span>
+                  <span>
+                    {q2(report.offcuts.area)} {t("finance.sqmShort")}{" "}
+                    <span className="muted">· {som(report.offcuts.cost)}</span>
+                  </span>
+                </div>
+              )}
+            </div>
+            {report.stock?.reconcile && (
+              <div>
+                {/* ЦЕПОЧКА склада: было → пришло → продали → лежит. Брак и
+                    недостача строкой не стоят (просьба владельца 27.09) — это
+                    расход, он в ОПиУ; разницу объясняем словами ниже. */}
+                <div className="mat-sub">{t("finance.matStockTitle")}</div>
+                <div className="crow">
+                  <span className="k">{t("finance.stockOpening")}</span>
+                  <span>{som(report.stock.reconcile.opening)}</span>
+                </div>
+                <div className="crow">
+                  <span className="k">{t("finance.stockPurchases")}</span>
+                  <span>+ {som(report.stock.reconcile.purchases)}</span>
+                </div>
+                <div className="crow">
+                  <span className="k">{t("finance.stockSoldAtCost")}</span>
+                  <span style={{ color: "var(--danger)" }}>− {som(report.stock.reconcile.cogs)}</span>
+                </div>
+                <div className="crow mat-result">
+                  <strong>
+                    {report.stock.as_of
+                      ? t("finance.stockValueOn", { date: ru(report.stock.as_of) })
+                      : t("finance.stockValueNow")}
+                  </strong>
+                  <strong>{som(report.stock.reconcile.value_now)}</strong>
+                </div>
+                <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
+                  {t("finance.stockDiffHint")}
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="mat-sub" style={{ marginTop: 16 }}>{t("finance.matCostsTitle")}</div>
+          {/* Старые ручные траты «Закуп материала» (до запрета 27.09) — чтобы
+              до них можно было дойти; новых не бывает, закуп считается сам. */}
+          {Number(materialRows.find((r) => r.code === "MATERIAL_PURCHASE")?.manual_amount || 0) > 0 &&
+            materialRow("MATERIAL_PURCHASE")}
+          {materialRow("TRANSPORT")}
+          {otherMaterialRows.map(kindRow)}
+          {/* Ручной «Долг материала» — только если по нему что-то вносили:
+              долг поставщикам считается сам, строкой ниже. */}
+          {Number(materialRows.find((r) => r.code === "MATERIAL_DEBT")?.amount || 0) > 0 &&
+            materialRow("MATERIAL_DEBT")}
+          {/* ДОЛГ ПОСТАВЩИКАМ — на сегодня, а не за месяц: долг либо висит,
+              либо нет. По нажатию — сами документы (номер, поставщик, дата,
+              что пришло, сколько заплачено) и «Оплатить»: одной суммой долг
+              было не доказать. */}
+          <button
+            className="ghost kind-row"
+            onClick={() => setDebtsOpen(true)}
+            disabled={!(report.suppliers?.rows || []).length}
+            title={t("suppliersDebt.openHint")}
+          >
             <span className="k">
-              {t("finance.cogsRow")}
+              {t("suppliersDebt.title")}
+              <span className="muted" style={{ fontSize: 12 }}> · {t("suppliersDebt.asOfToday")}</span>
               <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>
-                {t("finance.cogsRowHint")}
+                {(report.suppliers?.rows || []).length
+                  ? t("suppliersDebt.docsCount", { n: report.suppliers.rows.length })
+                  : t("suppliersDebt.none")}
               </div>
             </span>
-            <span>{som(report.materials.cogs)}</span>
-          </div>
-          {materialRow("MATERIAL_PURCHASE")}
-          {materialRow("TRANSPORT")}
-          {materialRow("MATERIAL_DEBT")}
-          {otherMaterialRows.map(kindRow)}
+            <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <span style={Number(report.suppliers?.total || 0) > 0 ? { color: "var(--danger)" } : undefined}>
+                {som(report.suppliers?.total || 0)}
+              </span>
+              <Icon name="chevron-right" size={14} />
+            </span>
+          </button>
           {addKindButton("MATERIALS")}
           <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
             {t("finance.materialsHint")}
           </p>
           {totalRow(t("finance.totalMaterials"), report.materials.total)}
-        </div>
-      )}
-
-      {/* Склад (оборот): деньги, вложенные в материал. Не расход — материал
-          лежит на полке и уменьшает прибыль по мере продажи. Именно из-за
-          того, что закуп считался расходом, первый ввод каталога показывал
-          «−500 000 прибыли», хотя не продано ещё ничего. */}
-      {report.stock && (
-        <div className="card" style={{ marginTop: 16 }}>
-          <h3>{t("finance.stockTitle")}</h3>
-          <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.stockHint")}</p>
-          {report.stock.reconcile && (
-            <>
-              {/* ЦЕПОЧКА, а не набор цифр: было → пришло → продали → списали →
-                  лежит. Плитка называется «оборот», а показывает остаток, и
-                  заказчик ждал в ней «начало + приходы» (1 544 280), не находя
-                  вычета проданного. Теперь вычет стоит строкой, и остаток
-                  выводится на глазах. */}
-              <div className="crow">
-                <span className="k">{t("finance.stockOpening")}</span>
-                <span>{som(report.stock.reconcile.opening)}</span>
-              </div>
-              <div className="crow">
-                <span className="k">{t("finance.stockPurchases")}</span>
-                <span>+ {som(report.stock.reconcile.purchases)}</span>
-              </div>
-              <div className="crow">
-                <span className="k">{t("finance.cogs")}</span>
-                <span style={{ color: "var(--danger)" }}>− {som(report.stock.reconcile.cogs)}</span>
-              </div>
-              <div className="crow">
-                <span className="k">{t("finance.stockLosses")}</span>
-                <span style={{ color: "var(--danger)" }}>− {som(report.stock.reconcile.losses)}</span>
-              </div>
-              <div className="crow">
-                <span className="k">{t("finance.stockExpected")}</span>
-                <span>{som(report.stock.reconcile.expected)}</span>
-              </div>
-              <div className="crow">
-                <span className="k">
-                  {report.stock.as_of
-                    ? t("finance.stockValueOn", { date: ru(report.stock.as_of) })
-                    : t("finance.stockValueNow")}
-                </span>
-                <strong>{som(report.stock.reconcile.value_now)}</strong>
-              </div>
-              {/* Необъяснённый остаток. Прятать его в разнице двух строк — это
-                  и есть «статистика неправильная»: цифра должна стоять на
-                  экране и называться своим именем. */}
-              <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6, paddingTop: 8 }}>
-                <strong>{t("finance.stockGap")}</strong>
-                <strong style={{ color: Number(report.stock.reconcile.gap) ? "var(--danger)" : undefined }}>
-                  {som(report.stock.reconcile.gap)}
-                </strong>
-              </div>
-              {Number(report.stock.reconcile.losses_unknown || 0) > 0 && (
-                <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-                  {t("finance.stockLossesUnknown", { n: report.stock.reconcile.losses_unknown })}
-                </p>
-              )}
-              {/* Вторая половина ответа «почему не сходится»: остаток, который
-                  завела инвентаризация, прихода под собой не имеет и тянет
-                  разрыв в минус. */}
-              {Number(report.stock.reconcile.stock_without_lots || 0) > 0 && (
-                <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                  {t("finance.stockWithoutLots", {
-                    value: som(report.stock.reconcile.stock_without_lots),
-                  })}
-                </p>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      {/* ДОЛГ ПОСТАВЩИКАМ: накладные и партии, взятые в долг. Раньше приход
-          «в долг» не оставлял следа, а накладную «оплачивали» правкой поля —
-          деньги уходили из ящика мимо кассовой книги. Оплата отсюда пишет
-          расход в кассу датой оплаты. */}
-      {(report.suppliers?.rows || []).length > 0 && (
-        <div className="card" style={{ marginTop: 16 }}>
-          <h3>{t("suppliersDebt.title")}</h3>
-          <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("suppliersDebt.hint")}</p>
-          {report.suppliers.rows.map((r) => (
-            <div className="crow" key={`${r.kind}-${r.id}`}>
-              <span className="k">
-                {r.label}
-                <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>
-                  {ru(String(r.date))}{r.supplier ? ` · ${r.supplier}` : ""}
-                </div>
-              </span>
-              <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <strong style={{ color: "var(--danger)" }}>{som(r.debt)}</strong>
-                {!readOnly && (
-                  <button className="secondary" onClick={() => setPaying(r)}>
-                    {t("suppliersDebt.pay")}
-                  </button>
-                )}
-              </span>
-            </div>
-          ))}
-          {totalRow(t("suppliersDebt.total"), report.suppliers.total)}
         </div>
       )}
 
@@ -635,33 +654,6 @@ export default function Finance() {
           {totalRow(t("finance.totalInvestment"), report.investments.total)}
         </div>
       )}
-
-      {/* Себестоимость проданного и маржа: сколько осталось от выручки после
-          закупочной стоимости материала, ещё до аренды и прочих расходов. */}
-      <div className="card" style={{ marginTop: 16 }}>
-        <h3>{t("finance.cogsTitle")}</h3>
-        <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("finance.cogsHint")}</p>
-        <div className="crow"><span className="k">{t("finance.revenue")}</span><span>{som(report.revenue)}</span></div>
-        <div className="crow">
-          <span className="k">{t("finance.cogs")}</span>
-          <span style={{ color: "var(--danger)" }}>− {som(report.cogs)}</span>
-        </div>
-        {totalRow(t("finance.grossMargin"), report.gross_margin)}
-        {/* Обрезки — часть этой же себестоимости, которая до клиента не дошла.
-            Отдельной строкой, а не в вычитании: это не добавочный расход, а
-            ответ на вопрос «сколько я подарил», которого раньше не было вовсе.
-            Показываем, только когда ширину изделия называли: иначе строка «0»
-            означала бы «отхода нет», а на деле его просто не считали. */}
-        {Number(report.offcuts?.area) > 0 && (
-          <div className="crow">
-            <span className="k">{t("finance.offcuts")}</span>
-            <span>
-              {q2(report.offcuts.area)} {t("finance.sqmShort")}{" "}
-              <span className="muted">· {som(report.offcuts.cost)}</span>
-            </span>
-          </div>
-        )}
-      </div>
 
       {/* Карточки «Реквизиты для документов» здесь больше нет: заказчик просил
           убрать реквизиты совсем, и печатные формы их больше не печатают.
@@ -876,6 +868,9 @@ export default function Finance() {
         />
       </div>
 
+      </>
+      )}
+
       {openKind && (
         <ExpenseKindModal
           kind={openKind}
@@ -885,6 +880,17 @@ export default function Finance() {
           onEditKind={(k) => {
             setOpenKind(null);
             setEditKind({ kind: k });
+          }}
+        />
+      )}
+      {debtsOpen && (
+        <SupplierDebtModal
+          debts={report.suppliers}
+          readOnly={readOnly}
+          onClose={() => setDebtsOpen(false)}
+          onPay={(row) => {
+            setDebtsOpen(false);
+            setPaying(row);
           }}
         />
       )}

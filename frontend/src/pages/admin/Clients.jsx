@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 
@@ -18,6 +18,29 @@ const ORDERS_PREVIEW = 5;
 // Оплат в карточке показываем столько же: история длиннее — в чеках.
 const PAYMENTS_PREVIEW = 5;
 
+// Период → параметры запроса. {mode: "all" | "month" | "day", year, month, day}.
+function rangeParams(r) {
+  if (r.mode === "day" && r.day) return { date_from: r.day, date_to: r.day };
+  if (r.mode !== "month" || !r.month) return {};
+  const last = new Date(r.year, r.month, 0).getDate();
+  const mm = String(r.month).padStart(2, "0");
+  return {
+    date_from: `${r.year}-${mm}-01`,
+    date_to: `${r.year}-${mm}-${String(last).padStart(2, "0")}`,
+  };
+}
+
+const money = (n) => Math.round(Number(n) || 0).toLocaleString("ru-RU");
+const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, местная дата
+
+// Соседний день для стрелок ‹ ›. Полдень — чтобы переход на летнее время не
+// перекинул дату дважды.
+function shiftDay(iso, delta) {
+  const d = new Date(`${iso}T12:00:00`);
+  d.setDate(d.getDate() + delta);
+  return d.toLocaleDateString("sv-SE");
+}
+
 export default function Clients() {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
@@ -29,7 +52,6 @@ export default function Clients() {
   const [detail, setDetail] = useState(null);
   // Клиент, по которому открыт акт сверки.
   const [actFor, setActFor] = useState(null);
-  const [reqForm, setReqForm] = useState({ referred_by: "", reason: "" });
   const [issuedPassword, setIssuedPassword] = useState(null); // показывается один раз
   const [period, setPeriod] = useState({ year: new Date().getFullYear(), month: null });
   const [day, setDay] = useState(""); // конкретный день внутри месяца
@@ -47,18 +69,21 @@ export default function Clients() {
   const [merging, setMerging] = useState(null);
   // «Кому мы должны сдачу» — обратный список к должникам.
   const [onlyChange, setOnlyChange] = useState(false);
+  // Период внутри карточки: за день, за месяц или за всё время. При открытии
+  // берётся из фильтра списка, дальше переключается прямо в карточке — чтобы
+  // посмотреть, что клиент брал сегодня, не закрывая её.
+  const [cardRange, setCardRange] = useState({ mode: "all", year: new Date().getFullYear(), month: null, day: "" });
+  // Стрелками месяца щёлкают быстро: ответ на старый запрос не должен
+  // перетереть карточку за месяц, выбранный позже.
+  const detailReq = useRef(0);
 
   // День важнее месяца: выбран день — смотрим ровно его, иначе весь месяц.
-  function periodParams() {
-    if (day) return { date_from: day, date_to: day };
-    if (!period.month) return {};
-    const last = new Date(period.year, period.month, 0).getDate();
-    const mm = String(period.month).padStart(2, "0");
-    return {
-      date_from: `${period.year}-${mm}-01`,
-      date_to: `${period.year}-${mm}-${String(last).padStart(2, "0")}`,
-    };
+  function listRange() {
+    if (day) return { mode: "day", year: period.year, month: period.month, day };
+    return { mode: period.month ? "month" : "all", year: period.year, month: period.month, day: "" };
   }
+
+  const periodParams = () => rangeParams(listRange());
 
   function load() {
     const params = {
@@ -82,20 +107,73 @@ export default function Clients() {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "desc" }));
   }
 
+  // Карточка всегда грузится за период, выбранный в ней самой: после выдачи
+  // пароля или смены реферера фильтр «сегодня» не должен слетать на всю историю.
+  async function fetchDetail(id, range = cardRange) {
+    const req = ++detailReq.current;
+    const { data } = await api.get(`/clients/clients/${id}/`, { params: rangeParams(range) });
+    if (req === detailReq.current) setDetail(data);
+  }
+
   async function openDetail(c) {
-    const { data } = await api.get(`/clients/clients/${c.id}/`, { params: periodParams() });
-    setDetail(data);
+    const range = listRange();
+    setCardRange(range);
+    await fetchDetail(c.id, range);
     setShowAllOrders(false);
     setShowAllPayments(false);
     setMerging(null);
     setReqForm({ referred_by: "", reason: "" });
   }
 
+  async function changeCardRange(next) {
+    setCardRange(next);
+    setShowAllOrders(false);
+    setShowAllPayments(false);
+    try {
+      await fetchDetail(detail.id, next);
+    } catch (e) {
+      // Не оставляем на экране «17.09» над заказами прошлого периода.
+      setCardRange(cardRange);
+      toast(apiError(e, t("common.error")), "error");
+    }
+  }
+
+  // Переключатель «День / Месяц / Весь период». День и месяц не сбрасывают
+  // друг друга: из дня 12.09 в «Месяц» попадаем в сентябрь, а не в текущий.
+  function pickCardMode(mode) {
+    if (mode === cardRange.mode) return;
+    const now = new Date();
+    if (mode === "day") {
+      return changeCardRange({ ...cardRange, mode, day: cardRange.day || today() });
+    }
+    if (mode === "month") {
+      const [y, m] = (cardRange.day || "").split("-").map(Number);
+      return changeCardRange({
+        ...cardRange,
+        mode,
+        year: cardRange.month ? cardRange.year : y || now.getFullYear(),
+        month: cardRange.month || m || now.getMonth() + 1,
+      });
+    }
+    changeCardRange({ ...cardRange, mode: "all" });
+  }
+
+  // Акт сверки считает сальдо от нуля, поэтому ему нужна вся история, а не
+  // заказы за день, выбранный в карточке, — иначе итог акта не сойдётся с долгом.
+  async function openAct() {
+    if (cardRange.mode === "all") return setActFor(detail);
+    try {
+      const { data } = await api.get(`/clients/clients/${detail.id}/`);
+      setActFor(data);
+    } catch (e) {
+      toast(apiError(e, t("common.error")), "error");
+    }
+  }
+
   // После выплаты перечитываем карточку и список: изменились и долги заказов,
   // и колонка «Долг» в таблице.
   async function refreshDetail(id) {
-    const { data } = await api.get(`/clients/clients/${id}/`, { params: periodParams() });
-    setDetail(data);
+    await fetchDetail(id);
     load();
   }
 
@@ -123,8 +201,7 @@ export default function Clients() {
     try {
       const { data } = await api.post(`/clients/clients/${detail.id}/set-password/`, {});
       setIssuedPassword(data.password);
-      const fresh = await api.get(`/clients/clients/${detail.id}/`);
-      setDetail(fresh.data);
+      await fetchDetail(detail.id);
     } catch {
       toast(t("common.error"), "error");
     }
@@ -183,27 +260,9 @@ export default function Clients() {
     try {
       const { data } = await api.patch(`/clients/clients/${detail.id}/`, { referred_by: value || null });
       // re-fetch detail (full referral data) and refresh list
-      const fresh = await api.get(`/clients/clients/${data.id}/`);
-      setDetail(fresh.data);
+      await fetchDetail(data.id);
       load();
       toast(t("common.save"));
-    } catch (e) {
-      toast(errMsg(e), "error");
-    }
-  }
-
-  // Storekeeper path: file a change request for an admin to approve.
-  async function requestReferralChange() {
-    if (!reqForm.referred_by) return;
-    try {
-      await api.post(`/clients/clients/${detail.id}/request-referral-change/`, {
-        referred_by: reqForm.referred_by,
-        reason: reqForm.reason,
-      });
-      const fresh = await api.get(`/clients/clients/${detail.id}/`);
-      setDetail(fresh.data);
-      setReqForm({ referred_by: "", reason: "" });
-      toast(t("clients.referralRequestSent"));
     } catch (e) {
       toast(errMsg(e), "error");
     }
@@ -513,9 +572,85 @@ export default function Clients() {
             </span>
           </div>
 
-          {/* Заказы клиента — что покупал */}
+          {/* Заказы клиента — что покупал. Период переключается прямо здесь:
+              «что он брал сегодня» и «на сколько набрал за месяц» — вопросы у
+              стойки, ради них не стоит закрывать карточку и крутить фильтр
+              списка. Оплаты ниже режутся тем же периодом (по дате оплаты). */}
           <div className="field" style={{ marginTop: 14 }}>
             <label>{t("clients.ordersList")}</label>
+            <div className="row" style={{ margin: "0 0 8px", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              {["day", "month", "all"].map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  className={cardRange.mode === m ? "" : "secondary"}
+                  style={{ padding: "4px 12px", height: "auto", fontSize: 13 }}
+                  onClick={() => pickCardMode(m)}
+                >
+                  {t(`clients.range_${m}`)}
+                </button>
+              ))}
+            </div>
+            {cardRange.mode === "month" && (
+              <div style={{ marginBottom: 8 }}>
+                <MonthPicker
+                  label={false}
+                  value={cardRange}
+                  // «Все месяцы» в выпадашке — то же, что кнопка «Весь период».
+                  onChange={(v) => changeCardRange({ ...cardRange, ...v, mode: v.month ? "month" : "all" })}
+                />
+              </div>
+            )}
+            {cardRange.mode === "day" && (
+              <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
+                <button
+                  className="ghost"
+                  onClick={() => changeCardRange({ ...cardRange, day: shiftDay(cardRange.day, -1) })}
+                  aria-label={t("clients.prevDay")}
+                >
+                  ‹
+                </button>
+                <input
+                  type="date"
+                  value={cardRange.day}
+                  max={today()}
+                  style={{ width: 170 }}
+                  onChange={(e) => e.target.value && changeCardRange({ ...cardRange, day: e.target.value })}
+                />
+                <button
+                  className="ghost"
+                  disabled={cardRange.day >= today()}
+                  onClick={() => changeCardRange({ ...cardRange, day: shiftDay(cardRange.day, 1) })}
+                  aria-label={t("clients.nextDay")}
+                >
+                  ›
+                </button>
+              </div>
+            )}
+            {/* Итог за выбранный период. Шапка карточки («Заказов», «Сумма
+                покупок») — за всё время, а тут видно, сколько он набрал именно
+                за этот день или месяц. Долг — по заказам периода. */}
+            {cardRange.mode !== "all" && detail.orders?.length > 0 && (() => {
+              const live = detail.orders.filter((o) => o.status !== "CANCELLED").length;
+              const sum = detail.orders.reduce((s, o) => s + Number(o.total_price) - Number(o.refunded_amount || 0), 0);
+              const debt = detail.orders.reduce((s, o) => s + Number(o.debt || 0), 0);
+              return (
+                <div
+                  className="crow"
+                  style={{ background: "var(--primary-soft)", borderRadius: "var(--r-md)", padding: "8px 12px", marginBottom: 6 }}
+                >
+                  <span>{t("clients.periodOrders", { n: live })}</span>
+                  <span>
+                    <strong>{money(sum)} сом</strong>
+                    {debt > 0 && (
+                      <span style={{ color: "var(--danger)", fontSize: 13 }}>
+                        {" · "}{t("receipts.debt")}: {money(debt)}
+                      </span>
+                    )}
+                  </span>
+                </div>
+              );
+            })()}
             {detail.orders?.length ? (
               // При десятках заказов карточка превращалась в бесконечную ленту:
               // показываем последние ORDERS_PREVIEW, остальное — по кнопке.
@@ -629,8 +764,8 @@ export default function Clients() {
             </div>
           )}
 
-          {/* Who referred this client. Free to set once; changing a locked
-              referral needs admin override or a moderated change request. */}
+          {/* Кто привёл клиента. Поставить можно один раз; сменить уже
+              поставленного — только админ, прямо здесь. */}
           <div className="field" style={{ marginTop: 14 }}>
             <label>{t("clients.referredByLabel")}</label>
             {!detail.referred_by ? (
@@ -658,50 +793,14 @@ export default function Clients() {
                   ))}
               </select>
             ) : (
-              // Storekeeper → locked; can file a change request.
-              <>
-                <div className="crow" style={{ padding: "8px 0" }}>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    <Icon name="lock" size={15} /> {detail.referred_by_name}
-                  </span>
-                  <span className="muted" style={{ fontSize: 12 }}>{t("clients.referralLocked")}</span>
-                </div>
-                {detail.pending_referral_request ? (
-                  <div className="badge" style={{ marginTop: 6, display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    <Icon name="clock" size={14} /> {t("clients.referralChangePending")}: {detail.pending_referral_request.new_referred_by_name || "—"}
-                  </div>
-                ) : (
-                  <div className="card" style={{ background: "var(--canvas)", padding: 12, marginTop: 6 }}>
-                    <label style={{ fontSize: 12 }}>{t("clients.requestReferralChange")}</label>
-                    <select
-                      value={reqForm.referred_by}
-                      onChange={(e) => setReqForm({ ...reqForm, referred_by: e.target.value })}
-                    >
-                      <option value="">— {t("clients.noReferrer")} —</option>
-                      {clients
-                        .filter((c) => c.id !== detail.id && c.id !== detail.referred_by)
-                        .map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.display_name} ({c.phone})
-                          </option>
-                        ))}
-                    </select>
-                    <input
-                      style={{ marginTop: 6 }}
-                      placeholder={t("clients.referralChangeReason")}
-                      value={reqForm.reason}
-                      onChange={(e) => setReqForm({ ...reqForm, reason: e.target.value })}
-                    />
-                    <button
-                      style={{ marginTop: 8 }}
-                      disabled={!reqForm.referred_by}
-                      onClick={requestReferralChange}
-                    >
-                      {t("clients.requestReferralChange")}
-                    </button>
-                  </div>
-                )}
-              </>
+              // Складовщик → реферер зафиксирован; сменить его может админ в
+              // этой же карточке. Очереди заявок больше нет (27.09).
+              <div className="crow" style={{ padding: "8px 0" }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <Icon name="lock" size={15} /> {detail.referred_by_name}
+                </span>
+                <span className="muted" style={{ fontSize: 12 }}>{t("clients.referralLocked")}</span>
+              </div>
             )}
           </div>
 
@@ -746,7 +845,7 @@ export default function Clients() {
           {/* Акт сверки — тем же документом, что и в 1С, закрывают спор о долге
               с юрлицом. Данные уже в карточке, форма собирается из них. */}
           <div className="row" style={{ marginTop: 16 }}>
-            <button className="secondary" onClick={() => setActFor(detail)}>
+            <button className="secondary" onClick={openAct}>
               <Icon name="printer" size={16} /> {t("print.actTitle")}
             </button>
           </div>

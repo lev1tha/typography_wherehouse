@@ -135,8 +135,10 @@ class CashBookTests(APITestCase):
         записывает как есть.
         """
         body = {
-            "account": "CASH", "kind": "OUT", "article": "SALARY",
-            "amount": "8000", "happened_on": "2026-08-10", "note": "аванс мастеру",
+            # Зарплату в кассу руками больше не вносят (она идёт из «Финансов»,
+            # чтобы попасть и в ОПиУ); выдача владельцу — законная ручная статья.
+            "account": "CASH", "kind": "OUT", "article": "OWNER_OUT",
+            "amount": "8000", "happened_on": "2026-08-10", "note": "забрал владелец",
         }
         first = self.client.post(self.URL, body, format="json")
         self.assertEqual(first.status_code, 400, first.data)

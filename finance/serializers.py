@@ -176,6 +176,16 @@ class CashEntrySerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Эту статью система пишет сама — по оплатам, сдаче и возвратам."
             )
+        # Расход цеха и зарплата, внесённые прямо в кассу, уходили из денег, но
+        # не попадали в ОПиУ: касса говорила «потратили», прибыль — нет. Их
+        # вносят в «Финансах» — там трата попадает и в ОПиУ, и в кассу разом.
+        # Уже внесённые записи остаются (в ОДДС — своей строкой).
+        by_expense = {CashEntry.Article.EXPENSE, CashEntry.Article.SALARY}
+        if value in by_expense and (self.instance is None or self.instance.article != value):
+            raise serializers.ValidationError(
+                "Расходы и зарплату вносите в «Финансах» — оттуда они попадут и в ОПиУ, "
+                "и в кассу."
+            )
         return value
 
     def validate_happened_on(self, value):
