@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
+import HeadlineTiles from "../../components/HeadlineTiles.jsx";
 
 const COLORS = ["#e8853a", "#ffc592", "#2a9d99", "#d6b6f6", "#7a4a1e", "#1aae39"];
 
@@ -13,11 +14,20 @@ const COLORS = ["#e8853a", "#ffc592", "#2a9d99", "#d6b6f6", "#7a4a1e", "#1aae39"
 // с итогом «Расходы 265 092» стояла строка «Закуп материала 1 177 792»:
 // со стороны это выглядит арифметической ошибкой, хотя в прибыль идёт итог
 // блока (начало + закуп + транспорт − конец), а не закуп сам по себе.
-const expenseRows = (fin, materialsLabel) => [
+// С 2026-10-07 сюда же — покупки дешевле порога капвложения и старые расходы,
+// внесённые прямо в кассу: они в «Расходах», и без них список не сходился бы
+// с итогом.
+const expenseRows = (fin, t) => [
   ...(Number(fin.materials?.total)
-    ? [{ id: "materials", name: materialsLabel, amount: fin.materials.total }]
+    ? [{ id: "materials", name: t("finance.materialsBlock"), amount: fin.materials.total }]
     : []),
   ...[...(fin.fixed?.rows || []), ...(fin.variable?.rows || [])].filter((r) => r.in_profit),
+  ...(Number(fin.investments?.expensed)
+    ? [{ id: "investExpensed", name: t("finance.investExpensed"), amount: fin.investments.expensed }]
+    : []),
+  ...(Number(fin.pnl?.opex_cash_manual)
+    ? [{ id: "manual", name: t("ladder.manual"), amount: fin.pnl.opex_cash_manual }]
+    : []),
 ];
 
 // Количества без хвоста нулей и с разрядами — как в каталоге («2», «0», «14,88»).
@@ -225,6 +235,12 @@ export default function Dashboard() {
     push("", "");
     methods.forEach((m) => push(m.label, Math.round(Number(rev[m.key]))));
     push(t("dashboard.revenueTotal"), Math.round(revTotal));
+    if (data.headline) {
+      push(t("overview.netProfit"), Math.round(Number(data.headline.net_profit.value)));
+      push(t("overview.netCashFlow"), Math.round(Number(data.headline.net_cash_flow.value)));
+      push(t("overview.cashEnd"), Math.round(Number(data.headline.cash_end.value)));
+      push(t("overview.receivedShort"), Math.round(Number(data.headline.received.total)));
+    }
     push(t("dashboard.revenueReceived"), Math.round(Number(rev.received?.total || 0)));
     push(t("finance.clientDebt"), Math.round(Number(rev.debt?.total || 0)));
     if (data.breakdown) {
@@ -248,7 +264,7 @@ export default function Dashboard() {
       push("", "");
       // Строки — виды расхода из отчёта, поэтому свои виды («Реклама»,
       // «Налоги») попадают в выгрузку сами, без правки этого списка.
-      for (const row of expenseRows(fin, t("finance.materialsBlock"))) push(row.name, Math.round(Number(row.amount)));
+      for (const row of expenseRows(fin, t)) push(row.name, Math.round(Number(row.amount)));
       push(t("finance.cogs"), Math.round(Number(fin.cogs)));
       push(t("finance.grossMargin"), Math.round(Number(fin.gross_margin)));
       push(t("finance.expenses"), Math.round(Number(fin.total_expenses)));
@@ -291,6 +307,8 @@ export default function Dashboard() {
         <button className="secondary" onClick={downloadCsv}>{t("finance.downloadCsv")}</button>
       </div>
 
+      <HeadlineTiles headline={data.headline} />
+
       <div className="stat-grid" style={{ marginTop: 12 }}>
         {/* Склад — на конец выбранного периода. Раньше плитка держала
             сегодняшнюю цифру в любом месяце, и в августе, где ни одной
@@ -300,17 +318,8 @@ export default function Dashboard() {
           value={som(data.unrealised_asset)}
           sub={stockAsOf ? t("finance.stockAsOf", { date: stockAsOf }) : undefined}
         />
-        {/* Выручка — стоимость ЗАКАЗОВ периода, а не деньги в ящике: заказ в
-            долг входит в неё целиком. Без подписи «получено / долг» плитку
-            читают как кассу и не сходятся с ней вчетверо. */}
-        <Stat
-          label={t("dashboard.revenueTotal")}
-          value={som(revTotal)}
-          sub={t("dashboard.revenueSub", {
-            received: som(rev.received?.total || 0),
-            debt: som(rev.debt?.total || 0),
-          })}
-        />
+        {/* Выручка — в главных плитках выше; «получено» там — по кассовой
+            книге (деньги периода), а не по заказам. */}
         <Stat label={t("dashboard.services")} value={data.services_performed} />
         <Stat label={t("dashboard.refunded")} value={som(data.refunds.total_refunded)} />
         {/* Списано мимо продажи: недостача по инвентаризации и брак. Деньги, а
@@ -360,6 +369,7 @@ export default function Dashboard() {
               sub={t("dashboard.profitBeforeExpensesFormula", {
                 revenue: som(revTotal),
                 cogs: som(data.breakdown.cogs_total),
+                losses: som(data.breakdown.losses || 0),
               })}
             />
             <Stat label={t("dashboard.workRevenue")} value={som(data.breakdown.work_revenue)} />
@@ -409,18 +419,15 @@ export default function Dashboard() {
               }
             />
             <Stat label={t("finance.expenses")} value={som(fin.total_expenses)} />
-            <Stat
-              label={t("finance.profit")}
-              value={som(fin.profit)}
-              color={Number(fin.profit) >= 0 ? "ok" : "danger"}
-            />
+            {/* Чистая прибыль — в главных плитках наверху: второй такой плитки
+                здесь нет, одна цифра — одно место. */}
           </div>
 
           <div className="chart-row">
             {/* Расходы детально */}
             <div className="card">
               <h3>{t("dashboard.expensesBreakdown")}</h3>
-              {expenseRows(fin, t("finance.materialsBlock")).map((row) => (
+              {expenseRows(fin, t).map((row) => (
                 <div className="crow" key={row.id}>
                   <span className="k">{row.name}</span><span>{som(row.amount)}</span>
                 </div>

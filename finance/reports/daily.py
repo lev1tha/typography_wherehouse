@@ -43,10 +43,11 @@ def daily_report(year: int, month: int) -> dict:
     # амортизации): та же цифра, что чистая прибыль месяца в «Сводке».
     totals = {f: total(d[f] for d in days) for f in FIELDS}
     totals["profit"] = totals.pop("net_profit")
-    # Поля прежнего графика (этап 3 их уберёт): «переменные» — расходы дня,
-    # «постоянные» — амортизация, проценты и налог.
-    totals["variable"] = totals["opex"] + totals["opex_cash_manual"] - totals["cash_count"]
-    totals["fixed"] = totals["depreciation"] + totals["interest"] + totals["tax"]
+    # Для подписи под графиком: «расходы» — операционные расходы месяца (та
+    # же цифра, что плитка «Расходы» «Сводки», с поправкой на пересчёт
+    # кассы), «ниже EBITDA» — амортизация, проценты и налог.
+    totals["expenses"] = totals["opex"] + totals["opex_cash_manual"] - totals["cash_count"]
+    totals["below"] = totals["depreciation"] + totals["interest"] + totals["tax"]
     return {
         "year": year,
         "month": month,

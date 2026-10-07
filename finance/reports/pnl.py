@@ -441,10 +441,10 @@ def pnl_year(year: int) -> dict:
             add(f"kind:{kid}", kind_meta[kid][1], kind_values[kid], level=2)
     manual = neg(lambda p: p["opex_cash_manual"])
     if any(manual):
-        add("opex_cash_manual", chart.PNL_LINES[chart.OPEX_CASH_MANUAL], manual)
+        add("opex_cash_manual", chart.PNL_LINES[chart.OPEX_CASH_MANUAL], manual, level=0)
     count = col(lambda p: p["cash_count"])
     if any(count):
-        add("cash_count", chart.PNL_LINES[chart.CASH_COUNT], count, hint="cash_count")
+        add("cash_count", chart.PNL_LINES[chart.CASH_COUNT], count, level=0, hint="cash_count")
 
     ebitda = col(lambda p: p["ebitda"])
     add("ebitda", "EBITDA (прибыль до амортизации, процентов и налога)", ebitda,

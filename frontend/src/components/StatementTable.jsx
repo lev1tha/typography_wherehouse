@@ -1,9 +1,12 @@
 import { useTranslation } from "react-i18next";
 
+import Hint from "./Hint.jsx";
+
 // Таблица отчёта «строки — статьи, колонки — месяцы года + итог», как лист
 // Excel заказчика. Общая для ОПиУ и ОДДС: у обоих строки приходят с сервера
 // уже разложенными (`kind`: total / subtotal / group / row / percent / note /
-// balance / grand), здесь только вид.
+// balance / grand / warn), здесь только вид. У строки может быть `hint` —
+// ключ подсказки к термину (`terms.<hint>`) — и `warn` — предупреждение.
 //
 // Будущие месяцы текущего года — прочерком, а не нулём: «0» в ноябре, до
 // которого ещё не дожили, читается как «ноябрь пустой».
@@ -17,13 +20,37 @@ export function money(n) {
   return v.toLocaleString("ru-RU");
 }
 
+// Подпись строки: постоянные строки отчётов переведены по ключу
+// (`stmtRows.<key>`), строки видов расхода — их названия из справочника, как
+// пришли с сервера. Ставка налога берётся из серверной подписи.
+// Ключи разнесены по отчётам (`pnl` / `cf` / `bridge`): «net» в ОПиУ —
+// чистая прибыль, в ОДДС — чистый денежный поток. Двоеточие в ключе i18next
+// принял бы за пространство имён — заменяем на «__».
+export function rowLabel(row, t, kind) {
+  const rate = (String(row.label).match(/([\d.,]+)\s*%/) || [])[1];
+  const key = String(row.key).replace(/:/g, "__");
+  return t(`stmtRows.${kind}.${key}`, { defaultValue: row.label, rate });
+}
+
+// «Строка-предупреждение»: несведённые переводы и «Не объяснено» в сверке.
+// Ноль — спокойно серым, не ноль — красным.
+function warnClass(row) {
+  if (row.kind !== "warn" && !row.warn) return "";
+  const any = row.values.some((v) => Math.round(Number(v) || 0) !== 0);
+  return any ? "stmt-warn" : "stmt-warn-zero";
+}
+
 function cell(row, value) {
   if (value === null || value === undefined) return "";
   if (row.kind === "percent") return `${Number(value).toLocaleString("ru-RU")} %`;
   return money(value);
 }
 
-export default function StatementTable({ data }) {
+function i18nHas(t, key) {
+  return t(key, { defaultValue: "" }) !== "";
+}
+
+export default function StatementTable({ data, kind }) {
   const { t } = useTranslation();
   const months = data.months || [];
   return (
@@ -44,9 +71,11 @@ export default function StatementTable({ data }) {
         </thead>
         <tbody>
           {data.rows.map((row) => (
-            <tr key={row.key} className={`stmt-${row.kind}`}>
+            <tr key={row.key} className={`stmt-${row.kind} ${warnClass(row)}`}>
               <td className="stmt-label" style={{ paddingLeft: 10 + row.level * 16 }}>
-                {row.label}
+                {rowLabel(row, t, kind)}
+                {row.hint && i18nHas(t, `terms.${row.hint}`) && <Hint text={t(`terms.${row.hint}`)} />}
+                {row.warn && <Hint tone="warn" text={t("statements.unmatchedWarn", { defaultValue: row.warn })} />}
               </td>
               {row.values.map((v, i) => (
                 <td
@@ -72,12 +101,12 @@ export default function StatementTable({ data }) {
 
 // CSV той же таблицы — владелец привык сверять в Excel. Разделитель «;» и
 // BOM: так русский Excel открывает файл сразу по колонкам и без кракозябр.
-export function statementCsv(data, title, t) {
+export function statementCsv(data, title, t, kind) {
   const head = [t("statements.article"), ...data.months.map((m) => MONTHS_RU[m.month - 1]), t("statements.yearTotal")];
   const lines = [head.join(";")];
   for (const row of data.rows) {
     const fmt = (v) => (v === null || v === undefined ? "" : row.kind === "percent" ? String(v) : String(Math.round(Number(v) || 0)));
-    lines.push([`${"  ".repeat(row.level)}${row.label}`, ...row.values.map(fmt), fmt(row.total)].join(";"));
+    lines.push([`${"  ".repeat(row.level)}${rowLabel(row, t, kind)}`, ...row.values.map(fmt), fmt(row.total)].join(";"));
   }
   const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
   const a = document.createElement("a");

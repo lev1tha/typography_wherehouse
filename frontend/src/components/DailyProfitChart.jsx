@@ -172,20 +172,25 @@ export default function DailyProfitChart({ year: propYear, month: propMonth, rel
           {/* Итоги месяца — строкой, а не рядом плиток: карточка в карточке
               выглядела вторым, спорящим с верхом страницы блоком. */}
           <div className="dc-totals">
+            {/* Итоги — шагами ОПиУ (2026-10-07): выручка, себестоимость с
+                потерями, расходы, амортизация с процентами и налогом, чистая
+                прибыль. Сумма шагов = чистой прибыли месяца в «Сводке». */}
             <span>
               <span className="k">{t("finance.revenue")}</span>
               <strong>{som(data.totals.revenue)}</strong>
             </span>
             <span>
-              <span className="k">{t("finance.expenses")}</span>
-              <strong>{som(Number(data.totals.variable) + Number(data.totals.fixed))}</strong>
+              <span className="k">{t("finance.dailyCost")}</span>
+              <strong>{som(Number(data.totals.cogs) + Number(data.totals.losses))}</strong>
             </span>
-            {/* Брак и недостача — своей строкой: они вычитаются из прибыли,
-                как и в плитке месяца, и без неё итог не складывался бы. */}
-            {Number(data.totals.losses || 0) > 0 && (
+            <span>
+              <span className="k">{t("finance.expenses")}</span>
+              <strong>{som(data.totals.expenses)}</strong>
+            </span>
+            {Math.round(Number(data.totals.below) || 0) !== 0 && (
               <span>
-                <span className="k">{t("finance.lossesShort")}</span>
-                <strong>{som(data.totals.losses)}</strong>
+                <span className="k">{t("finance.dailyBelow")}</span>
+                <strong>{som(data.totals.below)}</strong>
               </span>
             )}
             <span>

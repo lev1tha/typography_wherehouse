@@ -8,6 +8,8 @@ import { useAuth } from "../../auth/AuthContext.jsx";
 import DailyProfitChart from "../../components/DailyProfitChart.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import FinanceStatement from "../../components/FinanceStatement.jsx";
+import Hint from "../../components/Hint.jsx";
+import ProfitLadder from "../../components/ProfitLadder.jsx";
 import ExpenseKindFormModal from "../../components/ExpenseKindFormModal.jsx";
 import AssetTaxSettings from "../../components/AssetTaxSettings.jsx";
 import ExpenseKindModal from "../../components/ExpenseKindModal.jsx";
@@ -39,10 +41,10 @@ function periodParams({ year, month }) {
   return { date_from: `${year}-${p(month)}-01`, date_to: `${year}-${p(month)}-${p(last)}` };
 }
 
-function Stat({ label, value, color, sub }) {
+function Stat({ label, value, color, sub, hint }) {
   return (
     <div className="stat">
-      <div className="label">{label}</div>
+      <div className="label">{label}{hint ? <Hint text={hint} /> : null}</div>
       <div className="value" style={color ? { color: `var(--${color})` } : undefined}>
         {value}
       </div>
@@ -285,6 +287,23 @@ export default function Finance() {
       </div>
     );
 
+  // Формула чистой прибыли под плиткой — из ненулевых частей ОПиУ периода.
+  function netFormula(p) {
+    if (!p) return undefined;
+    const parts = [t("finance.netFormulaGross", { value: som(p.gross_profit) })];
+    const minus = [
+      ["netFormulaExpenses", Number(p.opex?.total) + Number(p.opex_cash_manual) - Number(p.cash_count)],
+      ["netFormulaDepreciation", Number(p.depreciation) + Number(p.disposal)],
+      ["netFormulaInterest", p.interest],
+      ["netFormulaTax", p.tax],
+    ];
+    for (const [key, value] of minus) {
+      if (Math.round(Number(value) || 0) !== 0) parts.push(`− ${t(`finance.${key}`, { value: som(value) })}`);
+    }
+    const margin = p.margins?.net;
+    return parts.join(" ") + (margin !== null && margin !== undefined ? ` · ${t("finance.netMargin", { pct: margin })}` : "");
+  }
+
   // Заголовок блока и подытог — визуальное разделение как в Excel заказчика.
   const blockHead = (label) => (
     <div
@@ -397,6 +416,7 @@ export default function Finance() {
           ["summary", t("statements.tabSummary")],
           ["pnl", t("statements.tabPnl")],
           ["cash", t("statements.tabCashFlow")],
+          ["bridge", t("statements.tabBridge")],
         ].map(([key, label]) => (
           <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
             {label}
@@ -406,6 +426,7 @@ export default function Finance() {
 
       {tab === "pnl" && <FinanceStatement kind="pnl" />}
       {tab === "cash" && <FinanceStatement kind="cash-flow" />}
+      {tab === "bridge" && <FinanceStatement kind="bridge" />}
 
       {tab === "summary" && (
       <>
@@ -419,6 +440,7 @@ export default function Finance() {
             300 000» при 200 000 долга читается как 300 000 деньгами. */}
         <Stat
           label={t("finance.revenue")}
+          hint={t("terms.revenueTile")}
           value={som(report.revenue)}
           // Возвраты — днём возврата: по заказу прошлого месяца они уменьшают
           // ЭТОТ месяц, и без этой строки выручка не сходилась бы с
@@ -434,31 +456,30 @@ export default function Finance() {
             внизу, в карточке «Себестоимость и маржа», и наверху выручка
             читалась как заработок. */}
         <Stat
-          label={t("finance.profitBeforeExpenses")}
+          label={t("finance.grossProfit")}
+          hint={t("terms.gross")}
           value={som(report.gross_margin)}
           color={Number(report.gross_margin) >= 0 ? "ok" : "danger"}
-          sub={t("finance.profitBeforeExpensesFormula", {
+          sub={t("finance.grossProfitFormula", {
             revenue: som(report.revenue),
             cogs: som(report.cogs),
+            losses: som(report.losses?.cost || 0),
           })}
         />
-        <Stat label={t("finance.expenses")} value={som(report.total_expenses)} />
+        <Stat label={t("finance.expenses")} hint={t("terms.opex")} value={som(report.total_expenses)} />
         {/* Прибыль — из чего она сложилась, одной строкой под цифрой: брак и
             недостача вычитаются из неё с 2026-09-27, и без подписи прибыль
             «вдруг» становилась меньше «прибыли до расходов минус расходы». */}
+        {/* Чистая прибыль — итог ОПиУ (с 2026-10-07): валовая − расходы −
+            амортизация − проценты − налог. Под цифрой — маржа и формула из тех
+            частей, что в периоде не нулевые; целиком — в «Как сложилась
+            прибыль» ниже. */}
         <Stat
           label={t("finance.profit")}
+          hint={t("terms.net")}
           value={som(report.profit)}
           color={Number(report.profit) >= 0 ? "ok" : "danger"}
-          sub={
-            Number(report.losses?.cost || 0) > 0
-              ? t("finance.profitFormulaLosses", {
-                  gross: som(report.gross_margin),
-                  expenses: som(report.total_expenses),
-                  losses: som(report.losses.cost),
-                })
-              : undefined
-          }
+          sub={netFormula(report.pnl)}
         />
         <Stat
           label={t("finance.clientDebt")}
@@ -494,11 +515,14 @@ export default function Finance() {
         {Number(report.investments?.total) > 0 && (
           <Stat
             label={t("finance.blockInvestment")}
+            hint={t("terms.capex")}
             value={som(report.investments.total)}
             sub={t("finance.investmentTileSub")}
           />
         )}
       </div>
+
+      <ProfitLadder pnl={report.pnl} />
 
       <DailyProfitChart year={period.year} month={period.month} reloadKey={revision} />
 
@@ -528,8 +552,19 @@ export default function Finance() {
                 </span>
                 <span style={{ color: "var(--danger)" }}>− {som(report.cogs)}</span>
               </div>
+              {/* Потери материала (брак, недостача) — в себестоимости, до
+                  валовой прибыли (D-15): маржа материала без них врала бы. */}
+              {Number(report.losses?.cost || 0) > 0 && (
+                <div className="crow">
+                  <span className="k">
+                    {t("ladder.losses")}
+                    <Hint text={t("terms.losses")} />
+                  </span>
+                  <span style={{ color: "var(--danger)" }}>− {som(report.losses.cost)}</span>
+                </div>
+              )}
               <div className="crow mat-result">
-                <strong>{t("finance.grossMargin")}</strong>
+                <strong>{t("finance.grossProfit")}</strong>
                 <strong style={{ color: Number(report.gross_margin) >= 0 ? "var(--ok)" : "var(--danger)" }}>
                   {som(report.gross_margin)}
                 </strong>
@@ -653,6 +688,22 @@ export default function Finance() {
           {(report.investments.rows || []).map((r) => kindRow({ ...r, in_profit: true }))}
           {addKindButton("INVESTMENT")}
           {totalRow(t("finance.totalInvestment"), report.investments.total)}
+          {/* Что из покупок стало активом, что — расходом месяца, и сколько
+              амортизации за период ушло в прибыль. */}
+          <div className="crow" style={{ marginTop: 6 }}>
+            <span className="k">{t("finance.investCapitalized")}<Hint text={t("terms.capex")} /></span>
+            <span>{som(report.investments.capitalized)}</span>
+          </div>
+          {Number(report.investments.expensed || 0) > 0 && (
+            <div className="crow">
+              <span className="k">{t("finance.investExpensed")}</span>
+              <span>{som(report.investments.expensed)}</span>
+            </div>
+          )}
+          <div className="crow">
+            <span className="k">{t("finance.investDepreciation")}<Hint text={t("terms.depreciation")} /></span>
+            <span>{som(report.investments.depreciation)}</span>
+          </div>
         </div>
       )}
 
@@ -666,6 +717,15 @@ export default function Finance() {
             {t("finance.belowBlockHint")}
           </p>
           {(report.below.rows || []).map((r) => kindRow({ ...r, in_profit: true }))}
+          {/* Налог начисляется сам — от выручки по ставке истории. Здесь его
+              сумма за период, рядом с уплатой: разница — сколько ещё должны. */}
+          <div className="crow" style={{ marginTop: 6 }}>
+            <span className="k">
+              {t("finance.taxAccrued", { label: report.below.tax_label })}
+              <Hint text={t("terms.tax")} />
+            </span>
+            <span>{som(report.below.tax)}</span>
+          </div>
         </div>
       )}
 

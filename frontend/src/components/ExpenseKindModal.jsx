@@ -46,6 +46,7 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
   // Покупка в «Инвестициях»: от порога — актив с амортизацией (срок службы,
   // месяц выбытия), дешевле — сразу расход. Решает сервер по порогу.
   const isCapex = kind.role === "CAPEX";
+  const accrued = kind.basis === "accrued";
   const threshold = settings?.capitalization_threshold;
   const [editing, setEditing] = useState(null);
 
@@ -58,7 +59,11 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
   function load() {
     setLoading(true);
     api
-      .get("/finance/expense-entries/", { params: { kind: kind.id, ...(period || {}) } })
+      // Расход и проценты в «Сводке» считаются по «за какой месяц» — список
+      // берём тем же отбором, иначе итог окна разошёлся бы со строкой.
+      .get("/finance/expense-entries/", {
+        params: { kind: kind.id, ...(period || {}), ...(accrued ? { basis: "accrued" } : {}) },
+      })
       .then((r) => setRows(r.data.results || r.data))
       .catch(() => toast(t("common.error"), "error"))
       .finally(() => setLoading(false));
@@ -158,6 +163,7 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
           ? t("kinds.periodHint", { from: period.date_from, to: period.date_to })
           : t("kinds.allTimeHint")}
         {isCapex && ` · ${t("kinds.capexRoleHint")}`}
+        {period?.date_from && ` · ${accrued ? t("kinds.accruedBasis") : t("kinds.paidBasis")}`}
       </p>
 
       {/* Закуп материала руками не вносится: система считает его по приходам,

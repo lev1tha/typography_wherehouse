@@ -66,7 +66,7 @@ class DailyPurchasesTests(APITestCase):
         report = self._report()
         self.assertEqual(Decimal(str(report["total_expenses"])), Decimal("0"))
         self.assertEqual(Decimal(str(report["stock"]["purchases"])), Decimal("18000"))
-        self.assertEqual(Decimal(str(daily["totals"]["variable"])), Decimal(str(report["total_expenses"])))
+        self.assertEqual(Decimal(str(daily["totals"]["expenses"])), Decimal(str(report["total_expenses"])))
         self.assertEqual(Decimal(str(daily["totals"]["profit"])), Decimal(str(report["profit"])))
 
     def test_fixed_costs_of_the_whole_month_are_in_the_chart_total(self):
@@ -99,5 +99,5 @@ class DailyPurchasesTests(APITestCase):
         ExpenseKind.objects.filter(code=ExpenseKind.MATERIAL_PURCHASE).update(in_profit=False)
         daily = self._daily()
         report = self._report()
-        self.assertEqual(Decimal(str(daily["totals"]["variable"])), Decimal("0"))
-        self.assertEqual(Decimal(str(daily["totals"]["variable"])), Decimal(str(report["total_expenses"])))
+        self.assertEqual(Decimal(str(daily["totals"]["expenses"])), Decimal("0"))
+        self.assertEqual(Decimal(str(daily["totals"]["expenses"])), Decimal(str(report["total_expenses"])))

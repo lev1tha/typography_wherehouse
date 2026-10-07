@@ -5,9 +5,15 @@ import api from "../api/api.js";
 import StatementTable, { statementCsv } from "./StatementTable.jsx";
 import { useUI } from "./UIProvider.jsx";
 
-// Вкладка «ОПиУ» или «ОДДС» в «Финансах»: год, таблица по месяцам, CSV.
+// Вкладка «ОПиУ», «ОДДС» или «Сверка» в «Финансах»: год, таблица по месяцам, CSV.
 //   kind = "pnl"       — ОПиУ, /finance/pnl/
 //   kind = "cash-flow" — ОДДС, /finance/cash-flow/
+//   kind = "bridge"    — сверка «чистая прибыль → чистый денежный поток», /finance/bridge/
+const META = {
+  pnl: { title: "statements.pnlTitle", hint: "statements.pnlHint", csv: "opiu", rows: "pnl" },
+  "cash-flow": { title: "statements.cashFlowTitle", hint: "statements.cashFlowHint", csv: "odds", rows: "cf" },
+  bridge: { title: "statements.bridgeTitle", hint: "statements.bridgeHint", csv: "sverka", rows: "bridge" },
+};
 export default function FinanceStatement({ kind }) {
   const { t } = useTranslation();
   const { toast } = useUI();
@@ -31,8 +37,9 @@ export default function FinanceStatement({ kind }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, year]);
 
-  const title = kind === "pnl" ? t("statements.pnlTitle") : t("statements.cashFlowTitle");
-  const hint = kind === "pnl" ? t("statements.pnlHint") : t("statements.cashFlowHint");
+  const meta = META[kind];
+  const title = t(meta.title);
+  const hint = t(meta.hint);
 
   return (
     <div className="card" style={{ marginTop: 4 }}>
@@ -42,15 +49,19 @@ export default function FinanceStatement({ kind }) {
           <button className="ghost" onClick={() => setYear(year - 1)} aria-label={t("statements.prevYear")}>‹</button>
           <strong style={{ minWidth: 48, textAlign: "center" }}>{year}</strong>
           <button className="ghost" onClick={() => setYear(year + 1)} disabled={year >= thisYear} aria-label={t("statements.nextYear")}>›</button>
-          <button className="secondary" disabled={!data} onClick={() => statementCsv(data, kind === "pnl" ? "opiu" : "odds", t)}>
+          <button className="secondary" disabled={!data} onClick={() => statementCsv(data, meta.csv, t, meta.rows)}>
             {t("statements.csv")}
           </button>
         </div>
       </div>
       <p className="muted" style={{ fontSize: 13, margin: "8px 0 0" }}>{hint}</p>
+      <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("statements.currencyNote")}</p>
       {data ? (
         <>
-          <StatementTable data={data} />
+          <StatementTable data={data} kind={meta.rows} />
+          {kind === "cash-flow" && data.balanced === false && (
+            <p style={{ fontSize: 13, marginTop: 8, color: "var(--danger)" }}>{t("statements.notBalanced")}</p>
+          )}
           {kind === "pnl" && Number(data.losses_unknown || 0) > 0 && (
             <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
               {t("statements.lossesUnknown", { n: data.losses_unknown })}

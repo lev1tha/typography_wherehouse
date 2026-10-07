@@ -570,7 +570,7 @@ class CogsTests(APITestCase):
         # Итог графика сходится с плитками месяца: тот же состав, та же прибыль.
         report = self._report()
         totals = r.data["totals"]
-        self.assertEqual(Decimal(str(totals["variable"])), Decimal(str(report["total_expenses"])))
+        self.assertEqual(Decimal(str(totals["expenses"])), Decimal(str(report["total_expenses"])))
         self.assertEqual(Decimal(str(totals["cogs"])), Decimal(str(report["cogs"])))
         self.assertEqual(Decimal(str(totals["profit"])), Decimal(str(report["profit"])))
         self.assertEqual(Decimal(str(totals["profit"])), Decimal(str(report["profit"])))
@@ -591,7 +591,7 @@ class CogsTests(APITestCase):
         # Только трата: закуп партии из setUp — оборот, не расход дня.
         self.assertEqual(Decimal(str(row["opex"])), Decimal("700"))
         self.assertEqual(
-            Decimal(str(r.data["totals"]["variable"])),
+            Decimal(str(r.data["totals"]["expenses"])),
             Decimal(str(self._report()["total_expenses"])),
         )
 
