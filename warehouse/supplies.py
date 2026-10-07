@@ -276,20 +276,24 @@ def unpost_supply(supply: Supply) -> None:
                 "накладной, — часть уже продали. Отменить нельзя."
             )
 
+    from finance import cash
+
+    label = supply.number or f"#{supply.pk}"
     for line in supply.lines.select_related("material", "roll"):
         material = line.material
         if line.roll:
             roll = line.roll
             line.roll = None
             line.save(update_fields=["roll"])
+            cash.reverse_supplier_payments(roll=roll, note=f"Отмена накладной {label}")
             roll.delete()
         # Снимаем с остатка ровно то, что накладная принесла, — без строки в
         # журнале: её приход тоже уходит ниже, и движения в сумме нет.
         apply_stock_change(material, -line.quantity)
     supply.inventory_logs.all().delete()
-    # Оплата поставщику уходит вместе с документом: поставки не было — значит
-    # и деньги за неё не отдавали. Каскадом это не решить: ссылка на накладную
-    # у кассовой записи намеренно SET_NULL, чтобы РУЧНАЯ запись пережила отмену
-    # документа (человек её сделал, ему и решать). Снимаем только свои.
-    supply.cash_entries.filter(is_auto=True).delete()
+    # Оплата поставщику НЕ стирается (2026-10-07, аудит Б-13): исходная запись
+    # остаётся в книге, рядом — встречная сегодняшним днём. Раньше записи
+    # системы удалялись, и деньги, отданные в прошлом месяце, исчезали из ОДДС
+    # уже принятого месяца. Ручную запись не трогаем: её сделал человек.
+    cash.reverse_supplier_payments(supply=supply, note=f"Отмена накладной {label}")
     supply.delete()

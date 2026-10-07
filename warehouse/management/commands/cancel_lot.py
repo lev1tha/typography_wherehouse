@@ -111,6 +111,11 @@ class Command(BaseCommand):
             material.quantity = (material.quantity or Decimal("0")) - roll.remaining_area
             material.save(update_fields=["quantity", "updated_at"])
             log.delete()
+            # Оплату партии не стираем: встречная запись сегодняшним днём,
+            # исходная остаётся в книге (аудит Б-13).
+            from finance import cash
+
+            cash.reverse_supplier_payments(roll=roll, note=f"Отменён приход №{roll.id}")
             roll.delete()
             # Цена в карточке — цена последнего прихода. Убрали его — берём ту,
             # что осталась, иначе остаток сверх партий оценивался бы ценой

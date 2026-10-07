@@ -9,6 +9,7 @@ import DailyProfitChart from "../../components/DailyProfitChart.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import FinanceStatement from "../../components/FinanceStatement.jsx";
 import ExpenseKindFormModal from "../../components/ExpenseKindFormModal.jsx";
+import AssetTaxSettings from "../../components/AssetTaxSettings.jsx";
 import ExpenseKindModal from "../../components/ExpenseKindModal.jsx";
 import ExpenseListSection from "../../components/ExpenseListSection.jsx";
 import Icon from "../../components/Icon.jsx";
@@ -655,6 +656,26 @@ export default function Finance() {
         </div>
       )}
 
+      {/* Проценты по займам и уплата налога (2026-10-07): встроенные виды,
+          своих тут не заводят. Сам налог 4 % начисляется от выручки — здесь
+          только его уплата, деньгами. */}
+      {report.below && (
+        <div className="card" style={{ marginTop: 16 }}>
+          {blockHead(t("finance.blockBelow"))}
+          <p className="muted" style={{ fontSize: 13, marginTop: -4 }}>
+            {t("finance.belowBlockHint")}
+          </p>
+          {(report.below.rows || []).map((r) => kindRow({ ...r, in_profit: true }))}
+        </div>
+      )}
+
+      <AssetTaxSettings
+        settings={settings}
+        readOnly={readOnly}
+        onSettings={setSettings}
+        onChanged={loadReport}
+      />
+
       {/* Карточки «Реквизиты для документов» здесь больше нет: заказчик просил
           убрать реквизиты совсем, и печатные формы их больше не печатают.
           Данные в базе остались — если понадобятся, блок возвращается назад. */}
@@ -875,6 +896,7 @@ export default function Finance() {
         <ExpenseKindModal
           kind={openKind}
           period={params}
+          settings={settings}
           onClose={() => setOpenKind(null)}
           onChanged={reloadAll}
           onEditKind={(k) => {

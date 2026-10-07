@@ -10,7 +10,10 @@
 API и приходы, внесённые до этого дня.
 """
 from decimal import Decimal
+from io import StringIO
 
+from django.core.management import call_command
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
@@ -86,12 +89,29 @@ class SupplierPaymentTests(APITestCase):
         self._lot(payment="CASH", received_on="2026-09-01")
         self.assertEqual(CashEntry.objects.get().happened_on.isoformat(), "2026-09-01")
 
-    def test_deleting_the_lot_takes_the_payment_with_it(self):
-        """Иначе в кассе остался бы расход за материал, которого нет."""
+    def test_cancelling_the_lot_reverses_the_payment_instead_of_erasing_it(self):
+        """Отмена прихода не стирает оплату (2026-10-07, аудит Б-13): исходный
+        расход остаётся своим днём, рядом — встречный приход сегодня. Раньше
+        каскад уносил расход прошлого месяца, и ОДДС принятого месяца менялся
+        без единой строки."""
+        self._lot(payment="CASH", received_on="2026-09-01")
+        lot = Roll.objects.get()
+        call_command("cancel_lot", str(lot.id), "--yes", stdout=StringIO())
+        self.assertFalse(Roll.objects.exists())
+        paid = CashEntry.objects.get(kind=CashEntry.Kind.OUT)
+        back = CashEntry.objects.get(kind=CashEntry.Kind.IN)
+        self.assertEqual(paid.happened_on.isoformat(), "2026-09-01")
+        self.assertEqual(back.happened_on, timezone.localdate())
+        self.assertEqual(back.amount, paid.amount)
+        self.assertEqual(back.article, CashEntry.Article.SUPPLY)
+        self.assertEqual(CashEntry.balance(CASH), Decimal("0"))
+
+    def test_bare_lot_delete_keeps_the_payment(self):
+        """Ссылка на партию — SET_NULL: даже удаление мимо кода не стирает деньги."""
         self._lot(payment="CASH")
         Roll.objects.get().delete()
-        self.assertFalse(CashEntry.objects.exists())
-        self.assertEqual(CashEntry.balance(CASH), Decimal("0"))
+        entry = CashEntry.objects.get()
+        self.assertIsNone(entry.roll_id)
 
     def test_storekeeper_cannot_receive_at_all(self):
         """Приёмка админская — значит и деньги из кассы трогает только админ."""

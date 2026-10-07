@@ -14,12 +14,14 @@ from .views import (
     FinanceUnlockView,
     MaterialReportView,
     PnlView,
+    TaxRateViewSet,
 )
 
 router = DefaultRouter()
 router.register("cash", CashEntryViewSet, basename="cash")
 router.register("expense-kinds", ExpenseKindViewSet, basename="expense-kind")
 router.register("expense-entries", ExpenseEntryViewSet, basename="expense-entry")
+router.register("tax-rates", TaxRateViewSet, basename="tax-rate")
 
 urlpatterns = [
     path("report/", FinanceReportView.as_view(), name="finance-report"),

@@ -28,11 +28,32 @@ class ExpenseKind(models.Model):
         # заказчика, 2026-08-24): станок и ремонт цеха не должны ни уменьшать
         # прибыль, ни сидеть в «Расходах» — это вложения, у них своя графа.
         INVESTMENT = "INVESTMENT", _("Инвестиции")
+        # Ниже операционной прибыли: проценты по займам и уплата налога
+        # (2026-10-07). Только встроенные виды — своих здесь не заводят.
+        BELOW = "BELOW", _("Проценты и налоги")
 
-    # Свои виды можно завести в любом блоке. Строка с флагом «входит в прибыль»
-    # добавится к итогу своего блока, без флага останется справочной (как «долг
-    # материала»); в «Инвестициях» флаг всегда снят — блок в прибыль не входит.
+    # Свои виды можно завести в этих блоках: в «Инвестициях» — покупкой
+    # (капвложение), в остальных — операционным расходом. Роль вида выводится из
+    # блока (`role_for_block`), галочки «входит в прибыль» больше нет.
     USER_BLOCKS = (Block.MATERIALS, Block.FIXED, Block.VARIABLE, Block.INVESTMENT)
+
+    class Role(models.TextChoices):
+        """Как трата этого вида ложится в отчёты — одна роль на вид.
+
+        Строку ОПиУ и ОДДС для каждой роли задаёт справочник `finance.chart`.
+        Раньше это решала пара «блок + входит в прибыль», и свой вид со снятой
+        галочкой уходил из кассы, ни разу не появившись в ОПиУ (аудит, Б-10).
+        """
+
+        OPEX = "OPEX", _("Операционный расход")
+        CAPEX = "CAPEX", _("Капвложение (амортизация)")
+        INTEREST = "INTEREST", _("Проценты по займам")
+        TAX = "TAX", _("Уплата налога")
+        # Закуп материала: деньги ушли в склад, в прибыль они попадут
+        # себестоимостью проданного, а не тратой.
+        INVENTORY = "INVENTORY", _("Закуп в склад")
+        # «Долг материала»: запись без денег и без расхода.
+        NOT_CASH = "NOT_CASH", _("Справочно, без денег")
 
     code = models.SlugField(
         _("код"), max_length=40, unique=True, allow_unicode=True,
@@ -40,9 +61,16 @@ class ExpenseKind(models.Model):
     )
     name = models.CharField(_("название"), max_length=120)
     block = models.CharField(_("блок отчёта"), max_length=12, choices=Block.choices)
+    role = models.CharField(
+        _("роль в отчётах"), max_length=12, choices=Role.choices, default=Role.OPEX,
+        help_text=_("Куда трата ложится в ОПиУ и ОДДС — см. finance.chart."),
+    )
+    # Устарело с 2026-10-07: источник истины — `role`. Поле живёт ради отката
+    # миграций и держится в согласии с ролью (`save`): прибыль уменьшают только
+    # операционные расходы и проценты.
     in_profit = models.BooleanField(
         _("входит в прибыль"), default=True,
-        help_text=_("Снято — расход виден в отчёте, но прибыль не уменьшает (как покупка оборудования)."),
+        help_text=_("Устарело: выводится из роли вида."),
     )
     # Встроенный вид нельзя удалить и нельзя перенести в другой блок: на его код
     # опирается отчёт (транспорт — в блоке «Материалы», зарплаты — по сотрудникам).
@@ -63,9 +91,33 @@ class ExpenseKind(models.Model):
     SALARY = "SALARY"
     MATERIAL_PURCHASE = "MATERIAL_PURCHASE"
     MATERIAL_DEBT = "MATERIAL_DEBT"
+    EQUIPMENT = "EQUIPMENT"
+    IMPROVEMENT = "IMPROVEMENT"
+    TAX = "TAX"
+    INTEREST = "INTEREST"
+
+    # Роли, траты которых уменьшают прибыль напрямую (капвложения — через
+    # амортизацию, её считает отчёт). По ним же держится устаревший `in_profit`.
+    PROFIT_ROLES = (Role.OPEX, Role.INTEREST)
 
     def __str__(self) -> str:
         return self.name
+
+    @classmethod
+    def role_for_block(cls, block) -> str:
+        """Роль своего вида по блоку: «Инвестиции» — покупка, остальное — расход."""
+        return cls.Role.CAPEX if block == cls.Block.INVESTMENT else cls.Role.OPEX
+
+    def save(self, *args, **kwargs):
+        # Новый вид в «Инвестициях», заведённый без роли, — покупка: так блок
+        # и означал до появления ролей.
+        if self._state.adding and self.block == self.Block.INVESTMENT and self.role == self.Role.OPEX:
+            self.role = self.Role.CAPEX
+        self.in_profit = self.role in self.PROFIT_ROLES
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "role" in update_fields:
+            kwargs["update_fields"] = {*update_fields, "in_profit"}
+        super().save(*args, **kwargs)
 
     @staticmethod
     def make_code(name: str) -> str:
@@ -109,8 +161,30 @@ class ExpenseEntry(models.Model):
     name = models.CharField(_("за что / кому"), max_length=255, blank=True)
     amount = models.DecimalField(_("сумма"), max_digits=14, decimal_places=2, default=Decimal("0"))
     # Дату ставит пользователь: расходы часто вносят задним числом («аренда за
-    # прошлый месяц»).
+    # прошлый месяц»). Это дата ОПЛАТЫ — по ней трата уходит в кассовую книгу.
     spent_at = models.DateField(_("дата"), default=timezone.localdate)
+    # За какой месяц расход — по нему трата ложится в ОПиУ (метод начисления,
+    # 2026-10-07). Аренда сентября, оплаченная 5 октября: оплата — октябрём в
+    # кассе, расход — сентябрём в прибыли. Хранится первым числом месяца; пусто
+    # бывает только у записей до миграции finance/0014 — там месяц оплаты.
+    period = models.DateField(
+        _("за какой месяц"), null=True, blank=True,
+        help_text=_("Первое число месяца, к которому относится расход."),
+    )
+    # Капвложение выше порога — актив: срок службы в месяцах, амортизация
+    # равными долями со следующего месяца после покупки. Пусто — трата пошла в
+    # расходы сразу (не капвложение или ниже порога). Решение «актив или расход»
+    # запоминается здесь в момент ввода, и смена порога в настройках прошлое не
+    # переписывает.
+    useful_life_months = models.PositiveSmallIntegerField(
+        _("срок службы, мес."), null=True, blank=True,
+    )
+    # Выбытие (поломка, списание): по этот месяц включительно амортизация идёт,
+    # в нём же разом списывается остаток стоимости; дальше — ничего.
+    depreciate_until = models.DateField(
+        _("амортизировать до месяца"), null=True, blank=True,
+        help_text=_("Первое число месяца выбытия. Пусто — до конца срока службы."),
+    )
     note = models.TextField(_("примечание"), blank=True)
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
@@ -126,6 +200,29 @@ class ExpenseEntry(models.Model):
 
     def __str__(self) -> str:
         return f"{self.kind.name}: {self.name} — {self.amount}"
+
+    @property
+    def accrual_month(self):
+        """Первое число месяца, к которому расход относится в ОПиУ."""
+        from .periods import month_start
+
+        return month_start(self.period or self.spent_at)
+
+    @property
+    def is_capitalized(self) -> bool:
+        return self.useful_life_months is not None
+
+    def save(self, *args, **kwargs):
+        # «За какой месяц» всегда первым числом; не указан — месяц оплаты.
+        from .periods import month_start
+
+        self.period = month_start(self.period or self.spent_at)
+        if self.depreciate_until:
+            self.depreciate_until = month_start(self.depreciate_until)
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "spent_at" in update_fields:
+            kwargs["update_fields"] = {*update_fields, "period"}
+        super().save(*args, **kwargs)
 
 
 class PeriodLock(models.Model):
@@ -221,6 +318,12 @@ class CashEntry(models.Model):
         LOAN_IN = "LOAN_IN", _("Займ получен")
         LOAN_OUT = "LOAN_OUT", _("Займ погашен")
         COUNT = "COUNT", _("Пересчёт кассы")
+        # Первое приведение кассы к факту (2026-10-07): деньги, которые лежали
+        # в ящике и на счёте ДО того, как их начали вести в системе. Это не
+        # движение денег, а остаток — в ОДДС вне потока, в ОПиУ его нет.
+        # Обычный пересчёт (COUNT) — наоборот: недостача или излишек, и они
+        # идут и в поток, и в прибыль.
+        OPENING = "OPENING", _("Ввод начального остатка")
         OTHER = "OTHER", _("Прочее")
 
     account = models.CharField(
@@ -258,11 +361,14 @@ class CashEntry(models.Model):
         related_name="cash_entries", verbose_name=_("трата"),
     )
     # Партия, за которую заплатили поставщику. Приход одной кнопкой документа
-    # не заводит, и привязать оплату больше не к чему; удалили партию —
-    # каскад уносит и оплату, иначе в кассе остался бы расход за материал,
-    # которого на складе нет.
+    # не заводит, и привязать оплату больше не к чему.
+    #
+    # SET_NULL, а не каскад (2026-10-07, аудит Б-13): удалили партию — оплата
+    # остаётся в книге, а рядом пишется встречная запись сегодняшним днём
+    # (`finance.cash.reverse_supplier_payments`). Каскад стирал расход прошлого
+    # месяца, и ОДДС уже принятого месяца менялся без единой строки.
     roll = models.ForeignKey(
-        "warehouse.Roll", on_delete=models.CASCADE, null=True, blank=True,
+        "warehouse.Roll", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="cash_entries", verbose_name=_("партия"),
     )
     # Запись создана системой, а не человеком: такие не правятся руками, иначе
@@ -378,6 +484,20 @@ class FinanceSettings(models.Model):
         null=True, blank=True,
         help_text=_("Пусто — считается по складу автоматически."),
     )
+    # Амортизация (2026-10-07). Покупка вида «Инвестиции» дешевле порога —
+    # сразу расход: растягивать 15 000 на 60 месяцев по 250 сом значит вести
+    # учёт, который ничего не объясняет. 20 000 — решение владельца (D-22).
+    capitalization_threshold = models.DecimalField(
+        _("порог капвложения"), max_digits=14, decimal_places=2, default=Decimal("20000"),
+        help_text=_("Покупка от этой суммы — актив с амортизацией, дешевле — сразу расход."),
+    )
+    # Улучшение арендованного цеха служит не дольше аренды: съехали — ремонт
+    # остался хозяину. Срок такой покупки не больше месяцев до этой даты; пусто —
+    # 60 месяцев, как у оборудования.
+    lease_until = models.DateField(
+        _("аренда помещения до"), null=True, blank=True,
+        help_text=_("Ограничивает срок амортизации улучшений цеха. Пусто — 60 мес."),
+    )
     # Реферальная программа
     referral_bonus = models.DecimalField(
         _("бонус за приведённого клиента"), max_digits=14, decimal_places=2, default=Decimal("0"),
@@ -401,3 +521,59 @@ class FinanceSettings(models.Model):
     def save(self, *args, **kwargs):
         self.pk = 1
         super().save(*args, **kwargs)
+
+
+# Срок службы по умолчанию, месяцев: оборудование и улучшение цеха (последнее —
+# не дольше аренды, `FinanceSettings.lease_until`). Решение владельца, D-13.
+DEFAULT_USEFUL_LIFE_MONTHS = 60
+
+
+class TaxRate(models.Model):
+    """Ставка налога с выручки и месяц, с которого она действует.
+
+    История, а не одно число в настройках (2026-10-07, D-10): новая ставка
+    начинает действовать со своего месяца, а прошлые месяцы считаются по своим
+    ставкам — иначе смена 4 % на 3 % переписала бы прибыль всех прошлых лет.
+    Налог месяца = ставка, действующая на первое число месяца, × выручка месяца
+    нетто возвратов. До первой записи налога нет (решение D-19: с 10.2026).
+    """
+
+    valid_from = models.DateField(
+        _("действует с месяца"), unique=True,
+        help_text=_("Первое число месяца, с которого действует ставка."),
+    )
+    rate = models.DecimalField(
+        _("ставка, %"), max_digits=5, decimal_places=2,
+        help_text=_("Процент от выручки месяца, например 4.00."),
+    )
+    note = models.CharField(_("примечание"), max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="tax_rates",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("ставка налога")
+        verbose_name_plural = _("ставки налога")
+        ordering = ["valid_from"]
+
+    def __str__(self) -> str:
+        return f"{self.rate} % с {self.valid_from:%m.%Y}"
+
+    def save(self, *args, **kwargs):
+        from .periods import month_start
+
+        self.valid_from = month_start(self.valid_from)
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def rate_for(cls, month) -> Decimal:
+        """Ставка (в процентах) месяца, в который попадает дата. Нет — 0."""
+        from .periods import month_start
+
+        row = (
+            cls.objects.filter(valid_from__lte=month_start(month))
+            .order_by("-valid_from").values_list("rate", flat=True).first()
+        )
+        return row if row is not None else Decimal("0")

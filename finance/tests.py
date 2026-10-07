@@ -319,12 +319,17 @@ class ExpenseKindAPITests(APITestCase):
         self.assertEqual(Decimal(str(row["amount"])), Decimal("500"))
         self.assertEqual(Decimal(str(rep.data["fixed"]["total"])), Decimal("500"))
 
-    def test_kind_out_of_profit_is_shown_but_not_in_total(self):
-        """Строка со снятым флагом видна в своём блоке, а прибыль не уменьшает."""
+    def test_profit_tick_from_the_form_is_ignored(self):
+        """Галочки «входит в прибыль» больше нет (2026-10-07, аудит Б-10): свой
+        вид вне «Инвестиций» — операционный расход, и его траты уменьшают
+        прибыль, что бы ни прислала старая форма. Раньше снятая галочка
+        уводила деньги из кассы мимо ОПиУ."""
         r = self.client.post(
             self.URL, {"name": "Спорная строка", "block": "VARIABLE", "in_profit": False}, format="json"
         )
         self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["role"], "OPEX")
+        self.assertTrue(r.data["in_profit"])
         ExpenseEntry.objects.create(
             kind=ExpenseKind.objects.get(name="Спорная строка"),
             amount=Decimal("300000"), spent_at=date(2026, 6, 5),
@@ -332,7 +337,7 @@ class ExpenseKindAPITests(APITestCase):
         rep = self.client.get("/api/finance/report/", {"date_from": "2026-06-01", "date_to": "2026-06-30"})
         row = next(x for x in rep.data["variable"]["rows"] if x["name"] == "Спорная строка")
         self.assertEqual(Decimal(str(row["amount"])), Decimal("300000"))
-        self.assertEqual(Decimal(str(rep.data["variable"]["total"])), Decimal("0"))
+        self.assertEqual(Decimal(str(rep.data["variable"]["total"])), Decimal("300000"))
         # В «Инвестиции» чужая строка не попадает: тот блок — только свои виды.
         self.assertEqual(Decimal(str(rep.data["investments"]["total"])), Decimal("0"))
 

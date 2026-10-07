@@ -126,6 +126,16 @@ class Receipt(models.Model):
     # прошлое может только админ (см. checkout) — задним числом двигаются деньги
     # уже закрытых месяцев.
     created_at = models.DateTimeField(_("дата заказа"), default=timezone.now)
+    # Когда заказ стал ПРОДАЖЕЙ — по этой дате выручка и себестоимость ложатся
+    # в отчёты (2026-10-07, D-7/D-14). У обычного заказа всегда равна дате
+    # заказа (держит `save`). У онлайн-заказа пусто, пока оплату не подтвердили:
+    # неоплаченный онлайн-счёт — не выручка и не долг; подтвердили — ставится
+    # момент подтверждения (`sale_service.recognize_online_sale`), и туда же
+    # уходит списание склада, то есть себестоимость. Дату заказа при этом не
+    # трогаем — она остаётся той, что видел клиент.
+    revenue_recognized_at = models.DateTimeField(
+        _("дата признания выручки"), null=True, blank=True,
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -140,6 +150,13 @@ class Receipt(models.Model):
         if self.order_number is None:
             last = Receipt.objects.aggregate(m=models.Max("order_number"))["m"] or 0
             self.order_number = last + 1
+        # Обычный заказ — продажа в день заказа, и перенос даты заказа двигает
+        # её следом. Онлайн-заказ признаётся только подтверждением оплаты.
+        if self.payment_method != self.PaymentMethod.ONLINE:
+            self.revenue_recognized_at = self.created_at
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None and "created_at" in update_fields:
+                kwargs["update_fields"] = {*update_fields, "revenue_recognized_at"}
         super().save(*args, **kwargs)
 
     def recalculate_total(self) -> Decimal:

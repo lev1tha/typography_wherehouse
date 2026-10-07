@@ -834,6 +834,27 @@ def add_items_to_receipt(receipt: Receipt, items_data, *, user=None):
     return receipt, surcharge
 
 
+def recognize_online_sale(receipt: Receipt) -> None:
+    """Онлайн-заказ стал продажей: оплату подтвердили (2026-10-07, D-7/D-14).
+
+    До этого неоплаченный онлайн-счёт — не выручка и не долг. Признаём его
+    моментом подтверждения и в тот же момент списываем склад: себестоимость
+    проданного ложится в тот же период, что и выручка. Раньше выручка стояла
+    в месяце заказа, а себестоимость появлялась там же «задним числом» в день
+    оплаты — даже если месяц уже закрыт.
+
+    Дату заказа не трогаем: её видел клиент. Повторный вызов ничего не делает.
+    Сохраняет чек сам (`revenue_recognized_at`, `stock_deducted`).
+    """
+    if receipt.payment_method != Receipt.PaymentMethod.ONLINE or receipt.revenue_recognized_at:
+        return
+    if not receipt.stock_deducted:
+        _deduct_all(receipt)
+        receipt.stock_deducted = True
+    receipt.revenue_recognized_at = timezone.now()
+    receipt.save(update_fields=["revenue_recognized_at", "stock_deducted", "updated_at"])
+
+
 @transaction.atomic
 def confirm_payment(receipt: Receipt) -> Receipt:
     """Called when the payment gateway confirms an online payment."""
@@ -841,6 +862,7 @@ def confirm_payment(receipt: Receipt) -> Receipt:
         return receipt
     _settle(receipt)
     receipt.save(update_fields=["payment_status", "amount_paid", "stock_deducted", "updated_at"])
+    recognize_online_sale(receipt)
     # Онлайн-оплата — такой же приход денег, как наличные в ящик и перевод на
     # карту, и в кассовую книгу она обязана попасть. Этой строки тут не было:
     # приход писали только `create_sale` и `apply_payment`, а онлайн-заказ шёл
@@ -953,6 +975,11 @@ def apply_payment(
     receipt.save(
         update_fields=["amount_paid", "change_due", "payment_status", "updated_at"]
     )
+    # Онлайн-счёт, оплаченный не шлюзом, а в кассе (`/pay/`), — та же продажа,
+    # что и подтверждённый шлюзом: признаём и списываем склад. Раньше такой чек
+    # становился «Оплачено», а материал со склада не уходил вовсе.
+    if receipt.payment_status == Receipt.PaymentStatus.PAID:
+        recognize_online_sale(receipt)
 
     settled_on = paid_on or timezone.localdate()
     Payment.objects.create(

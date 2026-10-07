@@ -40,18 +40,38 @@ class ExpenseKindGuardTests(APITestCase):
     def _profit(self):
         return Decimal(str(self.client.get(REPORT, self.window).data["profit"]))
 
-    def test_unticking_profit_on_a_kind_with_closed_entries_is_refused(self):
+    def _own_kind_with_past_entry(self):
+        r = self.client.post(KINDS, {"name": "Реклама", "block": "FIXED"}, format="json")
+        kind = ExpenseKind.objects.get(pk=r.data["id"])
+        ExpenseEntry.objects.create(kind=kind, amount=Decimal("5000"), spent_at=self.past)
+        return kind
+
+    def test_moving_a_kind_out_of_expenses_with_closed_entries_is_refused(self):
+        """Смена блока меняет роль: расход становится покупкой с амортизацией —
+        и прибыль закрытого месяца поехала бы. Держит замок периода (раньше то
+        же делала галочка «входит в прибыль»)."""
+        kind = self._own_kind_with_past_entry()
         before = self._profit()
         self.client.patch("/api/finance/period/", {
             "closed_through": (self.today - timedelta(days=1)).isoformat(),
         }, format="json")
-        r = self.client.patch(f"{KINDS}{self.rent.id}/", {"in_profit": False}, format="json")
+        r = self.client.patch(f"{KINDS}{kind.id}/", {"block": "INVESTMENT"}, format="json")
         self.assertEqual(r.status_code, 400, r.data)
         self.assertEqual(self._profit(), before)
+        kind.refresh_from_db()
+        self.assertEqual(kind.role, ExpenseKind.Role.OPEX)
 
-    def test_unticking_is_allowed_while_the_period_is_open(self):
+    def test_moving_is_allowed_while_the_period_is_open(self):
+        kind = self._own_kind_with_past_entry()
+        r = self.client.patch(f"{KINDS}{kind.id}/", {"block": "INVESTMENT"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["role"], "CAPEX")
+
+    def test_profit_flag_is_read_only_now(self):
         r = self.client.patch(f"{KINDS}{self.rent.id}/", {"in_profit": False}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
+        self.rent.refresh_from_db()
+        self.assertTrue(self.rent.in_profit)
 
     def test_renaming_a_kind_is_not_blocked_by_the_lock(self):
         self.client.patch("/api/finance/period/", {

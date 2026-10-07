@@ -208,15 +208,16 @@ def sync_expense(entry, *, user=None):
     ветки разошлись бы на первой же доработке. Запись у траты всегда одна —
     старые убираем, новую пишем.
 
-    «Долг материала» в кассу не идёт: эта запись означает «материал взяли,
-    деньги ещё не отдали», и расхода по ней не было. Остальные виды — реальные
-    деньги, ушедшие из ящика или со счёта, включая вложения: станок за 300 000
-    прибыль не уменьшает, но из кассы уходит.
+    Вид с ролью «без денег» («Долг материала») в кассу не идёт: эта запись
+    означает «материал взяли, деньги ещё не отдали», и расхода по ней не было.
+    Остальные виды — реальные деньги, ушедшие из ящика или со счёта, включая
+    вложения: станок за 300 000 в прибыль идёт амортизацией, а из кассы уходит
+    целиком в день покупки.
     """
     from .models import CashEntry, ExpenseKind
 
     entry.cash_entries.all().delete()
-    if entry.kind.code == ExpenseKind.MATERIAL_DEBT:
+    if entry.kind.role == ExpenseKind.Role.NOT_CASH:
         return None
     article = (
         CashEntry.Article.SALARY
@@ -231,3 +232,37 @@ def sync_expense(entry, *, user=None):
         user=user or entry.created_by,
         expense=entry,
     )
+
+
+def reverse_supplier_payments(*, roll=None, supply=None, note="", user=None):
+    """Отменили приход или накладную — вернуть их оплату встречной записью.
+
+    Раньше оплату стирали: партия уносила её каскадом, отмена накладной —
+    явным удалением. Деньги поставщику в прошлом месяце исчезали из книги, и
+    ОДДС уже принятого месяца менялся без единой строки (аудит, Б-13). Теперь
+    исходная запись остаётся, а на каждом счёте, где по документу ушли деньги,
+    пишется приход той же статьёй сегодняшним днём: «поставки не было, деньги
+    вернули» (или зачли поставщику — для кассы это одно и то же).
+
+    Берём только записи системы (`is_auto`): ручную запись человек сделал сам,
+    ему и решать, что с ней делать. Вызывать ДО удаления партии/накладной.
+    """
+    from .models import CashEntry
+
+    if roll is None and supply is None:
+        return []
+    qs = CashEntry.objects.filter(is_auto=True, article=CashEntry.Article.SUPPLY)
+    qs = qs.filter(roll=roll) if roll is not None else qs.filter(supply=supply)
+    held = {}
+    for account, kind, amount in qs.values_list("account", "kind", "amount"):
+        sign = -1 if kind == CashEntry.Kind.OUT else 1
+        held[account] = held.get(account, Decimal("0")) + sign * amount
+    entries = []
+    for account, value in held.items():
+        if value < 0:
+            entries.append(money_in(-value, CashEntry.Article.SUPPLY, account=account,
+                                    roll=roll, supply=supply, note=note, user=user))
+        elif value > 0:
+            entries.append(money_out(value, CashEntry.Article.SUPPLY, account=account,
+                                     roll=roll, supply=supply, note=note, user=user))
+    return entries

@@ -26,12 +26,16 @@ const today = () => new Date().toLocaleDateString("sv-SE");
 // Статьи, которые можно вносить руками. Оплаты и сдача сюда не входят: их
 // пишет система по чекам, и ручная запись развела бы кассу с продажами.
 // Расход цеха и зарплата — тоже нет (с 2026-09-27): их вносят в «Финансах»,
-// иначе деньги уходили бы из кассы мимо ОПиУ. Деньги владельца и займы —
-// финансовая деятельность в ОДДС, им нужны свои статьи.
+// иначе деньги уходили бы из кассы мимо ОПиУ. Оплата поставщику — тоже нет
+// (с 2026-10-07): руками она не гасила долг за накладную, и его можно было
+// оплатить второй раз. Деньги владельца и займы — финансовая деятельность в
+// ОДДС; ввод начального остатка — вне потока (это не движение денег).
 const MANUAL_ARTICLES = {
-  IN: ["DEPOSIT", "LOAN_IN", "TRANSFER", "OTHER"],
-  OUT: ["OWNER_OUT", "LOAN_OUT", "SUPPLY", "TRANSFER", "OTHER"],
+  IN: ["DEPOSIT", "LOAN_IN", "TRANSFER", "OPENING", "OTHER"],
+  OUT: ["OWNER_OUT", "LOAN_OUT", "TRANSFER", "OPENING", "OTHER"],
 };
+// Подсказка под выбранной статьёй — там, где её легко перепутать.
+const ARTICLE_HINTS = ["LOAN_OUT", "TRANSFER", "OPENING"];
 
 function periodParams({ year, month }) {
   if (!month) return {};
@@ -282,6 +286,9 @@ export default function Cash() {
               </select>
             </div>
           </div>
+          {ARTICLE_HINTS.includes(entry.article) && (
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t(`cash.hint_${entry.article}`)}</p>
+          )}
           {entry.kind === "OUT" && (
             <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("cash.expensesViaFinance")}</p>
           )}

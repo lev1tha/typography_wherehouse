@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { apiError } from "../api/errors.js";
 import { useAuth } from "../auth/AuthContext.jsx";
 import Icon from "./Icon.jsx";
 import Modal from "./Modal.jsx";
@@ -25,7 +26,11 @@ function defaultDate(period) {
 // Диалог одного вида расхода: все траты по нему за выбранный период, добавление
 // прямо здесь и правка строки на месте. Раньше для этого нужно было листать
 // страницу до отдельного раздела и искать нужную категорию в выпадающем списке.
-export default function ExpenseKindModal({ kind, period, onClose, onChanged, onEditKind }) {
+// «За какой месяц» пуст — сервер ставит месяц оплаты. Отправляем поле, только
+// если его заполнили, иначе правка дня оплаты не потянула бы месяц следом.
+const monthOf = (day) => (day || "").slice(0, 7);
+
+export default function ExpenseKindModal({ kind, period, settings, onClose, onChanged, onEditKind }) {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
   // Бухгалтер сюда заходит смотреть: запись в финансах сервер ему запрещает.
@@ -36,7 +41,12 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
   // счёта остаток наличных считал бы и переводы тоже.
   const [form, setForm] = useState({
     name: "", amount: "", spent_at: defaultDate(period), note: "", account: "CASH",
+    period: "", useful_life_months: "",
   });
+  // Покупка в «Инвестициях»: от порога — актив с амортизацией (срок службы,
+  // месяц выбытия), дешевле — сразу расход. Решает сервер по порогу.
+  const isCapex = kind.role === "CAPEX";
+  const threshold = settings?.capitalization_threshold;
   const [editing, setEditing] = useState(null);
 
   // У зарплат в это поле пишется имя сотрудника — мастера и резчики не заводятся
@@ -66,18 +76,26 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
         spent_at: form.spent_at,
         note: form.note,
         account: form.account,
+        ...(form.period ? { period: form.period } : {}),
+        ...(isCapex && form.useful_life_months ? { useful_life_months: Number(form.useful_life_months) } : {}),
       })
       .then(() => {
-        setForm({ name: "", amount: "", spent_at: form.spent_at, note: "", account: form.account });
+        setForm({
+          name: "", amount: "", spent_at: form.spent_at, note: "", account: form.account,
+          period: form.period, useful_life_months: "",
+        });
         load();
         onChanged?.();
         toast(t("expenses.added"));
       })
-      .catch(() => toast(t("common.error"), "error"));
+      // Текст сервера, а не «ошибка»: замок периода, срок больше аренды и
+      // прочие отказы объясняют, что поправить.
+      .catch((e) => toast(apiError(e, t("common.error")), "error"));
   }
 
   function saveEdit() {
     if (!editing.amount) return toast(t("expenses.needAmount"), "error");
+    const original = rows.find((r) => r.id === editing.id);
     api
       .patch(`/finance/expense-entries/${editing.id}/`, {
         name: editing.name,
@@ -85,6 +103,15 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
         spent_at: editing.spent_at,
         note: editing.note || "",
         account: editing.account,
+        // Месяц отправляем, только если его меняли: иначе правка дня оплаты
+        // не потянула бы за собой месяц, стоявший по умолчанию.
+        ...(editing.period !== original?.period ? { period: editing.period || null } : {}),
+        ...(editing.is_capitalized
+          ? {
+              useful_life_months: Number(editing.useful_life_months) || null,
+              depreciate_until: editing.depreciate_until || null,
+            }
+          : {}),
       })
       .then(() => {
         setEditing(null);
@@ -92,7 +119,7 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
         onChanged?.();
         toast(t("common.saved"));
       })
-      .catch(() => toast(t("common.error"), "error"));
+      .catch((e) => toast(apiError(e, t("common.error")), "error"));
   }
 
   async function del(row) {
@@ -130,7 +157,7 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
         {period?.date_from
           ? t("kinds.periodHint", { from: period.date_from, to: period.date_to })
           : t("kinds.allTimeHint")}
-        {!kind.in_profit && ` · ${t("kinds.notInProfitHint")}`}
+        {isCapex && ` · ${t("kinds.capexRoleHint")}`}
       </p>
 
       {/* Закуп материала руками не вносится: система считает его по приходам,
@@ -181,7 +208,38 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
             <button onClick={add}>{t("common.add")}</button>
           </div>
         </div>
-        <div className="field" style={{ marginTop: 2, marginBottom: 0 }}>
+        <div className="row" style={{ marginTop: 2 }}>
+          <div className="field" style={{ width: 170, marginBottom: 0 }}>
+            <label>{t("expenses.period")}</label>
+            <input
+              type="month"
+              value={form.period}
+              placeholder={monthOf(form.spent_at)}
+              onChange={(e) => setForm({ ...form, period: e.target.value })}
+            />
+          </div>
+          {isCapex && (
+            <div className="field" style={{ width: 170, marginBottom: 0 }}>
+              <label>{t("expenses.usefulLife")}</label>
+              <input
+                type="number"
+                min="1"
+                value={form.useful_life_months}
+                placeholder="60"
+                onChange={(e) => setForm({ ...form, useful_life_months: e.target.value })}
+              />
+            </div>
+          )}
+        </div>
+        <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("expenses.periodHint")}</p>
+        {isCapex && (
+          <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+            {threshold != null
+              ? t("expenses.capexHint", { threshold: som(threshold) })
+              : t("expenses.capexHintNoValue")}
+          </p>
+        )}
+        <div className="field" style={{ marginTop: 8, marginBottom: 0 }}>
           <label>{t("expenses.note")}</label>
           <input
             value={form.note}
@@ -236,6 +294,42 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
                     </select>
                   </div>
                 </div>
+                <div className="row">
+                  <div className="field" style={{ width: 170 }}>
+                    <label>{t("expenses.period")}</label>
+                    <input
+                      type="month"
+                      value={editing.period || ""}
+                      onChange={(e) => setEditing({ ...editing, period: e.target.value })}
+                    />
+                  </div>
+                  {editing.is_capitalized && (
+                    <>
+                      <div className="field" style={{ width: 150 }}>
+                        <label>{t("expenses.usefulLife")}</label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={editing.useful_life_months || ""}
+                          onChange={(e) => setEditing({ ...editing, useful_life_months: e.target.value })}
+                        />
+                      </div>
+                      <div className="field" style={{ width: 190 }}>
+                        <label>{t("expenses.depreciateUntil")}</label>
+                        <input
+                          type="month"
+                          value={editing.depreciate_until || ""}
+                          onChange={(e) => setEditing({ ...editing, depreciate_until: e.target.value })}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+                {editing.is_capitalized && (
+                  <p className="muted" style={{ fontSize: 12, margin: "-4px 0 8px" }}>
+                    {t("expenses.depreciateUntilHint")}
+                  </p>
+                )}
                 <div className="field">
                   <label>{t("expenses.note")}</label>
                   <input
@@ -254,7 +348,18 @@ export default function ExpenseKindModal({ kind, period, onClose, onChanged, onE
               <div key={r.id} className="crow" style={{ borderBottom: "1px solid var(--hairline)" }}>
                 <span style={{ minWidth: 0 }}>
                   <span className="muted" style={{ fontSize: 12 }}>{r.spent_at}</span>
+                  {r.period && r.period !== monthOf(r.spent_at) && (
+                    <span className="muted" style={{ fontSize: 12 }}> · {t("expenses.forMonth", { month: r.period })}</span>
+                  )}
                   {r.name && <> · <strong>{r.name}</strong></>}
+                  {isCapex && (
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {r.is_capitalized
+                        ? t("expenses.assetBadge", { months: r.useful_life_months })
+                        : t("expenses.belowThresholdBadge")}
+                      {r.depreciate_until && ` · ${t("expenses.disposedBadge", { month: r.depreciate_until })}`}
+                    </div>
+                  )}
                   {r.note && (
                     <div className="muted" style={{ fontSize: 12 }}>{r.note}</div>
                   )}

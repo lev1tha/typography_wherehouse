@@ -2,13 +2,13 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { apiError } from "../api/errors.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 
-// Свой вид расхода можно завести в любом блоке. В «Материалах» итог считается
-// как остаток на начало + Σ(строки с «уменьшает прибыль») − остаток на конец,
-// поэтому лишняя строка формулу не ломает: со снятым флагом она останется
-// справочной, как «долг материала».
+// Свой вид расхода можно завести в любом из этих блоков. Роль в отчётах сервер
+// выводит из блока: «Инвестиции» — покупка (от порога — амортизация), остальное —
+// операционный расход.
 const USER_BLOCKS = ["MATERIALS", "FIXED", "VARIABLE", "INVESTMENT"];
 const BLOCK_LABEL = {
   MATERIALS: "blockMaterials",
@@ -26,7 +26,6 @@ export default function ExpenseKindFormModal({ kind, block, onClose, onSaved }) 
   const [form, setForm] = useState({
     name: kind?.name || "",
     block: kind?.block || block || "FIXED",
-    in_profit: kind?.in_profit ?? true,
   });
   const [busy, setBusy] = useState(false);
 
@@ -42,7 +41,7 @@ export default function ExpenseKindFormModal({ kind, block, onClose, onSaved }) 
         onSaved?.();
         onClose();
       })
-      .catch((e) => toast(e.response?.data?.block?.[0] || t("common.error"), "error"))
+      .catch((e) => toast(apiError(e, t("common.error")), "error"))
       .finally(() => setBusy(false));
   }
 
@@ -106,24 +105,12 @@ export default function ExpenseKindFormModal({ kind, block, onClose, onSaved }) 
         )}
       </div>
 
-      {/* У инвестиций галочки нет: блок в прибыль не входит по определению,
-          сервер снимает флаг сам — форма не должна обещать выбор, которого нет. */}
-      {form.block !== "INVESTMENT" ? (
-        <div className="field">
-          <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
-            <input
-              type="checkbox"
-              checked={form.in_profit}
-              onChange={(e) => setForm({ ...form, in_profit: e.target.checked })}
-              style={{ width: 18, height: 18 }}
-            />
-            {t("kinds.inProfit")}
-          </label>
-          <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("kinds.inProfitHint")}</p>
-        </div>
-      ) : (
-        <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("kinds.investmentHint")}</p>
-      )}
+      {/* Галочки «уменьшает прибыль» больше нет (2026-10-07): свой вид —
+          либо расход месяца, либо покупка в «Инвестициях». Со снятой галочкой
+          деньги уходили из кассы, ни разу не появившись в ОПиУ. */}
+      <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+        {form.block === "INVESTMENT" ? t("kinds.investmentHint") : t("kinds.opexHint")}
+      </p>
     </Modal>
   );
 }

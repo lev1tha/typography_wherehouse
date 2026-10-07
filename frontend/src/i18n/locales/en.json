@@ -844,7 +844,7 @@
     "cuttingUserShare": "{{pm}} r.m of cut · work {{sum}} · master's share {{share}}",
     "blockInvestment": "Investments",
     "totalInvestment": "Investments total",
-    "investmentBlockHint": "Machines, repairs, workshop upgrades. Not part of profit or “Expenses” — these are investments, not monthly spending.",
+    "investmentBlockHint": "Machines, workshop repairs and improvements. A purchase from the capitalisation threshold is an asset: it reaches profit through depreciation from next month, while the cash leaves in full on the payment day. Cheaper ones are expensed at once.",
     "cogsRowHint": "By lots at the moment of sale. This is working capital, not an expense: material bought — material sold.",
     "stockTitle": "Stock (working capital)",
     "stockPurchases": "Material purchased this period",
@@ -865,7 +865,9 @@
     "matStockTitle": "Stock over the period",
     "matCostsTitle": "Material expenses and debts",
     "revenueAll": "Revenue (material and work)",
-    "stockSoldAtCost": "Went into orders (at cost)"
+    "stockSoldAtCost": "Went into orders (at cost)",
+    "blockBelow": "Interest and taxes",
+    "belowBlockHint": "Loan interest reduces net profit. Tax payments are cash only: the tax itself (4% of revenue) is accrued automatically."
   },
   "expenses": {
     "amount": "Amount",
@@ -882,7 +884,18 @@
     "paidFrom": "Paid from",
     "paidCash": "Cash",
     "paidBank": "Bank",
-    "cashHint": "The expense is written to the cash book against this account."
+    "cashHint": "The expense is written to the cash book against this account.",
+    "period": "For which month",
+    "periodHint": "The expense goes to the P&L by this month and to the cash book by its date. Empty — the payment month. September rent paid on 5 October is “September”. Split a prepayment for several months into separate entries — one per month.",
+    "usefulLife": "Useful life, months",
+    "capexHint": "Purchases from {{threshold}} are assets: they reach profit through equal monthly depreciation starting next month. Cheaper ones are expensed at once.",
+    "capexHintNoValue": "Purchases from the capitalisation threshold are assets depreciated from next month; cheaper ones are expensed at once.",
+    "depreciateUntil": "Depreciate until month",
+    "depreciateUntilHint": "Broken or disposed — set the month: the remaining value is written off in it and depreciation stops. Past months stay unchanged.",
+    "forMonth": "for {{month}}",
+    "assetBadge": "asset · depreciated over {{months}} months",
+    "belowThresholdBadge": "below threshold — expensed at once",
+    "disposedBadge": "disposed: {{month}}"
   },
   "myOrders": {
     "title": "My orders",
@@ -956,8 +969,6 @@
     "name": "Name",
     "namePh": "e.g. Advertising, Taxes, Machine repair",
     "block": "Which block to show it in",
-    "inProfit": "Reduces profit",
-    "inProfitHint": "Clear it for an investment: the cost stays visible in the report but does not reduce profit — like buying equipment.",
     "builtinHint": "Built-in type: name and order can change, the block cannot.",
     "needName": "Enter a name",
     "created": "Expense type added",
@@ -970,9 +981,10 @@
     "empty": "No spending in this period.",
     "periodHint": "Spending from {{from}} to {{to}}",
     "allTimeHint": "All spending, all time",
-    "notInProfitHint": "does not reduce profit",
-    "investmentHint": "Investments are not part of profit or “Expenses” — they have their own section.",
-    "purchaseIsAuto": "Purchases are counted automatically from stock intake. Pay suppliers in “Owed to suppliers”; record off-stock purchases as a variable expense."
+    "investmentHint": "Purchase: from the capitalisation threshold it is an asset reaching profit through depreciation; cheaper ones are expensed at once.",
+    "purchaseIsAuto": "Purchases are counted automatically from stock intake. Pay suppliers in “Owed to suppliers”; record off-stock purchases as a variable expense.",
+    "capexRoleHint": "purchase: depreciated from the threshold",
+    "opexHint": "Operating expense: reduces the profit of the month it belongs to."
   },
   "stockSheet": {
     "title": "Stock by material",
@@ -1160,7 +1172,7 @@
     "addIn": "Money in",
     "addOut": "Money out",
     "count": "Count the cash",
-    "hint": "How much money there is right now. Payments, change, refunds, expenses from Finance and supplier payments are written by the system — you enter only what it cannot know: collection, deposits, off-stock purchases.",
+    "hint": "How much money there is now. Payments, change, refunds, Finance expenses and supplier payments are recorded automatically — enter by hand only what the system cannot know: owner money, loans, transfers between till and bank, the opening balance.",
     "totalHint": "cash and bank together",
     "turnover": "for the period: +{{in}} · −{{out}}",
     "notePh": "what exactly for",
@@ -1186,7 +1198,11 @@
     "article_OWNER_OUT": "Owner's withdrawal",
     "article_LOAN_IN": "Loan received",
     "article_LOAN_OUT": "Loan repaid",
-    "expensesViaFinance": "Enter rent, salaries and other expenses in Finance — from there they reach both the P&L and this cash book."
+    "expensesViaFinance": "Enter rent, salaries and other expenses in Finance — from there they reach both the P&L and this cash book.",
+    "article_OPENING": "Opening balance",
+    "hint_LOAN_OUT": "Loan principal only. Enter interest in Finance as “Loan interest” — it reduces profit.",
+    "hint_TRANSFER": "Money moved between your own accounts — enter both halves: an outflow from one and an inflow to the other.",
+    "hint_OPENING": "Money that was in the till or on the account before the system started tracking it. Not income and not a cash movement — shown outside the flow."
   },
   "period": {
     "title": "Period lock",
@@ -1297,5 +1313,26 @@
     "m10": "Oct",
     "m11": "Nov",
     "m12": "Dec"
+  },
+  "assetTax": {
+    "title": "Depreciation and tax",
+    "hint": "Changing these settings does not touch purchases already entered: each one keeps its own decision and life.",
+    "threshold": "Capitalisation threshold",
+    "thresholdHint": "An “Investments” purchase from this amount is an asset with depreciation; cheaper ones are expensed at once",
+    "leaseUntil": "Premises lease until",
+    "leaseUntilHint": "Workshop improvements are depreciated no longer than the lease. Empty — 60 months",
+    "notSet": "not set"
+  },
+  "taxRates": {
+    "title": "Tax rate on revenue",
+    "hint": "A new rate applies from its month and does not recalculate the past. Closed months cannot be changed.",
+    "empty": "No rate set — no tax is accrued.",
+    "since": "from {{month}}",
+    "validFrom": "From month",
+    "rate": "Rate, %",
+    "add": "Add rate",
+    "added": "Rate added",
+    "needBoth": "Enter the month and the rate",
+    "confirmDelete": "Delete the rate from {{month}}? Tax for those months will use the previous rate."
   }
 }

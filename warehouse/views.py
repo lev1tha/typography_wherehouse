@@ -170,6 +170,14 @@ class MaterialViewSet(viewsets.ModelViewSet):
                     # PROTECT на обеих связях — убираем их своими руками и в
                     # одной транзакции, чтобы при отказе не осталось материала
                     # без партий.
+                    # Оплаты партий остаются в кассе со встречной записью
+                    # (аудит Б-13): материала не было — деньги вернулись.
+                    from finance import cash
+
+                    for lot in material.rolls.all():
+                        cash.reverse_supplier_payments(
+                            roll=lot, note=f"Удалён материал «{name}»", user=request.user
+                        )
                     material.rolls.all().delete()
                     material.inventory_logs.all().delete()
                     material.delete()

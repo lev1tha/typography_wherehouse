@@ -41,8 +41,9 @@ from .models import (
     ExpenseKind,
     FinanceSettings,
     PeriodLock,
+    TaxRate,
 )
-from .periods import ensure_open
+from .periods import PeriodClosed, add_months, ensure_month_open, ensure_open, is_closed
 from .serializers import (
     CashEntrySerializer,
     PeriodLockSerializer,
@@ -50,6 +51,7 @@ from .serializers import (
     ExpenseEntrySerializer,
     ExpenseKindSerializer,
     FinanceSettingsSerializer,
+    TaxRateSerializer,
 )
 
 _SUM = lambda field: Coalesce(Sum(field), Decimal("0"), output_field=DecimalField())
@@ -135,7 +137,7 @@ class ExpenseKindViewSet(viewsets.ModelViewSet):
 
     serializer_class = ExpenseKindSerializer
     permission_classes = [IsAdminOrAccountantRead]
-    filterset_fields = ["block", "in_profit"]
+    filterset_fields = ["block", "role", "in_profit"]
     pagination_class = None
 
     def get_queryset(self):
@@ -167,15 +169,25 @@ class ExpenseKindViewSet(viewsets.ModelViewSet):
         # этого вида, — в том числе закрытых. Раньше замок это пропускал: трату
         # в закрытый месяц не внести, а снять у аренды галочку можно, и
         # принятая прибыль сентября вырастала на 25 000.
+        #
+        # С 2026-10-07 то же самое — смена роли (она следует за блоком): трата
+        # из расхода становится покупкой с амортизацией и наоборот. Траты вида
+        # ложатся в ОПиУ месяцем «за какой месяц», в кассу — днём оплаты;
+        # проверяем самый ранний из них.
         kind = serializer.instance
         data = serializer.validated_data
         changes_profit = (
-            ("in_profit" in data and data["in_profit"] != kind.in_profit)
-            or ("block" in data and data["block"] != kind.block)
+            ("block" in data and data["block"] != kind.block)
+            or ("role" in data and data["role"] != kind.role)
         )
         if changes_profit:
-            first = kind.entries.order_by("spent_at").values_list("spent_at", flat=True).first()
-            ensure_open(first, "Менять, входит ли вид в прибыль, когда по нему есть траты закрытого периода,")
+            days = [
+                d for pair in kind.entries.values_list("spent_at", "period") for d in pair if d
+            ]
+            ensure_open(
+                min(days) if days else None,
+                "Менять блок или роль вида, когда по нему есть траты закрытого периода,",
+            )
         serializer.save()
 
     @action(detail=True, methods=["post"])
@@ -213,17 +225,51 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        # Трата задним числом в закрытый месяц изменила бы принятый отчёт.
-        ensure_open(serializer.validated_data.get("spent_at"), "Записать трату этой датой")
+        # Трата задним числом в закрытый месяц изменила бы принятый отчёт — и
+        # кассу (дата оплаты), и ОПиУ («за какой месяц»).
+        data = serializer.validated_data
+        ensure_open(data.get("spent_at"), "Записать трату этой датой")
+        ensure_month_open(data.get("period"), "Отнести расход к этому месяцу")
         entry = serializer.save(created_by=self.request.user)
         # Деньги ушли — касса обязана это увидеть. Раньше не видела ни одной
         # траты: показывала один приход, и «сколько в ящике» было завышено на
         # всю аренду с зарплатами (на проде 19.09 — на 86 877 сом).
         cash.sync_expense(entry, user=self.request.user)
 
+    # Поля графика амортизации: их правят и у покупки, сделанной в уже
+    # закрытом месяце (станок купили в январе, сломался в октябре), — со своим
+    # замком по месяцам графика, а не по дню покупки.
+    ASSET_FIELDS = {"useful_life_months", "depreciate_until"}
+
     def perform_update(self, serializer):
-        ensure_open(serializer.instance.spent_at, "Править трату закрытого периода")
-        ensure_open(serializer.validated_data.get("spent_at"), "Перенести трату этой датой")
+        entry = serializer.instance
+        data = serializer.validated_data
+        changed = {
+            name for name, value in data.items() if getattr(entry, name) != value
+        }
+        if changed - self.ASSET_FIELDS:
+            ensure_open(entry.spent_at, "Править трату закрытого периода")
+            ensure_open(data.get("spent_at"), "Перенести трату этой датой")
+            if "period" in changed:
+                ensure_month_open(entry.period, "Переносить расход из закрытого месяца")
+                ensure_month_open(data["period"], "Отнести расход к закрытому месяцу")
+        if (
+            "useful_life_months" in changed
+            and entry.is_capitalized
+            and is_closed(add_months(entry.spent_at, 1))
+        ):
+            # Срок меняет долю КАЖДОГО месяца графика с первого (D-21):
+            # закрыт хоть один — менять нельзя, останавливают выбытием.
+            raise PeriodClosed(
+                "Срок службы менять нельзя: часть графика амортизации уже в закрытом "
+                "периоде. Чтобы прекратить амортизацию, укажите «амортизировать до»."
+            )
+        if "depreciate_until" in changed:
+            # Меняются месяцы, начиная с более раннего из старого и нового
+            # месяца выбытия: там появляется (или пропадает) списание остатка.
+            months = [m for m in (entry.depreciate_until, data.get("depreciate_until")) if m]
+            if months:
+                ensure_month_open(min(months), "Менять месяц выбытия в закрытом периоде")
         entry = serializer.save()
         # Правка суммы/даты/счёта двигает и кассовую запись: иначе в книге
         # осталась бы старая цифра, и остаток разошёлся бы с отчётом.
@@ -231,6 +277,7 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         ensure_open(instance.spent_at, "Удалить трату закрытого периода")
+        ensure_month_open(instance.period, "Удалить расход закрытого месяца")
         # Кассовую запись уносит каскад по ссылке `CashEntry.expense`.
         instance.delete()
 
@@ -352,6 +399,38 @@ class CompanyProfileView(APIView):
         serializer.save()
         AuditLog.record(request.user, "Изменены реквизиты организации")
         return Response(serializer.data)
+
+
+class TaxRateViewSet(viewsets.ModelViewSet):
+    """История ставки налога с выручки (D-10).
+
+    Ставка действует с первого числа своего месяца и до следующей записи.
+    Добавить, поправить или убрать ставку можно только с открытого месяца:
+    иначе изменился бы налог, а с ним и чистая прибыль уже принятых месяцев.
+    """
+
+    serializer_class = TaxRateSerializer
+    permission_classes = [IsAdminOrAccountantRead]
+    pagination_class = None
+    queryset = TaxRate.objects.select_related("created_by").order_by("valid_from")
+
+    WHAT = "Менять ставку налога с закрытого месяца"
+
+    def perform_create(self, serializer):
+        ensure_month_open(serializer.validated_data["valid_from"], self.WHAT)
+        rate = serializer.save(created_by=self.request.user)
+        AuditLog.record(self.request.user, f"Ставка налога: {rate.rate} % с {rate.valid_from:%m.%Y}")
+
+    def perform_update(self, serializer):
+        ensure_month_open(serializer.instance.valid_from, self.WHAT)
+        ensure_month_open(serializer.validated_data.get("valid_from"), self.WHAT)
+        rate = serializer.save()
+        AuditLog.record(self.request.user, f"Ставка налога изменена: {rate.rate} % с {rate.valid_from:%m.%Y}")
+
+    def perform_destroy(self, instance):
+        ensure_month_open(instance.valid_from, self.WHAT)
+        AuditLog.record(self.request.user, f"Ставка налога удалена: {instance}")
+        instance.delete()
 
 
 class FinanceSettingsView(APIView):
@@ -512,6 +591,9 @@ class FinanceReportView(APIView):
                     # Снятый флаг — расход виден, но прибыль не уменьшает
                     # (оборудование, улучшение цеха и любые свои такие виды).
                     "in_profit": k.in_profit,
+                    # Роль вида — форма траты по ней показывает поля
+                    # капвложения (срок службы, выбытие).
+                    "role": k.role,
                     "is_builtin": k.is_builtin,
                     "amount": auto + manual,
                     # Часть, посчитанная системой: интерфейс помечает её и
@@ -540,6 +622,14 @@ class FinanceReportView(APIView):
         investments = {
             "rows": investment_rows,
             "total": sum((r["amount"] for r in investment_rows), Decimal("0")),
+        }
+        # Проценты по займам и уплата налога (2026-10-07) — свой блок, чтобы
+        # было куда вносить эти траты. В прибыль «Сводки» они войдут вместе с
+        # переводом её на общий слой отчётов (finance/reports, этап 2).
+        below_rows = block_rows(ExpenseKind.Block.BELOW)
+        below = {
+            "rows": below_rows,
+            "total": sum((r["amount"] for r in below_rows), Decimal("0")),
         }
 
         # Себестоимость проданного: закупочная стоимость материала, ушедшего в
@@ -986,6 +1076,7 @@ class FinanceReportView(APIView):
                 # 2 570 читается как заработок, которого не было.
                 "gross_margin": revenue - cogs,
                 "investments": investments,
+                "below": below,
                 "total_expenses": total_expenses,
                 # Брак и недостача периода по себестоимости — вычитаются из
                 # прибыли своей строкой. Это не «Расходы»: из кассы эти деньги
