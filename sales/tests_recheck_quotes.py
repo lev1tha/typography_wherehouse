@@ -11,7 +11,7 @@ from decimal import Decimal as D
 from django.utils import timezone
 
 from sales.models import Quote, Receipt
-from sales.tests_calc_base import CalcBase, PREVIEW
+from sales.tests_calc_base import CalcBase
 from warehouse.models import Material
 
 QUOTES = "/api/sales/quotes/"
