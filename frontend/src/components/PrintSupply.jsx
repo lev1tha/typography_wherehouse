@@ -1,8 +1,10 @@
 import { useTranslation } from "react-i18next";
 
+import { useDialog } from "../hooks/useDialog.js";
 import Icon from "./Icon.jsx";
 import PrintHost from "./PrintHost.jsx";
 import amountInWords, { plural } from "../utils/amountInWords.js";
+import { formatDate, formatNumber } from "../utils/format.js";
 
 // Печатная форма приходной накладной.
 //
@@ -12,13 +14,14 @@ import amountInWords, { plural } from "../utils/amountInWords.js";
 // на сколько разошлось. Именно этот лист потом показывают поставщику, когда
 // спорят о недостаче.
 
-const money = (n) => Number(n || 0).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const qty = (n) => Number(n || 0).toLocaleString("ru-RU", { maximumFractionDigits: 3 });
-const day = (iso) => (iso ? new Date(iso).toLocaleDateString("ru-RU") : "");
+const money = (n) => formatNumber(n, { min: 2, max: 2 });
+const qty = (n) => formatNumber(n, { max: 3 });
+const day = (iso) => (iso ? formatDate(iso) : "");
 
 export default function PrintSupply({ supply, onClose }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.resolvedLanguage;
+  const { dialogProps, titleId } = useDialog({ onClose, guardInput: false });
 
   const lines = supply.lines || [];
   const total = Number(supply.total_cost || 0);
@@ -38,9 +41,9 @@ export default function PrintSupply({ supply, onClose }) {
 
   return (
     <PrintHost>
-      <div className="modal wide print-modal">
+      <div className="modal wide print-modal" {...dialogProps}>
         <div className="modal-head no-print">
-          <h2>{t("print.docSupply")}</h2>
+          <h2 id={titleId}>{t("print.docSupply")}</h2>
           <button className="ghost" onClick={onClose} aria-label={t("common.close")}>
             <Icon name="x" size={18} />
           </button>

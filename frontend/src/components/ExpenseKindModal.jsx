@@ -7,8 +7,10 @@ import { useAuth } from "../auth/AuthContext.jsx";
 import Icon from "./Icon.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { formatMoney } from "../utils/format.js";
+import Field, { focusFirstInvalid } from "./Field.jsx";
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const som = (n) => formatMoney(n);
 const today = () => new Date().toISOString().slice(0, 10);
 
 // Дата новой траты по умолчанию: сегодня, если сегодня внутри выбранного
@@ -49,6 +51,9 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
   const accrued = kind.basis === "accrued";
   const threshold = settings?.capitalization_threshold;
   const [editing, setEditing] = useState(null);
+  // Ошибки ввода суммы — рядом с полем (форма добавления и форма правки).
+  const [addErr, setAddErr] = useState("");
+  const [editErr, setEditErr] = useState("");
 
   // У зарплат в это поле пишется имя сотрудника — мастера и резчики не заводятся
   // как пользователи системы.
@@ -72,7 +77,11 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
   useEffect(load, [kind.id, period?.date_from, period?.date_to]);
 
   function add() {
-    if (!form.amount) return toast(t("expenses.needAmount"), "error");
+    if (!form.amount) {
+      setAddErr(t("expenses.needAmount"));
+      return focusFirstInvalid();
+    }
+    setAddErr("");
     api
       .post("/finance/expense-entries/", {
         kind: kind.id,
@@ -99,7 +108,11 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
   }
 
   function saveEdit() {
-    if (!editing.amount) return toast(t("expenses.needAmount"), "error");
+    if (!editing.amount) {
+      setEditErr(t("expenses.needAmount"));
+      return focusFirstInvalid();
+    }
+    setEditErr("");
     const original = rows.find((r) => r.id === editing.id);
     api
       .patch(`/finance/expense-entries/${editing.id}/`, {
@@ -175,33 +188,30 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
       {!readOnly && kind.code !== "MATERIAL_PURCHASE" && (
       <div className="card" style={{ margin: "10px 0 14px", background: "var(--primary-soft)" }}>
         <div className="row">
-          <div className="field grow">
-            <label>{nameLabel}</label>
+          <Field className="grow" label={nameLabel}>
             <input
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               placeholder={namePlaceholder}
             />
-          </div>
-          <div className="field" style={{ width: 150 }}>
-            <label>{t("expenses.date")}</label>
+          </Field>
+          <Field style={{ width: 150 }} label={t("expenses.date")}>
             <input
               type="date"
               value={form.spent_at}
               onChange={(e) => setForm({ ...form, spent_at: e.target.value })}
             />
-          </div>
-          <div className="field" style={{ width: 130 }}>
-            <label>{t("expenses.amount")}</label>
+          </Field>
+          <Field style={{ width: 130 }} label={t("expenses.amount")} required error={addErr}>
             <input
               type="number"
+              inputMode="decimal"
               value={form.amount}
-              onChange={(e) => setForm({ ...form, amount: e.target.value })}
+              onChange={(e) => { setForm({ ...form, amount: e.target.value }); setAddErr(""); }}
               onKeyDown={(e) => e.key === "Enter" && add()}
             />
-          </div>
-          <div className="field" style={{ width: 130 }}>
-            <label>{t("expenses.paidFrom")}</label>
+          </Field>
+          <Field style={{ width: 130 }} label={t("expenses.paidFrom")}>
             <select
               value={form.account}
               onChange={(e) => setForm({ ...form, account: e.target.value })}
@@ -209,24 +219,22 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
               <option value="CASH">{t("expenses.paidCash")}</option>
               <option value="BANK">{t("expenses.paidBank")}</option>
             </select>
-          </div>
+          </Field>
           <div className="field" style={{ display: "flex", alignItems: "flex-end" }}>
             <button onClick={add}>{t("common.add")}</button>
           </div>
         </div>
         <div className="row" style={{ marginTop: 2 }}>
-          <div className="field" style={{ width: 170, marginBottom: 0 }}>
-            <label>{t("expenses.period")}</label>
+          <Field style={{ width: 170, marginBottom: 0 }} label={t("expenses.period")}>
             <input
               type="month"
               value={form.period}
               placeholder={monthOf(form.spent_at)}
               onChange={(e) => setForm({ ...form, period: e.target.value })}
             />
-          </div>
+          </Field>
           {isCapex && (
-            <div className="field" style={{ width: 170, marginBottom: 0 }}>
-              <label>{t("expenses.usefulLife")}</label>
+            <Field style={{ width: 170, marginBottom: 0 }} label={t("expenses.usefulLife")}>
               <input
                 type="number"
                 min="1"
@@ -234,7 +242,7 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
                 placeholder="60"
                 onChange={(e) => setForm({ ...form, useful_life_months: e.target.value })}
               />
-            </div>
+            </Field>
           )}
         </div>
         <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("expenses.periodHint")}</p>
@@ -245,14 +253,13 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
               : t("expenses.capexHintNoValue")}
           </p>
         )}
-        <div className="field" style={{ marginTop: 8, marginBottom: 0 }}>
-          <label>{t("expenses.note")}</label>
+        <Field style={{ marginTop: 8, marginBottom: 0 }} label={t("expenses.note")}>
           <input
             value={form.note}
             onChange={(e) => setForm({ ...form, note: e.target.value })}
             placeholder={t("expenses.notePh")}
           />
-        </div>
+        </Field>
       </div>
       )}
 
@@ -266,31 +273,28 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
             editing?.id === r.id ? (
               <div key={r.id} className="card" style={{ margin: "6px 0", padding: 12 }}>
                 <div className="row">
-                  <div className="field grow">
-                    <label>{nameLabel}</label>
+                  <Field className="grow" label={nameLabel}>
                     <input
                       value={editing.name || ""}
                       onChange={(e) => setEditing({ ...editing, name: e.target.value })}
                     />
-                  </div>
-                  <div className="field" style={{ width: 150 }}>
-                    <label>{t("expenses.date")}</label>
+                  </Field>
+                  <Field style={{ width: 150 }} label={t("expenses.date")}>
                     <input
                       type="date"
                       value={editing.spent_at}
                       onChange={(e) => setEditing({ ...editing, spent_at: e.target.value })}
                     />
-                  </div>
-                  <div className="field" style={{ width: 130 }}>
-                    <label>{t("expenses.amount")}</label>
+                  </Field>
+                  <Field style={{ width: 130 }} label={t("expenses.amount")} required error={editErr}>
                     <input
                       type="number"
+                      inputMode="decimal"
                       value={editing.amount}
-                      onChange={(e) => setEditing({ ...editing, amount: e.target.value })}
+                      onChange={(e) => { setEditing({ ...editing, amount: e.target.value }); setEditErr(""); }}
                     />
-                  </div>
-                  <div className="field" style={{ width: 130 }}>
-                    <label>{t("expenses.paidFrom")}</label>
+                  </Field>
+                  <Field style={{ width: 130 }} label={t("expenses.paidFrom")}>
                     <select
                       value={editing.account || "CASH"}
                       onChange={(e) => setEditing({ ...editing, account: e.target.value })}
@@ -298,36 +302,33 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
                       <option value="CASH">{t("expenses.paidCash")}</option>
                       <option value="BANK">{t("expenses.paidBank")}</option>
                     </select>
-                  </div>
+                  </Field>
                 </div>
                 <div className="row">
-                  <div className="field" style={{ width: 170 }}>
-                    <label>{t("expenses.period")}</label>
+                  <Field style={{ width: 170 }} label={t("expenses.period")}>
                     <input
                       type="month"
                       value={editing.period || ""}
                       onChange={(e) => setEditing({ ...editing, period: e.target.value })}
                     />
-                  </div>
+                  </Field>
                   {editing.is_capitalized && (
                     <>
-                      <div className="field" style={{ width: 150 }}>
-                        <label>{t("expenses.usefulLife")}</label>
+                      <Field style={{ width: 150 }} label={t("expenses.usefulLife")}>
                         <input
                           type="number"
                           min="1"
                           value={editing.useful_life_months || ""}
                           onChange={(e) => setEditing({ ...editing, useful_life_months: e.target.value })}
                         />
-                      </div>
-                      <div className="field" style={{ width: 190 }}>
-                        <label>{t("expenses.depreciateUntil")}</label>
+                      </Field>
+                      <Field style={{ width: 190 }} label={t("expenses.depreciateUntil")}>
                         <input
                           type="month"
                           value={editing.depreciate_until || ""}
                           onChange={(e) => setEditing({ ...editing, depreciate_until: e.target.value })}
                         />
-                      </div>
+                      </Field>
                     </>
                   )}
                 </div>
@@ -336,13 +337,12 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
                     {t("expenses.depreciateUntilHint")}
                   </p>
                 )}
-                <div className="field">
-                  <label>{t("expenses.note")}</label>
+                <Field label={t("expenses.note")}>
                   <input
                     value={editing.note || ""}
                     onChange={(e) => setEditing({ ...editing, note: e.target.value })}
                   />
-                </div>
+                </Field>
                 <div className="row" style={{ gap: 8 }}>
                   <button className="secondary" onClick={() => setEditing(null)}>
                     {t("common.cancel")}
@@ -398,8 +398,8 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
           marginTop: 10,
         }}
       >
-        <strong style={{ color: "var(--accent-strong)" }}>{t("fixed.totalForPeriod")}</strong>
-        <strong style={{ color: "var(--accent-strong)" }}>{som(total)}</strong>
+        <strong style={{ color: "var(--accent-ink)" }}>{t("fixed.totalForPeriod")}</strong>
+        <strong style={{ color: "var(--accent-ink)" }}>{som(total)}</strong>
       </div>
     </Modal>
   );

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
 import Icon from "./Icon.jsx";
+import Field from "./Field.jsx";
 
 // Доступ к «Финансам» и «Подробной аналитике» открывается отдельным паролем и
 // держится открытым 30 минут.
@@ -69,7 +70,7 @@ export default function FinanceGate({ children }) {
             borderRadius: 16,
             margin: "0 auto 12px",
             background: "var(--primary-soft)",
-            color: "var(--accent-strong)",
+            color: "var(--accent-ink)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -80,8 +81,7 @@ export default function FinanceGate({ children }) {
         <h2 style={{ margin: "0 0 4px" }}>{t("financeGate.title")}</h2>
         <p className="muted" style={{ marginTop: 0 }}>{t("financeGate.prompt")}</p>
         <form onSubmit={onSubmit} style={{ textAlign: "left" }}>
-          <div className="field">
-            <label>{t("common.password")}</label>
+          <Field label={t("common.password")}>
             <input
               type="password"
               value={password}
@@ -90,7 +90,7 @@ export default function FinanceGate({ children }) {
               autoComplete="off"
               placeholder={t("financeGate.placeholder")}
             />
-          </div>
+          </Field>
           {error && <div className="error">{error}</div>}
           <button type="submit" style={{ width: "100%" }} disabled={busy}>
             {busy ? t("common.loading") : t("financeGate.submit")}

@@ -496,3 +496,28 @@ Product screenshots are framed in rounded `{rounded.lg}` / `{rounded.xl}` wells,
 - Don't drop heavy shadows; Notion's elevation is many near-transparent layers, never a hard cast.
 - Don't set body copy in a heavy weight — keep 400 for readability and let weight 700 belong to headlines.
 - Don't place type on pure clinical white for full pages; the warm `{colors.canvas-soft}` is core to the brand calm.
+
+## Правила проекта «ЧПУ Система» (дополнение 2026-10-10)
+
+Реальные токены живут в `src/index.css` (`:root` и две тёмные копии); этот раздел —
+договорённости, которые нельзя нарушать. Выше — исходный анализ Notion, он справочный.
+
+- **Цвет текста — только текстовые токены.** `--ok-ink`, `--danger-ink`, `--accent-ink`,
+  `--amber-ink`, `--warn-ink`, `--ink-faint` дают ≥4.5:1 на белом, на фоне страницы и на
+  своих бледных подложках в обеих темах. `--ok`, `--danger`, `--accent-strong`, `--ink-icon` —
+  для заливок, значков, столбиков, уголков; текстом их не красить.
+- **Фокус виден всегда.** Глобальный `:focus-visible` (контур `--focus-ring`, 2px); у полей —
+  свой контрастный контур + мягкое кольцо. `outline: none` без замены запрещён.
+- **Форма = `Field`.** Подпись связана с полем (`htmlFor`/`id`), ошибка — под полем
+  (`role="alert"`, `aria-invalid`, `aria-describedby`), после неудачной отправки фокус на
+  первом неверном поле (`focusFirstInvalid`). Тост — не место для ошибки ввода.
+- **Окна — только через `Modal`/`useDialog`:** роль диалога, ловушка Tab, Esc, возврат фокуса,
+  блокировка прокрутки фона. Щелчок по затемнению окно не закрывает.
+- **Деньги, числа, даты — только через `utils/format.js`** (`formatMoney`, `formatNumber`,
+  `formatDate`…): формат следует языку интерфейса, «сом» не переводится и не переносится.
+- **Мобильная раскладка — до 900px** (бургер, карточки вместо таблиц, цели нажатия ≥44px);
+  до 600px добавляется сжатие шапки и фильтров. Горизонтального скролла страницы быть не должно
+  на 375/768/1280 ни в одном языке — проверка: свести экран и `document.scrollWidth`.
+- **Необъявленные CSS-переменные ловит** `npm run lint:css-vars`.
+- **Списки с сервера — постранично** (`Pager` + `usePage`), выбор клиента — `ClientPicker`
+  (поиск на сервере), а не `<select>` с первой страницей.

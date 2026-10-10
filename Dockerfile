@@ -20,7 +20,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# curl нужен для healthcheck'а контейнера; psycopg[binary] системных
+# curl нужен для healthcheck'а контейнера (GET /api/health/); psycopg[binary] системных
 # библиотек не требует, поэтому build-essential не ставим.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
@@ -31,8 +31,8 @@ RUN pip install -r requirements-prod.txt
 
 COPY . .
 
-# Собранный фронтенд кладём в образ: entrypoint выложит его в том, который
-# читает nginx на хосте (см. docker-compose.prod.yml).
+# Собранный фронтенд кладём в образ: сервис migrate (entrypoint.sh release) выложит
+# его в том, который читает nginx на хосте (см. docker-compose.prod.yml).
 COPY --from=frontend /build/dist /app/frontend_dist
 
 COPY deploy/entrypoint.sh /entrypoint.sh
@@ -45,6 +45,8 @@ USER app
 
 EXPOSE 8000
 ENTRYPOINT ["/entrypoint.sh"]
+# Access-лог gunicorn идёт в stdout контейнера; его размер ограничивает ротация
+# json-file в docker-compose.prod.yml (10 МБ × 5 файлов на сервис).
 CMD ["gunicorn", "config.wsgi:application", \
      "--bind", "0.0.0.0:8000", \
      "--workers", "3", \

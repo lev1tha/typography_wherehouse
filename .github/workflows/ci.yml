@@ -1,0 +1,151 @@
+# Проверки на каждый push и pull request.
+#
+# Что ловит:
+#   backend   — миграции не разошлись с моделями, весь набор тестов на PostgreSQL
+#               (той же основной версии, что в docker-compose.prod.yml), критичные
+#               ошибки pyflakes (синтаксис, неопределённые имена);
+#   shuffle   — те же тесты в случайном порядке (НЕобязательная: красная не
+#               блокирует, но показывает зависимость тестов друг от друга);
+#   frontend  — `npm ci` и `npm run build` (сборка ломается раньше, чем docker build);
+#   shell     — bash -n и shellcheck для deploy/*.sh (backup/restore/entrypoint).
+#
+# Секретов не требуется: пароль PostgreSQL ниже — для одноразового сервис-
+# контейнера внутри этого запуска, наружу он не открыт.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Версии — как в Dockerfile (python:3.13-slim, node:22-alpine).
+  PYTHON_VERSION: "3.13"
+  NODE_VERSION: "22"
+
+jobs:
+  backend:
+    name: Backend (миграции + тесты на PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        # Как в docker-compose.prod.yml (postgres:17-alpine).
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: chpu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/chpu
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-prod.txt
+
+      - name: Зависимости
+        # requirements-prod.txt = requirements.txt + драйвер PostgreSQL + gunicorn.
+        run: pip install -r requirements-prod.txt
+
+      - name: Критичные ошибки (синтаксис, неопределённые имена)
+        run: |
+          pip install ruff==0.8.6
+          ruff check --select E9,F63,F7,F82 --exclude frontend,ui-review,.claude .
+
+      - name: Замечания pyflakes (справочно, не блокирует)
+        run: ruff check --select F --exclude frontend,ui-review,.claude --output-format concise --exit-zero .
+
+      - name: Миграции совпадают с моделями
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Системная проверка Django
+        run: python manage.py check
+
+      - name: Тесты (PostgreSQL, 4 процесса)
+        run: python manage.py test --parallel 4
+
+  shuffle:
+    name: Тесты в случайном порядке (необязательно)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: chpu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/chpu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-prod.txt
+      - run: pip install -r requirements-prod.txt
+      - name: Тесты --shuffle (семя печатается в начале — по нему воспроизводится)
+        run: python manage.py test --shuffle
+
+  frontend:
+    name: Frontend (npm ci + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  shell:
+    name: Скрипты выкладки и бэкапа
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Синтаксис
+        run: |
+          bash -n deploy/backup.sh
+          bash -n deploy/restore_check.sh
+          sh -n deploy/entrypoint.sh
+      - name: shellcheck
+        run: |
+          shellcheck deploy/backup.sh deploy/restore_check.sh
+          shellcheck -s sh deploy/entrypoint.sh

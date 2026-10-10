@@ -54,6 +54,11 @@ class TransactionItemSerializer(serializers.ModelSerializer):
     # подпись `unit_label` в кыргызском или английском документе торчала
     # чужим словом посреди переведённой таблицы.
     unit_code = serializers.SerializerMethodField()
+    # Правила прайса строки: «каталог → итог». `catalog_total` — сколько
+    # строка стоила бы без правил; у строк до правил равна `line_total`
+    # (точнее — стоимости строки, и у возвращённой тоже).
+    catalog_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    sold_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
 
     class Meta:
         model = TransactionItem
@@ -83,6 +88,14 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             "own_material",
             "note",
             "is_returned",
+            # Правила прайса (2026-10-10): цена до правил, минимум, проценты.
+            "catalog_price",
+            "catalog_total",
+            "sold_total",
+            "min_amount",
+            "min_applied",
+            "urgency_percent",
+            "discount_percent",
         ]
 
     def get_cost_total(self, obj):
@@ -152,6 +165,8 @@ class ReceiptSerializer(serializers.ModelSerializer):
     cost_total = serializers.SerializerMethodField()
     margin = serializers.SerializerMethodField()
     payments = serializers.SerializerMethodField()
+    # Сумма строк по каталогу, до правил прайса — для «каталог → итог».
+    catalog_total = serializers.SerializerMethodField()
 
     class Meta:
         model = Receipt
@@ -183,6 +198,11 @@ class ReceiptSerializer(serializers.ModelSerializer):
             "payment_qr",
             "cost_total",
             "margin",
+            # Правила прайса заказа (2026-10-10).
+            "is_urgent",
+            "urgency_percent",
+            "discount_percent",
+            "catalog_total",
             "items",
             "payments",
             "created_at",
@@ -197,6 +217,9 @@ class ReceiptSerializer(serializers.ModelSerializer):
 
     def get_cost_total(self, obj):
         return obj.cost_total if _is_admin(self.context) else None
+
+    def get_catalog_total(self, obj):
+        return sum((item.catalog_total for item in obj.items.all()), Decimal("0"))
 
     def get_margin(self, obj):
         return obj.margin if _is_admin(self.context) else None
@@ -505,6 +528,21 @@ class SaleItemInputSerializer(serializers.Serializer):
                     f"«{material.name}»: в каталоге не задана цена за кв.м — материал "
                     f"куска ушёл бы в чек за 0."
                 )
+        elif service is not None and service.uses_pieces:
+            # Наружная установка: цена только за букву из каталога (ручной
+            # цены у этой строки нет), нулевая — это пустой справочник.
+            if not service.rate_per_piece or service.rate_per_piece <= 0:
+                raise serializers.ValidationError(
+                    f"«{service.name}»: не задана ставка за букву — задайте её в "
+                    f"«Ценах и услугах», иначе установка уйдёт в чек бесплатно."
+                )
+        elif service is not None:
+            # Фиксированные услуги («Прочее», установка): цена — из каталога.
+            if not service.base_price or service.base_price <= 0:
+                raise serializers.ValidationError(
+                    f"«{service.name}»: не задана фиксированная цена — задайте её "
+                    f"в «Ценах и услугах», иначе услуга уйдёт в чек бесплатно."
+                )
         return attrs
 
 
@@ -539,6 +577,14 @@ class SaleCreateSerializer(serializers.Serializer):
     # Дата заказа задним числом. Не указана — «сейчас». Право проверяет вьюха:
     # по этой дате считается вся отчётность, ставить её в прошлое может админ.
     order_date = serializers.DateField(required=False, allow_null=True)
+    # Правила прайса заказа (2026-10-10). «Срочно» — наценка из настроек цен.
+    # Скидка не прислана — берётся из карточки клиента; другую (или 0 —
+    # снять) задаёт только админ, проверяет вьюха.
+    is_urgent = serializers.BooleanField(required=False, default=False)
+    discount_percent = serializers.DecimalField(
+        max_digits=5, decimal_places=2, min_value=Decimal("0"), max_value=Decimal("100"),
+        required=False, allow_null=True,
+    )
     items = SaleItemInputSerializer(many=True)
 
     def validate_items(self, value):

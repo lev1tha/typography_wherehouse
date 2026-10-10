@@ -4,6 +4,18 @@
 # из /srv/chpucenter/*.
 #
 #   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Порядок при выкладке: db (healthy) → migrate (разово: миграции, статика,
+# фронтенд в каталог nginx; завершается) → web и бот. Если migrate упал, web не
+# пересоздаётся — продолжает работать прежний контейнер (см. DEPLOY.md).
+
+# Ротация логов контейнеров: без неё json-file растёт без предела и однажды
+# съедает диск вместе с копиями. 5 файлов по 10 МБ на каждый сервис.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   db:
@@ -14,6 +26,7 @@ services:
     # знает. env_file же отдаёт переменные прямо в контейнер — то, что нужно
     # образу postgres (POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD).
     env_file: .env.prod
+    logging: *default-logging
     volumes:
       - pgdata:/var/lib/postgresql/data
     # Наружу не публикуем: база доступна только контейнеру web по внутренней
@@ -25,13 +38,37 @@ services:
       timeout: 5s
       retries: 5
 
-  web:
+  # Разовая выкладка: миграции, таблица кеша, collectstatic, фронтенд в
+  # /srv/chpucenter/frontend. Один контейнер вместо «каждый при старте»: иначе
+  # web и бот гнали бы migrate одновременно, а упавшая миграция превращалась в
+  # бесконечный перезапуск. restart: "no" — упал, значит упал, остановка видна
+  # в выводе `up -d` и в `logs migrate`.
+  migrate:
     build: .
-    restart: unless-stopped
+    image: chpucenter-app:latest
+    restart: "no"
     env_file: .env.prod
+    command: ["release"]
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy
+    volumes:
+      - /srv/chpucenter/static:/app/staticfiles
+      - /srv/chpucenter/media:/app/media
+      - /srv/chpucenter/frontend:/app/frontend_public
+
+  web:
+    build: .
+    image: chpucenter-app:latest
+    restart: unless-stopped
+    env_file: .env.prod
+    logging: *default-logging
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     # Слушаем только localhost — снаружи в контейнер попасть можно лишь через
     # nginx на хосте.
     ports:
@@ -42,24 +79,33 @@ services:
       - /srv/chpucenter/media:/app/media
       - /srv/chpucenter/frontend:/app/frontend_public
     healthcheck:
-      # Обычная страница входа в админку: 200 = Django жив и отвечает.
-      # Хост подставляем явно, иначе ALLOWED_HOSTS отдаст 400 на 127.0.0.1.
-      # Путь именно django-admin: на /admin/* висят экраны React-приложения.
-      test: ["CMD-SHELL", "curl -fsS -H 'Host: chpucenter.com' http://127.0.0.1:8000/django-admin/login/ -o /dev/null"]
+      # /api/health/ делает SELECT 1: 200 = Django жив И база отвечает, 503 =
+      # приложение поднято, но до базы не достучаться. Прежняя проверка (страница
+      # входа в админку) в базу не ходила вовсе и показывала healthy при упавшей
+      # Postgres. Хост подставляем явно, иначе ALLOWED_HOSTS отдаст 400 на
+      # 127.0.0.1. Эндпоинт без авторизации и ничего, кроме статуса, не отдаёт.
+      test: ["CMD-SHELL", "curl -fsS -H 'Host: chpucenter.com' http://127.0.0.1:8000/api/health/ -o /dev/null"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      # Миграции к этому моменту уже применены сервисом migrate, поэтому web
+      # поднимается быстро; запас на медленный диск и холодный старт воркеров.
+      start_period: 60s
 
   # Телеграм-бот клиентов (long polling). Включать, когда появится токен:
   # docker compose -f docker-compose.prod.yml --profile bot up -d
+  # Миграции и collectstatic бот не запускает: это делает только migrate.
   customer-bot:
     build: .
+    image: chpucenter-app:latest
     restart: unless-stopped
     env_file: .env.prod
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     profiles: ["bot"]
     command: ["python", "manage.py", "run_customer_bot"]
 

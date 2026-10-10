@@ -5,6 +5,7 @@ import Catalog from "./Catalog.jsx";
 import MaterialStock from "./MaterialStock.jsx";
 import Supplies from "./Supplies.jsx";
 import Supply from "../store/Supply.jsx";
+import Tabs from "../../components/Tabs.jsx";
 
 // «Приходы» стоят вторыми: приёмка — самая частая работа на складе после
 // самого справочника, и прятать её вглубь нельзя.
@@ -31,13 +32,14 @@ export default function Stock() {
   return (
     <>
       <h1>{t("warehouse.title")}</h1>
-      <div className="tabs">
-        {TABS.map((key) => (
-          <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
-            {t(`warehouse.${label[key]}`)}
-          </button>
-        ))}
-      </div>
+      <Tabs
+        id="stock"
+        panel={false}
+        label={t("warehouse.title")}
+        value={tab}
+        onChange={setTab}
+        tabs={TABS.map((key) => ({ key, label: t(`warehouse.${label[key]}`) }))}
+      />
       {tab === "materials" && <Catalog embedded />}
       {tab === "supplies" && <Supplies embedded />}
       {tab === "movement" && <Supply embedded />}

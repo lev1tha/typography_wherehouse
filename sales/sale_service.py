@@ -4,11 +4,12 @@ the payment webhook and tested in isolation.
 """
 from __future__ import annotations
 
-from collections import Counter
 from datetime import date, datetime, time
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from django.db import transaction
+from django.db.models import Max
+from django.http import Http404
 from django.utils import timezone
 
 from finance import cash
@@ -22,13 +23,40 @@ from warehouse.rolls import (
 )
 from warehouse.stock import apply_stock_change
 
-from .models import Payment, Receipt, TransactionItem
+from .models import Payment, Receipt, TransactionItem, TransactionItemLot
+from .pricing_rules import LineRules, price_for
 
 
 def _money(value: Decimal) -> Decimal:
     """До копеек. Без этого SQLite сохранил бы «сырой» результат умножения, а
     PostgreSQL округлил бы его сам — и цифры на dev и на проде разошлись бы."""
     return Decimal(value).quantize(Decimal("0.01"))
+
+
+@transaction.atomic
+def lock_receipt(receipt: Receipt) -> Receipt:
+    """Взять чек под замок и ПЕРЕЧИТАТЬ его — на объекте вызывающего.
+
+    Вьюха читает чек до транзакции, и два одновременных запроса на один чек
+    видели одно и то же «долг есть / сдача есть / не возвращено» — и оба
+    проводили операцию (8 параллельных `/refund/` давали 8 записей REFUND в
+    кассе). Теперь любая операция над деньгами и составом чека начинается с
+    замка на его строку и свежего состояния: второй запрос ждёт первого и
+    видит уже его результат.
+
+    Объект обновляется на месте — вызывающий продолжает работать с ним же (и
+    его `refresh_from_db`/prefetch не разъезжается с базой). Чек удалили, пока
+    запрос ждал, — 404, а не 500. Только внутри транзакции: на PostgreSQL
+    `select_for_update` вне неё падает.
+    """
+    try:
+        Receipt.objects.select_for_update().get(pk=receipt.pk)
+    except Receipt.DoesNotExist:
+        raise Http404("Заказ уже удалён.")
+    receipt.refresh_from_db()
+    # Кэш строк и оплат, подтянутый вьюхой заранее, после замка устарел.
+    getattr(receipt, "_prefetched_objects_cache", {}).clear()
+    return receipt
 
 
 # Площадь куска — до трёх знаков, «половина вверх». Столько хранит колонка
@@ -50,7 +78,7 @@ def _area(width, length) -> Decimal:
 
 
 def _deduct(material, qty, user, reason="", receipt=None, happened_at=None,
-            preferred_roll=None) -> Decimal:
+            preferred_roll=None, trace=None) -> Decimal:
     """Deduct stock, routing roll-materials through FIFO area consumption.
 
     Возвращает СЕБЕСТОИМОСТЬ списанного — её мы фиксируем на строке чека, чтобы
@@ -73,7 +101,7 @@ def _deduct(material, qty, user, reason="", receipt=None, happened_at=None,
         return consume_area(
             material, qty, user=user, reason=reason,
             log_type=InventoryLog.Type.SALE, receipt=receipt, happened_at=happened_at,
-            preferred_roll=preferred_roll,
+            preferred_roll=preferred_roll, trace=trace,
         )
     apply_stock_change(
         material, -qty, user=user, reason=reason,
@@ -84,7 +112,7 @@ def _deduct(material, qty, user, reason="", receipt=None, happened_at=None,
 
 
 def _restore(material, qty, user, reason="", receipt=None, happened_at=None,
-             preferred_roll=None) -> Decimal:
+             preferred_roll=None, lots=None) -> Decimal:
     """Вернуть материал на склад при возврате заказа.
 
     Тип ВОЗВРАТ, а не «корректировка»: корректировка — это инвентаризация, а
@@ -95,11 +123,15 @@ def _restore(material, qty, user, reason="", receipt=None, happened_at=None,
     # Возврат идёт тем же путём, что и списание: в партию, из которой брали.
     # Иначе штучный возврат поднял бы только число остатка, и партии стали бы
     # знать меньше материала, чем лежит на полке.
-    if material.is_roll_material or has_lots(material):
+    # Строка помнит свои партии — возвращаем в них, даже если сейчас они пусты
+    # (продали всё подчистую): `has_lots` видит только непустые.
+    if material.is_roll_material or has_lots(material) or (
+        lots and material.rolls.filter(pk__in=[pk for pk, *_ in lots]).exists()
+    ):
         restore_area(
             material, qty, user=user, reason=reason,
             log_type=InventoryLog.Type.RETURN, receipt=receipt,
-            preferred_roll=preferred_roll,
+            preferred_roll=preferred_roll, lots=lots,
         )
     else:
         apply_stock_change(
@@ -131,14 +163,23 @@ def _stock_was_deducted(receipt: Receipt) -> bool:
     подтвердил оплату (`confirm_payment`). Значит по неоплаченному онлайн-счёту
     возвращать на склад НЕЧЕГО: ничего оттуда и не брали.
 
-    Условие держит и правка состава, и возврат — а удаление чека его не имело, и
-    брошенный онлайн-заказ при удалении дорисовывал на склад свои позиции.
+    Условие держит и правку состава, и возврат, и удаление чека, и дозаказ.
 
-    `payment_status` в проверке — подстраховка на случай чека, у которого флаг
-    не проставлен, а деньги приняты: ошибиться в сторону «списание было» здесь
-    безопаснее, чем потерять материал, который действительно уходил.
+    Для ОНЛАЙН-счёта решает один только флаг `stock_deducted`. Раньше сюда же
+    примешивался статус оплаты («Оплачено» / «Частичный возврат»), но у
+    неоплаченного онлайн-счёта с возвращённой строкой статус как раз «Частичный
+    возврат» при несписанном складе: следующий возврат или удаление клали на
+    полку то, чего оттуда не брали, а дозаказ списывал сразу и второй раз —
+    при оплате.
+
+    Наличный чек без флага — старые данные: его склад уходил при оформлении
+    всегда, поэтому для него подстраховка по статусу оплаты остаётся.
     """
-    return receipt.stock_deducted or receipt.payment_status in (
+    if receipt.stock_deducted:
+        return True
+    if receipt.payment_method == Receipt.PaymentMethod.ONLINE:
+        return False
+    return receipt.payment_status in (
         Receipt.PaymentStatus.PAID,
         Receipt.PaymentStatus.PARTIALLY_REFUNDED,
     )
@@ -211,7 +252,74 @@ def recipe_consumption(recipe, item: TransactionItem) -> Decimal:
     return recipe.consumption_per_unit
 
 
-def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> None:
+def _cost_warning(item: TransactionItem, material: Material) -> dict:
+    """Предупреждение «себестоимость неизвестна» для ответа и журнала действий."""
+    return {
+        "code": "cost_unknown",
+        "item": item.id,
+        "material": material.id,
+        "material_name": material.name,
+        "message": (
+            f"«{material.name}»: себестоимость неизвестна — у материала нет партий "
+            "и закупочной цены, строка уйдёт в учёт с нулевой себестоимостью, "
+            "а маржа по ней будет завышена."
+        ),
+    }
+
+
+def _save_lot_uses(item: TransactionItem, trace) -> None:
+    """Запомнить, из каких партий и сколько взято на эту строку.
+
+    Возврат кладёт материал туда же, откуда взяли (`_restore_lots`). Без записи
+    возврат шёл «в первую партию по FIFO» и перекладывал остаток дорогой партии
+    в дешёвую: продажа из двух партий (1000 + 3000) после возврата оставляла
+    склад в 2000 и продавала дальше по 1000.
+    """
+    item.lot_uses.all().delete()
+    if trace:
+        TransactionItemLot.objects.bulk_create(
+            TransactionItemLot(item=item, roll_id=pk, area=area, metres=metres)
+            for pk, area, metres in trace
+        )
+
+
+def _restore_lots(item: TransactionItem):
+    """Партии, из которых строку списали, — для `restore_*`. Пусто у старых строк
+    (до учёта партий по строке): тогда возврат идёт как раньше."""
+    return [
+        (use.roll_id, use.area, use.metres)
+        for use in item.lot_uses.order_by("id")
+        if use.roll_id
+    ]
+
+
+def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> list:
+    """Deduct (or restore) stock for a single line item.
+
+    Возвращает предупреждения (`_cost_warning`) — пустой список, если всё хорошо.
+
+    Движения журнала склада, которые породила строка, привязываются к ней
+    (`InventoryLog.receipt_item`): правка состава чека должна сторнировать
+    именно записи ЭТОЙ строки, а не «первую продажу того же материала».
+    """
+    receipt = item.receipt
+    # Чек под замком (его держат все вызывающие), поэтому всё, что появилось в
+    # его журнале после этой точки, породила именно эта строка.
+    last_log = (
+        InventoryLog.objects.filter(receipt=receipt).aggregate(m=Max("id"))["m"] or 0
+    )
+    warnings = _move_stock_for_item(item, user, restore=restore)
+    InventoryLog.objects.filter(receipt=receipt, id__gt=last_log).update(receipt_item=item)
+    if warnings:
+        from audit.models import AuditLog
+
+        number = receipt.order_number or receipt.pk
+        for warning in warnings:
+            AuditLog.record(user, f"Чек {number}: {warning['message']}")
+    return warnings
+
+
+def _move_stock_for_item(item: TransactionItem, user, *, restore=False) -> list:
     """Deduct (or restore) stock for a single line item.
 
     Cutting now produces two separate lines (a MATERIAL line for the cut material
@@ -223,6 +331,7 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> Non
     """
     fn = _restore if restore else _deduct
     receipt = item.receipt
+    warnings = []
     # Расход материала датируем заказом (в т.ч. задним числом), а возврат —
     # «сейчас»: возврат случается тогда, когда его оформили, а не когда продали.
     extra = {} if restore else {"happened_at": receipt.created_at}
@@ -246,13 +355,15 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> Non
                     Roll.objects.filter(
                         material=item.material, remaining_area__gt=0, width__isnull=False
                     )
-                    .order_by("received_at")
+                    .order_by("received_at", "pk")
                     .first()
                 )
                 if first is not None:
                     item.roll = first
                     item.save(update_fields=["roll"])
             metre_fn = restore_metres if restore else consume_metres
+            trace = [] if not restore else None
+            lot_args = {"lots": _restore_lots(item)} if restore else {"trace": trace}
             cost = metre_fn(
                 item.material, item.quantity, user=user,
                 reason=_reason(receipt, restore=restore),
@@ -264,14 +375,19 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> Non
                 # «переезжали» бы в соседний, и остаток каждого физического
                 # рулона переставал бы совпадать с тем, что лежит на полке.
                 preferred_roll=item.roll_id,
+                **lot_args,
                 **extra,
             )
             if not restore:
                 item.cost_total = _money(cost or Decimal("0"))
                 item.save(update_fields=["cost_total"])
+                _save_lot_uses(item, trace)
+                if not item.cost_total:
+                    warnings.append(_cost_warning(item, item.material))
             else:
+                item.lot_uses.all().delete()
                 _unarchive_returned(item.material, receipt, user)
-            return
+            return warnings
         # Whole-piece sales deduct the piece area; area/qty sales deduct quantity.
         qty = item.quantity
         if item.sale_mode == TransactionItem.SaleMode.PIECE and item.material.piece_area:
@@ -286,19 +402,24 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> Non
         # до списания. Раньше проверка стояла по флагу «площадной», и партия
         # штучной строки молча терялась: FIFO брал старейшую, а себестоимость
         # выходила не та, что показали при продаже.
+        trace = None
+        if restore:
+            extra = {**extra, "lots": _restore_lots(item)}
         if item.material.is_roll_material or has_lots(item.material):
             if not restore and item.roll_id is None:
                 from warehouse.models import Roll
 
                 first = (
                     Roll.objects.filter(material=item.material, remaining_area__gt=0)
-                    .order_by("received_at")
+                    .order_by("received_at", "pk")
                     .first()
                 )
                 if first is not None:
                     item.roll = first
                     item.save(update_fields=["roll"])
             extra = {**extra, "preferred_roll": item.roll_id}
+            if not restore:
+                trace = extra["trace"] = []
         cost = fn(
             item.material, qty, user,
             reason=_reason(receipt, restore=restore), receipt=receipt, **extra,
@@ -306,26 +427,167 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False) -> Non
         if not restore:
             item.cost_total = _money(cost)
             item.save(update_fields=["cost_total"])
+            _save_lot_uses(item, trace)
+            if qty > 0 and not item.cost_total:
+                warnings.append(_cost_warning(item, item.material))
         else:
+            item.lot_uses.all().delete()
             _unarchive_returned(item.material, receipt, user)
-        return
+        return warnings
     if item.type != TransactionItem.Type.SERVICE or not item.service_id:
-        return
+        return warnings
 
     # Extra recipe materials (e.g. fasteners for installation, glue, …) — их
     # себестоимость тоже относим на строку услуги.
     cost = Decimal("0")
     reason = _reason(receipt, restore=restore, service=item.service)
+    trace = []
+    lots = _restore_lots(item) if restore else None
     for recipe in item.service.recipes.select_related("material").all():
         consumed = recipe_consumption(recipe, item)
-        cost += fn(recipe.material, consumed, user, reason=reason, receipt=receipt, **extra)
+        if restore:
+            part = fn(recipe.material, consumed, user, reason=reason, receipt=receipt,
+                      lots=lots, **extra)
+        else:
+            part = fn(recipe.material, consumed, user, reason=reason, receipt=receipt,
+                      trace=trace, **extra)
+            if consumed > 0 and not part:
+                warnings.append(_cost_warning(item, recipe.material))
+        cost += part
         if restore:
             # Расходники техкарты возвращаются той же логикой, что и материал
             # строки: спрятанный клей после возврата тоже снова на складе.
             _unarchive_returned(recipe.material, receipt, user)
-    if not restore and cost:
-        item.cost_total = _money(cost)
-        item.save(update_fields=["cost_total"])
+    if restore:
+        item.lot_uses.all().delete()
+    else:
+        _save_lot_uses(item, trace)
+        if cost:
+            item.cost_total = _money(cost)
+            item.save(update_fields=["cost_total"])
+    return warnings
+
+
+def _line_rules(receipt: Receipt, item_type, service) -> LineRules:
+    """Правила прайса для новой строки этого чека.
+
+    Срочность и скидка — заказа (записаны на чеке при оформлении: дозаказ
+    считается по ним же). Минимум — только у строк услуг: своя сумма услуги,
+    если задана (0 — без минимума), иначе общая из настроек цен. Материал
+    минимумом не облагается: лист, крепёж или кусок под рез продаются по
+    своей цене, иначе один саморез стоил бы как работа.
+    """
+    minimum = Decimal("0")
+    if item_type == TransactionItem.Type.SERVICE and service is not None:
+        if service.min_line_amount is not None:
+            minimum = service.min_line_amount
+        else:
+            cached = getattr(receipt, "_global_min_line", None)
+            if cached is None:
+                from services.models import PricingSettings
+
+                cached = PricingSettings.load().min_line_amount
+                receipt._global_min_line = cached
+            minimum = cached
+    urgency = receipt.urgency_percent if receipt.is_urgent else Decimal("0")
+    return LineRules(
+        minimum=minimum or Decimal("0"),
+        urgency=urgency or Decimal("0"),
+        discount=receipt.discount_percent or Decimal("0"),
+    )
+
+
+def _create_line(receipt: Receipt, **fields) -> TransactionItem:
+    """Создать строку чека, применив правила прайса к цене за единицу.
+
+    `price_per_item` в `fields` — цена ДО правил (каталожная или вписанная);
+    она запоминается в `catalog_price`, а в `price_per_item` уходит цена после
+    правил — та, по которой строка стоит в чеке и в отчётах.
+    """
+    rules = _line_rules(receipt, fields.get("type"), fields.get("service"))
+    base = Decimal(fields.pop("price_per_item"))
+    price, min_applied = price_for(Decimal(fields["quantity"]), base, rules)
+    return TransactionItem.objects.create(
+        receipt=receipt,
+        price_per_item=price,
+        catalog_price=base,
+        min_amount=rules.minimum if rules.minimum > 0 else None,
+        min_applied=min_applied,
+        urgency_percent=rules.urgency,
+        discount_percent=rules.discount,
+        **fields,
+    )
+
+
+def reprice_line(item: TransactionItem, *, base_price=None) -> None:
+    """Пересчитать цену строки по ЕЁ правилам после правки количества/цены.
+
+    Правила — записанные на строке при продаже (минимум, срочность, скидка
+    заказа), а не сегодняшние: правка опечатки не должна менять условия
+    сделки. `base_price` — новая цена до правил (правка цены админом). Строка,
+    проданная до правил, не трогается — её цена и есть её цена.
+    """
+    if item.catalog_price is None:
+        if base_price is not None:
+            item.price_per_item = base_price
+        return
+    if base_price is not None:
+        item.catalog_price = base_price
+    rules = LineRules(
+        minimum=item.min_amount or Decimal("0"),
+        urgency=item.urgency_percent or Decimal("0"),
+        discount=item.discount_percent or Decimal("0"),
+    )
+    item.price_per_item, item.min_applied = price_for(item.quantity, item.catalog_price, rules)
+
+
+def _line_name(item: TransactionItem) -> str:
+    if item.material_id:
+        return item.material.name
+    return item.service.name if item.service_id else "—"
+
+
+def below_cost_warnings(items, user=None) -> list:
+    """Предупреждения «строка продана ниже себестоимости» (CALC-08).
+
+    Продажу не блокируют — как и «себестоимость неизвестна» (D-49): скидку
+    или ручную цену ниже закупки владелец может дать осознанно. Но кассир и
+    владелец должны это видеть, и запись остаётся в журнале действий.
+    Себестоимость в ответе — только для тех, кто видит деньги (это решает
+    вьюха, `strip_cost`).
+    """
+    warnings = []
+    for item in items:
+        if item.is_returned or item.cost_total <= 0:
+            continue
+        if item.sold_total >= item.cost_total:
+            continue
+        name = _line_name(item)
+        warnings.append({
+            "code": "below_cost",
+            "item": item.id,
+            "name": name,
+            "line_total": item.sold_total,
+            "cost_total": item.cost_total,
+            "message": f"«{name}»: строка продана за {item.sold_total} сом — ниже себестоимости.",
+        })
+    if warnings:
+        from audit.models import AuditLog
+
+        receipt = items[0].receipt if items else None
+        number = (receipt.order_number or receipt.pk) if receipt else "—"
+        for w in warnings:
+            AuditLog.record(
+                user, f"Чек {number}: {w['message']} Себестоимость {w['cost_total']} сом."
+            )
+    return warnings
+
+
+def strip_cost(warnings, user) -> list:
+    """Себестоимость в предупреждениях — только тем, кто видит деньги."""
+    if getattr(user, "sees_money", False):
+        return warnings
+    return [{k: v for k, v in w.items() if k != "cost_total"} for w in warnings]
 
 
 def _build_item(receipt, entry) -> list[TransactionItem]:
@@ -392,8 +654,8 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
                 "material_price",
                 material.sqm_price if material.is_roll_material else material.price_per_unit,
             )
-        return [TransactionItem.objects.create(
-            receipt=receipt, type=item_type, material=material,
+        return [_create_line(
+            receipt, type=item_type, material=material,
             quantity=qty, price_per_item=price,
             sale_mode=mode,
             # Партию запоминаем на строке: из неё списывали, в неё же вернём
@@ -432,8 +694,8 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
             TransactionItem.SaleMode.METER: service.rate_per_pm,
             TransactionItem.SaleMode.PIECE: service.rate_per_piece,
         }.get(mode, service.rate_flat)
-        return [TransactionItem.objects.create(
-            receipt=receipt, type=item_type, service=service,
+        return [_create_line(
+            receipt, type=item_type, service=service,
             quantity=qty, price_per_item=_priced("cut_rate", catalogue),
             sale_mode=mode,
             # Размеры — только у площадной мерки: у метров и штук их нет, и
@@ -478,8 +740,8 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         if service.uses_running_meter:
             rm = entry.get("running_meters")
             work_qty = _qty(rm) if rm not in (None, "") else Decimal("0")
-        work = TransactionItem.objects.create(
-            receipt=receipt, type=TransactionItem.Type.SERVICE, service=service,
+        work = _create_line(
+            receipt, type=TransactionItem.Type.SERVICE, service=service,
             quantity=work_qty, price_per_item=rate,
             width=Decimal(str(width)) if width else None,
             length=Decimal(str(length)) if length else None,
@@ -492,8 +754,8 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         # whole sheet has no cut dimensions (area=0) — the sheet is billed
         # separately as a PIECE line, so we bill only the work here.
         if service.uses_material and material and area > 0:
-            items.append(TransactionItem.objects.create(
-                receipt=receipt, type=TransactionItem.Type.MATERIAL, material=material,
+            items.append(_create_line(
+                receipt, type=TransactionItem.Type.MATERIAL, material=material,
                 quantity=area, price_per_item=_priced("material_price", material.sqm_price),
                 sale_mode=TransactionItem.SaleMode.SQM,
                 # Режут из ВЫБРАННОЙ пачки — как и при обычной продаже листа.
@@ -503,15 +765,15 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
 
     # Per-piece service: exterior install (price per letter × count).
     if service.uses_pieces:
-        return [TransactionItem.objects.create(
-            receipt=receipt, type=item_type, service=service,
+        return [_create_line(
+            receipt, type=item_type, service=service,
             quantity=Decimal(entry.get("quantity") or 1), price_per_item=service.rate_per_piece,
             note=(entry.get("note") or "")[:255],
         )]
 
     # FIXED-price service (legacy installation / other)
-    return [TransactionItem.objects.create(
-        receipt=receipt, type=item_type, service=service,
+    return [_create_line(
+        receipt, type=item_type, service=service,
         quantity=Decimal(entry.get("quantity") or 1), price_per_item=service.base_price,
         note=(entry.get("note") or "")[:255],
     )]
@@ -543,6 +805,8 @@ def _take_client_change(client, amount, *, exclude=None) -> Decimal:
     """
     left = Decimal(amount)
     taken = Decimal("0")
+    # Замок на все чеки клиента в порядке id — тот же, что в `pay_client_debt`.
+    list(Receipt.objects.select_for_update().filter(client=client).order_by("pk"))
     qs = Receipt.objects.filter(client=client, change_due__gt=0).order_by("created_at", "id")
     if exclude is not None:
         qs = qs.exclude(pk=exclude.pk)
@@ -606,8 +870,14 @@ def _settle_old_debts(receipt, client, cashier, payment_method, debt_ids, *, sur
 def create_sale(
     *, client, cashier, payment_method, items_data, amount_paid=None, title="",
     created_at=None, pay_full=False, use_change=False, pay_debt_ids=None,
+    is_urgent=False, urgency_percent=None, discount_percent=None,
 ) -> Receipt:
     """Create a receipt with its line items.
+
+    ``is_urgent`` / ``urgency_percent`` / ``discount_percent`` — правила прайса
+    заказа (`sales.pricing_rules`): записываются на чек и применяются к
+    каждой строке. Проценты уже проверены вьюхой (права, диапазон);
+    ``urgency_percent`` не задан — берётся из настроек цен.
 
     ``use_change=True`` — закрыть остаток заказа СДАЧЕЙ с прошлых заказов
     клиента. Раньше сдача просто висела: клиент принёс 10 000 за заказ на 9 000,
@@ -649,6 +919,11 @@ def create_sale(
         payment_method=payment_method,
         payment_status=Receipt.PaymentStatus.PENDING,
         title=(title or "").strip(),
+        is_urgent=bool(is_urgent),
+        urgency_percent=(
+            _order_urgency(urgency_percent) if is_urgent else Decimal("0")
+        ),
+        discount_percent=discount_percent or Decimal("0"),
         **({"created_at": created_at} if created_at else {}),
     )
 
@@ -692,7 +967,11 @@ def create_sale(
             paid = min(brought, total - offset)
         else:
             paid = min(brought, total)
-        _deduct_all(receipt)
+        receipt.cost_warnings = _deduct_all(receipt)
+        receipt.cost_warnings += below_cost_warnings(
+            list(receipt.items.filter(is_returned=False).select_related("material", "service")),
+            cashier,
+        )
         receipt.stock_deducted = True
         receipt.amount_paid = paid
         surplus = brought - paid
@@ -746,18 +1025,46 @@ def create_sale(
     return receipt
 
 
-def _deduct_all(receipt: Receipt) -> None:
-    """Deduct stock for every line item of the receipt."""
-    for item in receipt.items.all():
-        _deduct_stock_for_item(item, receipt.cashier)
+def _order_urgency(percent=None) -> Decimal:
+    """Наценка за срочность для нового заказа: явная или из настроек цен."""
+    if percent is not None:
+        return Decimal(percent)
+    from services.models import PricingSettings
+
+    return PricingSettings.load().urgency_percent
 
 
-def _settle(receipt: Receipt) -> None:
-    """Mark fully paid, deducting stock once if not already done."""
+def _deduct_all(receipt: Receipt) -> list:
+    """Deduct stock for every line item of the receipt.
+
+    ВОЗВРАЩЁННЫЕ строки пропускаем: их вернули ещё до списания (неоплаченный
+    онлайн-счёт склад не трогал), и списать их сейчас — значит увести со склада
+    то, что клиент давно не покупал. Возвращает предупреждения о строках без
+    известной себестоимости.
+    """
+    warnings = []
+    for item in receipt.items.filter(is_returned=False):
+        warnings += _deduct_stock_for_item(item, receipt.cashier)
+    return warnings
+
+
+def _settle(receipt: Receipt, received: Decimal) -> None:
+    """Принять оплату шлюза: чек оплачен, склад списан (один раз).
+
+    ``received`` — сколько реально пришло от шлюза. Оплаченное считаем не
+    «итог чека», а ВСЕ деньги, что лежат по чеку: раньше `amount_paid`
+    затирался итогом, и 400, уже принятые в кассе, исчезали из чека, оставаясь
+    в книге (в кассе 1400 при заказе на 1000, и ничто не объясняет лишние 400).
+    Не больше долга чека (итог минус возврат) идёт в `amount_paid`, остальное —
+    сдача клиенту: деньги у цеха, но заказ они не оплачивают.
+    """
     if not receipt.stock_deducted:
-        _deduct_all(receipt)
+        receipt.cost_warnings = _deduct_all(receipt)
         receipt.stock_deducted = True
-    receipt.amount_paid = receipt.total_price
+    money_in = receipt.amount_paid + received
+    due = max(receipt.total_price - receipt.refunded_amount, Decimal("0"))
+    receipt.amount_paid = min(money_in, due)
+    receipt.change_due = receipt.change_due + (money_in - receipt.amount_paid)
     receipt.payment_status = Receipt.PaymentStatus.PAID
 
 
@@ -801,6 +1108,7 @@ def add_items_to_receipt(receipt: Receipt, items_data, *, user=None):
     Онлайн-счёт после дозаказа шлюзом не перевыставляется: доплату принимают
     через `/pay/` (наличными или переводом), как обычный долг.
     """
+    lock_receipt(receipt)
     if receipt.status == Receipt.Status.CANCELLED or receipt.payment_status == Receipt.PaymentStatus.REFUNDED:
         raise OrderClosed("Чек закрыт или возвращён — добавление невозможно.")
     # ВЫДАННЫЙ заказ дозаказу не подлежит: товар уже у клиента, он ушёл. Раньше
@@ -818,11 +1126,16 @@ def add_items_to_receipt(receipt: Receipt, items_data, *, user=None):
 
     deduct_now = _stock_was_deducted(receipt)
     surcharge = Decimal("0")
+    receipt.cost_warnings = []
+    built = []
     for entry in items_data:
         for item in _build_item(receipt, entry):
             surcharge += item.line_total
+            built.append(item)
             if deduct_now:
-                _deduct_stock_for_item(item, user)
+                receipt.cost_warnings += _deduct_stock_for_item(item, user)
+    if deduct_now:
+        receipt.cost_warnings += below_cost_warnings(built, user)
 
     receipt.recalculate_total()
     if (
@@ -858,10 +1171,32 @@ def recognize_online_sale(receipt: Receipt) -> None:
 @transaction.atomic
 def confirm_payment(receipt: Receipt) -> Receipt:
     """Called when the payment gateway confirms an online payment."""
+    lock_receipt(receipt)
     if receipt.payment_status == Receipt.PaymentStatus.PAID:
         return receipt
-    _settle(receipt)
-    receipt.save(update_fields=["payment_status", "amount_paid", "stock_deducted", "updated_at"])
+    # Счёт уже отменён (возвращён целиком), а шлюз всё равно взял деньги. Заказ
+    # из мёртвых не поднимаем: склад не списываем, выручку не признаём, чек
+    # остаётся отменённым. Деньги при этом у шлюза есть — это должен увидеть
+    # владелец, чтобы вернуть их клиенту руками.
+    if (
+        receipt.status == Receipt.Status.CANCELLED
+        or receipt.payment_status == Receipt.PaymentStatus.REFUNDED
+    ):
+        from audit.models import AuditLog
+
+        AuditLog.record(
+            receipt.cashier,
+            f"Шлюз подтвердил оплату {receipt.total_price} сом по отменённому онлайн-счёту "
+            f"№{receipt.order_number or receipt.pk}: заказ не восстановлен, "
+            "деньги нужно вернуть клиенту вручную",
+        )
+        return receipt
+    # Шлюз платит по счёту, выставленному на итог чека.
+    received = receipt.total_price
+    _settle(receipt, received)
+    receipt.save(update_fields=[
+        "payment_status", "amount_paid", "change_due", "stock_deducted", "updated_at",
+    ])
     recognize_online_sale(receipt)
     # Онлайн-оплата — такой же приход денег, как наличные в ящик и перевод на
     # карту, и в кассовую книгу она обязана попасть. Этой строки тут не было:
@@ -872,15 +1207,35 @@ def confirm_payment(receipt: Receipt) -> Receipt:
     # Счёт выбирает `cash.account_for` по способу оплаты: ONLINE это не
     # наличные, значит банк. Дата — сегодняшняя (день подтверждения оплаты, а не
     # оформления заказа): деньги приходят именно тогда, когда их подтвердил шлюз.
+    # В книгу идёт то, что пришло от шлюза, — деньги, принятые в кассе раньше,
+    # там уже записаны своим приходом.
     #
-    # Идемпотентность держит проверка в начале функции: повторное подтверждение
-    # того же чека выходит раньше и второй записи не делает.
-    cash.receipt_paid(receipt, receipt.amount_paid, user=receipt.cashier)
+    # Идемпотентность держит проверка в начале функции (под замком чека):
+    # повторное подтверждение того же чека выходит раньше и второй записи не
+    # делает.
+    cash.receipt_paid(receipt, received, user=receipt.cashier)
     return receipt
 
 
 class PaymentRejected(Exception):
     """Оплату принять нельзя. Текст исключения уходит пользователю как есть."""
+
+
+def normalize_method(raw):
+    """'cash' → 'CASH'; пусто → None («как у чека»); незнакомое → отказ.
+
+    Раньше способ шёл в запись как есть: «cash» строчными не совпадал ни с
+    одним значением и молча уходил в банк (`cash.account_for` проверяет только
+    точное «CASH»), а в истории оплат оставалась запись с несуществующим
+    способом.
+    """
+    if raw in (None, ""):
+        return None
+    value = str(raw).strip().upper()
+    if value not in Receipt.PaymentMethod.values:
+        allowed = ", ".join(Receipt.PaymentMethod.values)
+        raise PaymentRejected(f"Неизвестный способ оплаты. Ожидается один из: {allowed}.")
+    return value
 
 
 def parse_amount(raw):
@@ -954,6 +1309,11 @@ def apply_payment(
     Каждая оплата пишется записью ``Payment`` — с датой, которую можно поставить
     задним числом, и способом оплаты.
     """
+    # Замок и свежее состояние ДО проверок: два одновременных запроса на один
+    # долг оба видели «долг есть» и оба проводили оплату (8 × `/pay/` по 100 —
+    # восемь Payment и +800 в кассе при `amount_paid` 100).
+    lock_receipt(receipt)
+    method = normalize_method(method)
     if receipt.status == Receipt.Status.CANCELLED:
         raise PaymentRejected("Чек отменён.")
     if receipt.payment_status not in (
@@ -1020,12 +1380,23 @@ def pay_client_debt(
     система обязана отвечать. Раньше остаток просто возвращался числом и нигде
     не сохранялся.
     """
+    method = normalize_method(method)
     wanted = {str(x) for x in receipt_ids} if receipt_ids is not None else None
-    debts = [
-        r
-        for r in client.receipts.order_by("created_at")
-        if r.debt > 0 and (wanted is None or str(r.id) in wanted)
-    ]
+    # Замок на ВСЕ чеки клиента, всегда в одном порядке (по id), и долги
+    # считаем уже по свежим строкам: два одновременных погашения не должны
+    # видеть один и тот же долг, а разный порядок замков дал бы взаимную
+    # блокировку двух кассиров.
+    locked = list(
+        Receipt.objects.select_for_update().filter(client=client).order_by("pk")
+    )
+    debts = sorted(
+        (
+            r
+            for r in locked
+            if r.debt > 0 and (wanted is None or str(r.id) in wanted)
+        ),
+        key=lambda r: (r.created_at, str(r.pk)),
+    )
     if not debts:
         raise PaymentRejected("У клиента нет заказов с долгом.")
 
@@ -1058,6 +1429,10 @@ def pay_client_debt(
             method=method or last.payment_method,
         )
     return allocations, change
+
+
+class DeleteRejected(Exception):
+    """Чек удалять нельзя (его деньги уже ушли в другие заказы). Текст — клиенту."""
 
 
 class ItemEditRejected(Exception):
@@ -1122,6 +1497,56 @@ def _resettle(receipt: Receipt, *, held=None) -> None:
     )
 
 
+def _edit_number(raw, *, places: int, digits: int, what: str) -> Decimal:
+    """Число из правки состава: конечное и такой разрядности, как колонка.
+
+    NaN и бесконечность разбираются в `Decimal` без ошибки и роняли запись в
+    базу пятисоткой; «4.56789» принималось, на Postgres колонка округляла его
+    сама, а склад списывал сырое значение — три разных числа об одной строке.
+    """
+    try:
+        value = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError):
+        raise ItemEditRejected(f"{what}: некорректное число.")
+    if not value.is_finite():
+        raise ItemEditRejected(f"{what}: некорректное число.")
+    if -value.normalize().as_tuple().exponent > places:
+        raise ItemEditRejected(f"{what}: не больше {places} знаков после запятой.")
+    if abs(value) >= Decimal(10) ** (digits - places):
+        raise ItemEditRejected(f"{what}: слишком большое число.")
+    return value
+
+
+def _drop_item_journal(receipt: Receipt, item: TransactionItem, linked_ids: set) -> None:
+    """Убрать из журнала склада старое списание строки и парный возврат.
+
+    ``linked_ids`` — записи строки ДО возврата. Возврат создал новые (привязаны
+    к строке тем же `_deduct_stock_for_item`). У чека, проведённого до привязки
+    журнала к строкам, записей строки нет: тогда каждому возврату ищем продажу
+    того же материала в том же количестве среди непривязанных записей чека.
+    """
+    fresh = list(item.inventory_logs.exclude(id__in=linked_ids))
+    drop = set(linked_ids)
+    drop.update(log.id for log in fresh)
+    if not linked_ids:
+        taken = set()
+        for ret in fresh:
+            candidates = [
+                log
+                for log in InventoryLog.objects.filter(
+                    receipt=receipt, type=InventoryLog.Type.SALE,
+                    material_id=ret.material_id, receipt_item__isnull=True,
+                ).order_by("id")
+                if log.id not in taken
+            ]
+            exact = [log for log in candidates if log.quantity_changed == -ret.quantity_changed]
+            match = (exact or candidates or [None])[0]
+            if match is not None:
+                taken.add(match.id)
+                drop.add(match.id)
+    InventoryLog.objects.filter(id__in=drop).delete()
+
+
 @transaction.atomic
 def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
     """Править состав чека: количество, цену строки, удаление лишней строки.
@@ -1143,19 +1568,13 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
 
     `changes` — список `{"id", "quantity"?, "price_per_item"?, "remove"?}`.
     """
+    lock_receipt(receipt)
     if receipt.status == Receipt.Status.CANCELLED:
         raise ItemEditRejected("Чек отменён — править его состав нельзя.")
 
     # Деньги на руках — до правки: по чеку с возвратом часть принесённого уже
     # отдали, и считать переплату/долг от полной суммы нельзя (см. `_resettle`).
     held = _money_held(receipt) if receipt.refunded_amount > 0 else None
-
-    sale_before = list(
-        receipt.inventory_logs.filter(type=InventoryLog.Type.SALE)
-        .order_by("id")
-        .values_list("id", "material_id")
-    )
-    log_ids_before = set(receipt.inventory_logs.values_list("id", flat=True))
 
     for change in changes:
         try:
@@ -1167,28 +1586,45 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
                 "Строка возвращена клиентом — её состав уже не про этот заказ."
             )
 
-        if receipt.stock_deducted:
-            _deduct_stock_for_item(item, user, restore=True)
+        # Новые значения проверяем ДО того, как тронем склад: NaN, бесконечность
+        # и «4.56789» раньше доходили до базы (500 или молчаливое округление на
+        # Postgres при сыром списании со склада).
+        remove = bool(change.get("remove"))
+        qty = price = None
+        if not remove:
+            if change.get("quantity") is not None:
+                qty = _edit_number(
+                    change["quantity"], places=3, digits=12, what="Количество"
+                )
+                if qty <= 0:
+                    raise ItemEditRejected(
+                        "Количество должно быть больше нуля. Ноль — это удаление строки."
+                    )
+            if change.get("price_per_item") is not None:
+                price = _edit_number(
+                    change["price_per_item"], places=2, digits=12, what="Цена"
+                )
+                if price < 0:
+                    raise ItemEditRejected("Цена не может быть отрицательной.")
 
-        if change.get("remove"):
+        if receipt.stock_deducted:
+            # Журнал: записи ЭТОЙ строки (старая продажа) и только что созданный
+            # возврат убираем — правка опечатки возвратом не называется.
+            linked = set(item.inventory_logs.values_list("id", flat=True))
+            _deduct_stock_for_item(item, user, restore=True)
+            _drop_item_journal(receipt, item, linked)
+
+        if remove:
             item.delete()
             continue
 
-        qty = change.get("quantity")
         if qty is not None:
-            qty = Decimal(str(qty))
-            if qty <= 0:
-                raise ItemEditRejected(
-                    "Количество должно быть больше нуля. Ноль — это удаление строки."
-                )
             item.quantity = qty
-        price = change.get("price_per_item")
-        if price is not None:
-            price = Decimal(str(price))
-            if price < 0:
-                raise ItemEditRejected("Цена не может быть отрицательной.")
-            item.price_per_item = price
-        item.save(update_fields=["quantity", "price_per_item"])
+        # Цена из правки — цена ДО правил прайса (как в кассе): минимум,
+        # срочность и скидка строки пересчитываются от неё по тем правилам,
+        # что были при продаже. У строки, проданной до правил, — как раньше.
+        reprice_line(item, base_price=price)
+        item.save(update_fields=["quantity", "price_per_item", "catalog_price", "min_applied"])
 
         if receipt.stock_deducted:
             # Хватит ли остатка на увеличенное количество. У рулонных это ловит
@@ -1212,28 +1648,9 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
             # Списываем заново — уже по исправленному количеству. Не хватило —
             # InsufficientStock, и транзакция целиком откатывается (правка не
             # проходит частично).
-            _deduct_stock_for_item(item, user, restore=False)
-
-    # --- Журнал склада: оставляем по одной записи продажи на строку ---------
-    fresh = list(
-        receipt.inventory_logs.exclude(id__in=log_ids_before).values_list(
-            "id", "type", "material_id"
-        )
-    )
-    InventoryLog.objects.filter(
-        id__in=[lid for lid, kind, _ in fresh if kind == InventoryLog.Type.RETURN]
-    ).delete()
-    # По каждому материалу убираем столько СТАРЫХ продаж, сколько создали новых:
-    # так журнал сходится и когда один и тот же материал стоит в чеке дважды.
-    new_sales = Counter(
-        mat for _, kind, mat in fresh if kind == InventoryLog.Type.SALE
-    )
-    stale = []
-    for material_id, count in new_sales.items():
-        stale += [
-            lid for lid, mat in sale_before if mat == material_id
-        ][:count]
-    InventoryLog.objects.filter(id__in=stale).delete()
+            receipt.cost_warnings = getattr(receipt, "cost_warnings", []) + (
+                _deduct_stock_for_item(item, user, restore=False)
+            ) + below_cost_warnings([item], user)
 
     _resettle(receipt, held=held)
     return receipt
@@ -1247,6 +1664,7 @@ def give_change(receipt: Receipt, amount=None, *, user=None) -> Decimal:
     потому, что мелочи в кассе может не хватить и во второй раз тоже — «отдал
     тысячу из полутора» это нормальная ситуация цеха, а не ошибка.
     """
+    lock_receipt(receipt)
     due = receipt.change_due
     if due <= 0:
         raise PaymentRejected("По этому заказу сдачи нет.")
@@ -1307,6 +1725,48 @@ def return_applied_change(receipt: Receipt) -> Decimal:
     return applied
 
 
+def _ensure_change_not_spent(receipt: Receipt) -> None:
+    """Нельзя удалить чек, чья сдача уже зачтена в ДРУГОЙ заказ клиента.
+
+    Пример аудита: заказ A на 1500, принесли 3000 (сдача 1500 не выдана); сдачу
+    зачли в заказ B на 2100 (оплачено 2000, долг 100). Удалили A — касса ушла в
+    −3000, а у B осталось «оплачено 2000», хотя 1500 из них — деньги A, которых
+    больше нет: реальный долг B 1600.
+
+    Откатить зачёт автоматически нельзя: связь «откуда взяли сдачу — куда
+    зачли» нигде не хранится (`_take_client_change` берёт с самых старых заказов
+    и пишет лишь `change_applied` на получателе), так что любой откат — догадка
+    о чужом долге. Поэтому отказываем и называем заказы, куда она, вероятно,
+    ушла: администратор откатывает оплату того заказа (сдача вернётся клиенту) и
+    удаляет этот.
+
+    «Сдача потрачена» узнаём по кассе: в ящике по чеку лежит больше, чем сам он
+    должен держать (оплачено − зачтено сдачей + невыданная сдача). Чеки с
+    возвратами не проверяем — там сверка кассы своя.
+    """
+    if not receipt.client_id or receipt.refunded_amount > 0:
+        return
+    held = sum(cash.held_by_account(receipt).values(), Decimal("0"))
+    claim = receipt.amount_paid - receipt.change_applied + receipt.change_due
+    spent = held - claim
+    if spent <= 0:
+        return
+    targets = list(
+        Receipt.objects.filter(client_id=receipt.client_id, change_applied__gt=0)
+        .exclude(pk=receipt.pk)
+        .order_by("created_at", "pk")
+    )
+    if not targets:
+        return
+    numbers = ", ".join(f"№{t.order_number}" for t in targets if t.order_number) or "—"
+    raise DeleteRejected(
+        f"Из сдачи по этому заказу уже зачтено {spent} сом в другой заказ клиента "
+        f"({numbers}). Удалить его сейчас нельзя: у того заказа останется оплата, "
+        "которой нет в кассе. Сначала откатите оплату того заказа — сдача "
+        "вернётся клиенту, — потом удалите этот."
+    )
+
+
 @transaction.atomic
 def delete_receipt(receipt: Receipt, *, user=None) -> None:
     """Удалить ошибочно заведённый чек целиком, вернув материал на склад.
@@ -1328,6 +1788,8 @@ def delete_receipt(receipt: Receipt, *, user=None) -> None:
     составом (см. ``receipt_summary``). Это ответственность администратора, у
     складовщика такой кнопки нет.
     """
+    lock_receipt(receipt)
+    _ensure_change_not_spent(receipt)
     # Сдача, зачтённая в этот заказ, возвращается клиенту: заказа не было,
     # значит и тратить её было не на что.
     return_applied_change(receipt)
@@ -1361,6 +1823,9 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None) -> Receipt:
 
     Returns deducted materials back to the warehouse and updates statuses.
     """
+    # Замок до чтения строк: 8 параллельных возвратов видели одни и те же
+    # невозвращённые строки и писали 8 записей REFUND в кассу.
+    lock_receipt(receipt)
     items = receipt.items.filter(is_returned=False)
     if item_ids:
         items = items.filter(id__in=item_ids)

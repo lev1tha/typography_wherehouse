@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.db.models import DecimalField, Sum
@@ -56,11 +57,29 @@ def sold_lines(qs=None):
     )
 
 
+def day_start(day):
+    """Начало суток `day` по местному времени (Asia/Bishkek) — момент, а не дата.
+
+    Фильтр `поле__date` заставляет базу приводить КАЖДУЮ строку к местной дате,
+    и индекс по колонке молчит; границы суток считаем один раз здесь и режем
+    колонку диапазоном. Набор строк тот же: запись принадлежит тем суткам, в
+    которые она произошла по местному времени.
+    """
+    return timezone.make_aware(
+        datetime.combine(day, time.min), timezone.get_current_timezone()
+    )
+
+
+def day_after(day):
+    """Начало суток, следующих за `day` (правая граница диапазона, не входит)."""
+    return day_start(day + timedelta(days=1))
+
+
 def _between(qs, field, d_from, d_to):
     if d_from:
-        qs = qs.filter(**{f"{field}__date__gte": d_from})
+        qs = qs.filter(**{f"{field}__gte": day_start(d_from)})
     if d_to:
-        qs = qs.filter(**{f"{field}__date__lte": d_to})
+        qs = qs.filter(**{f"{field}__lt": day_after(d_to)})
     return qs
 
 
@@ -88,7 +107,7 @@ def prior_returns(d_from, d_to):
     """
     if not d_from:
         return TransactionItem.objects.none()
-    return returned_lines(d_from, d_to).filter(**{f"{LINE_SOLD_ON}__date__lt": d_from})
+    return returned_lines(d_from, d_to).filter(**{f"{LINE_SOLD_ON}__lt": day_start(d_from)})
 
 
 def counts_at(item, d_to) -> bool:

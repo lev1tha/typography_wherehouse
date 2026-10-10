@@ -31,6 +31,7 @@ from .bridge import bridge
 from .cashflow import cash_flow
 from .money import pct
 from .pnl import losses_qs, pnl
+from .scope import report_scope
 
 
 def _line_sum(items) -> Decimal:
@@ -66,6 +67,7 @@ def _change(now, before):
     return {"before": before, "delta": now - before, "delta_pct": pct(now - before, abs(before)) if before else None}
 
 
+@report_scope
 def headline(d_from=None, d_to=None) -> dict:
     """Четыре главные цифры периода, сравнение с прошлым и «почему прибыль ≠
     деньгам» (три самые крупные строки сверки, кроме самой прибыли)."""
@@ -112,6 +114,7 @@ def headline(d_from=None, d_to=None) -> dict:
 # --- Разборы прежнего «Обзора» --------------------------------------------------------
 
 
+@report_scope
 def dashboard(d_from=None, d_to=None) -> dict:
     """Разборы «Обзора» за период (границы включительные, None — без границы)."""
     # Опциональный период фильтрует денежные показатели по дню продажи (дню

@@ -6,8 +6,9 @@
 метрами: поступление, продажи, остаток и колонки по дням — в погонных метрах,
 `counted_in = "METER"`, площадь — справочно, по ширине партии.
 """
-from datetime import date
 from decimal import Decimal
+
+from django.utils import timezone
 
 from rest_framework.test import APITestCase
 
@@ -42,7 +43,7 @@ class SheetRollUnitsTests(APITestCase):
         )
 
     def _row(self):
-        today = date.today()
+        today = timezone.localdate()  # дата цеха (Asia/Bishkek), не системная
         d = self.client.get("/api/finance/material-report/", {"year": today.year, "month": today.month}).data
         return next(r for r in d["rows"] if r["id"] == self.roll_mat.id)
 
@@ -66,7 +67,7 @@ class SheetRollUnitsTests(APITestCase):
         )
         receive_lot(sheet, form=Roll.Form.SHEET, width=Decimal("1.22"), height=Decimal("2.44"),
                     sheet_count=Decimal("5"), purchase_cost=Decimal("3000"))
-        today = date.today()
+        today = timezone.localdate()  # дата цеха (Asia/Bishkek), не системная
         d = self.client.get("/api/finance/material-report/", {"year": today.year, "month": today.month}).data
         row = next(r for r in d["rows"] if r["id"] == sheet.id)
         self.assertEqual(row["counted_in"], "SHEET")

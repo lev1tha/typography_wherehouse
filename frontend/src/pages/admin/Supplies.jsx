@@ -11,6 +11,10 @@ import PrintSupply from "../../components/PrintSupply.jsx";
 import RefSelect from "../../components/RefSelect.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import WasteModal from "../../components/WasteModal.jsx";
+import LotCorrectionModal from "../../components/LotCorrectionModal.jsx";
+import { formatDate, formatMoney, formatNumber } from "../../utils/format.js";
+import Tabs from "../../components/Tabs.jsx";
+import Field, { focusFirstInvalid } from "../../components/Field.jsx";
 
 // Приходные накладные — поставка целиком, одним документом.
 //
@@ -19,8 +23,8 @@ import WasteModal from "../../components/WasteModal.jsx";
 // бумажной накладной было нечем. Здесь строки вводятся сеткой, а сумма по
 // бумаге стоит рядом с суммой системы: сошлось или нет, видно сразу.
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
-const q2 = (n) => Number(n || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+const som = (n) => formatMoney(n);
+const q2 = (n) => formatNumber(n, { max: 2 });
 const today = () => new Date().toLocaleDateString("sv-SE");
 
 const EMPTY_LINE = {
@@ -51,6 +55,8 @@ export default function Supplies({ embedded = false }) {
   const [suppliers, setSuppliers] = useState([]);
   const [materials, setMaterials] = useState([]);
   const [open, setOpen] = useState(null);   // просмотр накладной
+  // Строка накладной, в которой правят опечатку («Исправить приход»).
+  const [fixing, setFixing] = useState(null);
   // Перенос даты накладной. Механика на сервере была с 18.08 (партии и журнал
   // едут за датой), но добраться до неё можно было только запросом в API:
   // в окне документа дата стояла текстом. Поставка, внесённая не тем днём, —
@@ -60,6 +66,8 @@ export default function Supplies({ embedded = false }) {
   const [draft, setDraft] = useState(null); // новая накладная
   const [printing, setPrinting] = useState(null); // печатная форма накладной
   const [busy, setBusy] = useState(false);
+  // Ошибки строк накладной подсвечиваются после первой попытки сохранить.
+  const [showProblems, setShowProblems] = useState(false);
 
   function load() {
     api.get("/warehouse/supplies/", { params: { page_size: 100 } })
@@ -163,8 +171,16 @@ export default function Supplies({ embedded = false }) {
   const diff = stated == null ? 0 : stated - draftTotal;
 
   async function save() {
-    if (problems.length) return toast(t("supplies.linesIncomplete", { rows: problems.map((x) => x.i + 1).join(", ") }), "error");
-    if (!filled.length) return toast(t("supplies.needLines"), "error");
+    // Ошибки строк уже видны под полями; здесь — фокус на первое неверное.
+    if (problems.length) {
+      setShowProblems(true);
+      return focusFirstInvalid();
+    }
+    if (!filled.length) {
+      setShowProblems(true);
+      toast(t("supplies.needLines"), "error");
+      return;
+    }
     setBusy(true);
     try {
       const payload = {
@@ -186,7 +202,10 @@ export default function Supplies({ embedded = false }) {
           code: l.code,
         })),
       };
-      await api.post("/warehouse/supplies/", payload);
+      const { data: posted } = await api.post("/warehouse/supplies/", payload);
+      // Лист не того размера, что в карточке (F7), — сказать сразу, пока
+      // пачка ещё у ворот: продаётся лист по площади из карточки.
+      (posted?.warnings || []).forEach((w) => toast(w.message, "error"));
       setDraft(null);
       load();
       toast(t("supplies.posted"));
@@ -236,7 +255,7 @@ export default function Supplies({ embedded = false }) {
         </>
       ),
     },
-    { key: "received_on", label: t("supplies.date"), render: (r) => new Date(r.received_on).toLocaleDateString("ru-RU") },
+    { key: "received_on", label: t("supplies.date"), render: (r) => formatDate(r.received_on) },
     { key: "supplier_name", label: t("supplies.supplier"), render: (r) => r.supplier_name || <span className="muted">—</span> },
     { key: "lines", label: t("supplies.positions"), render: (r) => r.lines.length },
     { key: "total_cost", label: t("supplies.total"), render: (r) => som(r.total_cost) },
@@ -250,7 +269,7 @@ export default function Supplies({ embedded = false }) {
         ) : Number(r.discrepancy) === 0 ? (
           <span className="badge ok">{t("supplies.matches")}</span>
         ) : (
-          <span style={{ color: "var(--danger)", fontWeight: 600 }}>
+          <span style={{ color: "var(--danger-ink)", fontWeight: 600 }}>
             {Number(r.discrepancy) > 0 ? "+" : ""}{som(r.discrepancy)}
           </span>
         ),
@@ -260,7 +279,7 @@ export default function Supplies({ embedded = false }) {
       label: t("supplies.debt"),
       render: (r) =>
         Number(r.debt) > 0 ? (
-          <span style={{ color: "var(--danger)", fontWeight: 600 }}>{som(r.debt)}</span>
+          <span style={{ color: "var(--danger-ink)", fontWeight: 600 }}>{som(r.debt)}</span>
         ) : (
           <span className="badge ok">{t("supplies.paid")}</span>
         ),
@@ -286,7 +305,7 @@ export default function Supplies({ embedded = false }) {
     const unit = r.material_is_roll ? t("unit.SQM") : t(`unit.${r.material_unit}`);
     return `${q2(-Number(r.quantity_changed))} ${unit}`;
   };
-  const fmtDay = (iso) => new Date(iso).toLocaleDateString("ru-RU");
+  const fmtDay = (iso) => formatDate(iso);
   const monthKey = today().slice(0, 7);
   const wasteMonth = waste.filter((r) => new Date(r.happened_at).toLocaleDateString("sv-SE").slice(0, 7) === monthKey);
   const wasteMonthCost = wasteMonth.reduce((s, r) => s + Number(r.cost || 0), 0);
@@ -296,7 +315,7 @@ export default function Supplies({ embedded = false }) {
     {
       key: "quantity_changed",
       label: t("waste.amount"),
-      render: (r) => <span style={{ color: "var(--danger)", fontWeight: 600, whiteSpace: "nowrap" }}>−{wasteAmount(r)}</span>,
+      render: (r) => <span style={{ color: "var(--danger-ink)", fontWeight: 600, whiteSpace: "nowrap" }}>−{wasteAmount(r)}</span>,
     },
     // Себестоимость — только тем, кто видит деньги: складовщик записывает
     // брак, но почём цех его купил, ему знать незачем.
@@ -314,13 +333,18 @@ export default function Supplies({ embedded = false }) {
           складовщик; раньше у него этого экрана не было вовсе. */}
       {!embedded && <h1>{t("nav.supply")}</h1>}
       {/* Приход и отход — два раздела одного экрана: мерки одни, знак разный. */}
-      <div className="tabs" style={{ marginTop: 0 }}>
-        {[["intake", t("waste.tabIntake")], ["waste", t("waste.tabWaste")]].map(([key, label]) => (
-          <button key={key} className={section === key ? "active" : ""} onClick={() => setSection(key)}>
-            {label}
-          </button>
-        ))}
-      </div>
+      <Tabs
+        id="supplies"
+        panel={false}
+        label={t("nav.supply")}
+        style={{ marginTop: 0 }}
+        value={section}
+        onChange={setSection}
+        tabs={[
+          { key: "intake", label: t("waste.tabIntake") },
+          { key: "waste", label: t("waste.tabWaste") },
+        ]}
+      />
 
       {section === "intake" && (
         <>
@@ -342,7 +366,7 @@ export default function Supplies({ embedded = false }) {
             </div>
             <div className="stat">
               <div className="label">{t("supplies.statDebt")}</div>
-              <div className="value" style={totalDebt > 0 ? { color: "var(--danger)" } : undefined}>
+              <div className="value" style={totalDebt > 0 ? { color: "var(--danger-ink)" } : undefined}>
                 {som(totalDebt)}
               </div>
             </div>
@@ -369,7 +393,7 @@ export default function Supplies({ embedded = false }) {
             {seesMoney && (
               <div className="stat">
                 <div className="label">{t("waste.statMonthCost")}</div>
-                <div className="value" style={wasteMonthCost > 0 ? { color: "var(--danger)" } : undefined}>
+                <div className="value" style={wasteMonthCost > 0 ? { color: "var(--danger-ink)" } : undefined}>
                   {som(wasteMonthCost)}
                 </div>
               </div>
@@ -432,7 +456,7 @@ export default function Supplies({ embedded = false }) {
                 )}
               </span>
             ) : (
-              <span>{new Date(open.received_on).toLocaleDateString("ru-RU")}</span>
+              <span>{formatDate(open.received_on)}</span>
             )}
           </div>
           <div className="crow"><span className="k">{t("supplies.supplier")}</span><span>{open.supplier_name || "—"}</span></div>
@@ -445,7 +469,7 @@ export default function Supplies({ embedded = false }) {
                 {Number(open.discrepancy) === 0 ? (
                   <span className="badge ok">{t("supplies.matches")}</span>
                 ) : (
-                  <span style={{ color: "var(--danger)" }}>
+                  <span style={{ color: "var(--danger-ink)" }}>
                     ({t("supplies.diff")} {Number(open.discrepancy) > 0 ? "+" : ""}{som(open.discrepancy)})
                   </span>
                 )}
@@ -453,7 +477,7 @@ export default function Supplies({ embedded = false }) {
             </div>
           )}
           <div className="crow"><span className="k">{t("supplies.paidTo")}</span><span>{som(open.paid_amount)}</span></div>
-          <div className="crow"><span className="k">{t("supplies.debt")}</span><strong style={Number(open.debt) > 0 ? { color: "var(--danger)" } : undefined}>{som(open.debt)}</strong></div>
+          <div className="crow"><span className="k">{t("supplies.debt")}</span><strong style={Number(open.debt) > 0 ? { color: "var(--danger-ink)" } : undefined}>{som(open.debt)}</strong></div>
 
           {/* Пять колонок на телефон не влезают — прокручиваем таблицу, а не
               выталкиваем за экран саму модалку. */}
@@ -466,6 +490,7 @@ export default function Supplies({ embedded = false }) {
                 <th>{t("supplies.lineCost")}</th>
                 <th>{t("supplies.unitCost")}</th>
                 <th>{t("supply.rollCode")}</th>
+                {isAdmin && <th />}
               </tr>
             </thead>
             <tbody>
@@ -476,6 +501,13 @@ export default function Supplies({ embedded = false }) {
                   <td>{som(l.cost)}</td>
                   <td>{q2(l.unit_cost)} <span className="muted">сом/{l.unit}</span></td>
                   <td className="muted">{l.code || "—"}</td>
+                  {isAdmin && (
+                    <td>
+                      <button className="secondary row-btn" onClick={() => setFixing(l)}>
+                        {t("lotFix.button")}
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -485,6 +517,28 @@ export default function Supplies({ embedded = false }) {
             {t("supplies.editHint")}
           </p>
         </Modal>
+      )}
+
+      {fixing && open && (
+        <LotCorrectionModal
+          lot={{
+            ...(fixing.roll ? { roll: fixing.roll } : { supply_line: fixing.id }),
+            form: fixing.roll ? fixing.form : "QTY",
+            width: fixing.width,
+            height: fixing.height,
+            length: fixing.length,
+            sheet_count: fixing.sheet_count,
+            quantity: fixing.quantity,
+            cost: fixing.cost,
+            unit: t(`unit.${fixing.unit_code}`),
+            title: `${t("supplies.docTitle")} ${open.number || `#${open.id}`} · ${fixing.material_name}`,
+          }}
+          onClose={() => setFixing(null)}
+          onDone={() => {
+            api.get(`/warehouse/supplies/${open.id}/`).then((r) => setOpen(r.data)).catch(() => {});
+            load();
+          }}
+        />
       )}
 
       {printing && <PrintSupply supply={printing} onClose={() => setPrinting(null)} />}
@@ -505,14 +559,13 @@ export default function Supplies({ embedded = false }) {
           }
         >
           <div className="row">
-            <div className="field grow" style={{ margin: 0 }}>
-              <label>{t("supplies.number")}</label>
+            <Field className="grow" style={{ margin: 0 }} label={t("supplies.number")}>
               <input
                 value={draft.number}
                 onChange={(e) => setField("number")(e.target.value)}
                 placeholder={t("supplies.numberPh")}
               />
-            </div>
+            </Field>
             <div className="field grow" style={{ margin: 0 }}>
               <label>{t("supplies.supplier")}</label>
               <RefSelect
@@ -523,10 +576,9 @@ export default function Supplies({ embedded = false }) {
                 onChange={(v) => setField("supplier")(v ? Number(v) : "")}
               />
             </div>
-            <div className="field" style={{ margin: 0, width: 170 }}>
-              <label>{t("supplies.date")}</label>
+            <Field style={{ margin: 0, width: 170 }} label={t("supplies.date")}>
               <input type="date" value={draft.received_on} onChange={(e) => setField("received_on")(e.target.value)} />
-            </div>
+            </Field>
           </div>
 
           {/* Сетка позиций: столько строк, сколько в бумажной накладной. */}
@@ -551,7 +603,12 @@ export default function Supplies({ embedded = false }) {
                   return (
                     <tr key={i}>
                       <td>
-                        <select value={l.material} onChange={(e) => pickMaterial(i, e.target.value)}>
+                        <select
+                          aria-label={`${t("checkout.material")} ${i + 1}`}
+                          aria-invalid={showProblems && started(l) && !l.material ? true : undefined}
+                          value={l.material}
+                          onChange={(e) => pickMaterial(i, e.target.value)}
+                        >
                           <option value="">—</option>
                           {materials.map((x) => (
                             <option key={x.id} value={x.id}>{x.name}</option>
@@ -560,6 +617,7 @@ export default function Supplies({ embedded = false }) {
                       </td>
                       <td>
                         <select
+                          aria-label={`${t("supply.form")} ${i + 1}`}
                           value={l.form}
                           disabled={!m || !m.is_roll_material}
                           onChange={(e) => pickForm(i, e.target.value)}
@@ -583,7 +641,7 @@ export default function Supplies({ embedded = false }) {
                               <input type="number" step="any" value={l.length} placeholder={t("supply.length")} onChange={(e) => setLine(i, { length: e.target.value })} />
                             </div>
                             {widthDiffers(l, m) && (
-                              <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 2 }}>
+                              <div style={{ color: "var(--danger-ink)", fontSize: 11, marginTop: 2 }}>
                                 {t("supplies.widthDiffers", { width: m.roll_width })}
                               </div>
                             )}
@@ -603,16 +661,20 @@ export default function Supplies({ embedded = false }) {
                         <input
                           type="number"
                           step="any"
+                          inputMode="decimal"
+                          aria-label={`${t("supplies.lineCost")} ${i + 1}`}
+                          aria-invalid={lineProblem(l) && l.material ? true : undefined}
+                          aria-describedby={lineProblem(l) ? `line-err-${i}` : undefined}
                           value={l.cost}
                           onChange={(e) => setLine(i, { cost: e.target.value })}
-                          style={lineProblem(l) && l.material ? { borderColor: "var(--danger)" } : undefined}
+                          style={lineProblem(l) && l.material ? { borderColor: "var(--danger-ink)" } : undefined}
                         />
                         {lineProblem(l) && (
-                          <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 2, whiteSpace: "nowrap" }}>{lineProblem(l)}</div>
+                          <div id={`line-err-${i}`} style={{ color: "var(--danger-ink)", fontSize: 12, marginTop: 2, whiteSpace: "nowrap" }}>{lineProblem(l)}</div>
                         )}
                       </td>
                       <td>
-                        <input value={l.code} onChange={(e) => setLine(i, { code: e.target.value })} />
+                        <input aria-label={`${t("supply.rollCode")} ${i + 1}`} value={l.code} onChange={(e) => setLine(i, { code: e.target.value })} />
                       </td>
                       <td>
                         {draft.lines.length > 1 && (
@@ -627,11 +689,11 @@ export default function Supplies({ embedded = false }) {
               </tbody>
             </table>
           </div>
-          <button className="ghost" style={{ marginTop: 8, color: "var(--accent-strong)", fontWeight: 600 }} onClick={addLine}>
+          <button className="ghost" style={{ marginTop: 8, color: "var(--accent-ink)", fontWeight: 600 }} onClick={addLine}>
             + {t("supplies.addLine")}
           </button>
           {problems.length > 0 && (
-            <p style={{ color: "var(--danger)", fontSize: 13, margin: "8px 0 0" }}>
+            <p role="alert" style={{ color: "var(--danger-ink)", fontSize: 13, margin: "8px 0 0" }}>
               {t("supplies.linesIncomplete", { rows: problems.map((x) => x.i + 1).join(", ") })}
             </p>
           )}
@@ -643,29 +705,26 @@ export default function Supplies({ embedded = false }) {
               <strong>{som(draftTotal)}</strong>
             </div>
             <div className="row" style={{ margin: "8px 0 0", gap: 10, flexWrap: "wrap" }}>
-              <div className="field" style={{ margin: 0, width: 190 }}>
-                <label>{t("supplies.statedTotal")}</label>
+              <Field style={{ margin: 0, width: 190 }} label={t("supplies.statedTotal")}>
                 <input
                   type="number" step="any" value={draft.stated_total}
                   placeholder={t("supplies.statedPh")}
                   onChange={(e) => setField("stated_total")(e.target.value)}
                 />
-              </div>
-              <div className="field" style={{ margin: 0, width: 190 }}>
-                <label>{t("supplies.paidTo")}</label>
+              </Field>
+              <Field style={{ margin: 0, width: 190 }} label={t("supplies.paidTo")}>
                 <input
                   type="number" step="any" value={draft.paid_amount}
                   placeholder="0"
                   onChange={(e) => setField("paid_amount")(e.target.value)}
                 />
-              </div>
-              <div className="field grow" style={{ margin: 0 }}>
-                <label>{t("supplies.note")}</label>
+              </Field>
+              <Field className="grow" style={{ margin: 0 }} label={t("supplies.note")}>
                 <input value={draft.note} onChange={(e) => setField("note")(e.target.value)} />
-              </div>
+              </Field>
             </div>
             {stated != null && stated > 0 && (
-              <p style={{ margin: "10px 0 0", fontSize: 14, color: diff === 0 ? "var(--ok)" : "var(--danger)" }}>
+              <p style={{ margin: "10px 0 0", fontSize: 14, color: diff === 0 ? "var(--ok-ink)" : "var(--danger-ink)" }}>
                 {diff === 0 ? t("supplies.matchesFull") : t("supplies.diffFull", { sum: som(Math.abs(diff)) })}
               </p>
             )}

@@ -89,7 +89,7 @@ class FixLotCostTests(TestCase):
 
     def test_writes_an_audit_record(self):
         self._run(str(self.roll.id), "9000", "--yes")
-        self.assertTrue(AuditLog.objects.filter(action__contains="Исправлена цена партии").exists())
+        self.assertTrue(AuditLog.objects.filter(action__contains="Исправлен приход").exists())
 
     def test_unknown_lot_and_bad_amount_are_refused(self):
         with self.assertRaises(CommandError):

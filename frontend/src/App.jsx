@@ -1,3 +1,4 @@
+import { lazy } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import FinanceGate from "./components/FinanceGate.jsx";
@@ -6,18 +7,23 @@ import ProtectedRoute from "./components/ProtectedRoute.jsx";
 import { useAuth } from "./auth/AuthContext.jsx";
 
 import Login from "./pages/Login.jsx";
-import Dashboard from "./pages/admin/Dashboard.jsx";
-import Stock from "./pages/admin/Stock.jsx";
-import Pricing from "./pages/admin/Pricing.jsx";
-import Cash from "./pages/admin/Cash.jsx";
-import Clients from "./pages/admin/Clients.jsx";
-import Receipts from "./pages/admin/Receipts.jsx";
-import Supplies from "./pages/admin/Supplies.jsx";
-import Finance from "./pages/admin/Finance.jsx";
-import CustomerOrders from "./pages/customer/CustomerOrders.jsx";
-import Warehouse from "./pages/store/Warehouse.jsx";
-import Checkout from "./pages/store/Checkout.jsx";
-import StoreReceipts from "./pages/store/StoreReceipts.jsx";
+
+// Экраны грузятся по требованию: раньше всё приложение приезжало одним файлом
+// в 808 кБ (245 кБ в сжатом виде), хотя кассиру нужна касса, а бухгалтеру —
+// чеки и финансы. Вход остаётся в основном файле — он первый экран любого
+// пользователя. Запасной «Загрузка…» показывает Layout (Suspense вокруг Outlet).
+const Dashboard = lazy(() => import("./pages/admin/Dashboard.jsx"));
+const Stock = lazy(() => import("./pages/admin/Stock.jsx"));
+const Pricing = lazy(() => import("./pages/admin/Pricing.jsx"));
+const Cash = lazy(() => import("./pages/admin/Cash.jsx"));
+const Clients = lazy(() => import("./pages/admin/Clients.jsx"));
+const Receipts = lazy(() => import("./pages/admin/Receipts.jsx"));
+const Supplies = lazy(() => import("./pages/admin/Supplies.jsx"));
+const Finance = lazy(() => import("./pages/admin/Finance.jsx"));
+const CustomerOrders = lazy(() => import("./pages/customer/CustomerOrders.jsx"));
+const Warehouse = lazy(() => import("./pages/store/Warehouse.jsx"));
+const Checkout = lazy(() => import("./pages/store/Checkout.jsx"));
+const StoreReceipts = lazy(() => import("./pages/store/StoreReceipts.jsx"));
 
 const ADMIN_NAV = [
   {

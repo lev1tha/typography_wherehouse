@@ -1,13 +1,27 @@
 import { createContext, useContext, useEffect, useState } from "react";
 
 import api from "../api/api.js";
+import { clearCheckoutDraft } from "../utils/draft.js";
 
 const AuthContext = createContext(null);
 
+// Битая запись в localStorage не должна ронять приложение белым экраном.
+function readUser(raw) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
-    const raw = localStorage.getItem("user");
-    return raw ? JSON.parse(raw) : null;
+    try {
+      return readUser(localStorage.getItem("user"));
+    } catch {
+      return null;
+    }
   });
   const [loading, setLoading] = useState(false);
 
@@ -51,6 +65,11 @@ export function AuthProvider({ children }) {
     // на общей кассовой машине следующий вошедший попадал в «Финансы» без
     // пароля — все оставшиеся полчаса.
     localStorage.removeItem("financeUnlockToken");
+    // Явный выход — корзина кассы уходит вместе с сессией: на общей кассовой
+    // машине следующий вошедший не должен видеть чужого клиента и чужой заказ.
+    // (При принудительном выходе по истёкшей сессии корзина остаётся — её
+    // снимает только этот путь.)
+    clearCheckoutDraft();
     setUser(null);
   }
 
@@ -58,7 +77,7 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     function onStorage(e) {
       if (e.key === "user") {
-        setUser(e.newValue ? JSON.parse(e.newValue) : null);
+        setUser(readUser(e.newValue));
       }
     }
     window.addEventListener("storage", onStorage);

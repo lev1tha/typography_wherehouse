@@ -60,7 +60,7 @@ export default function FinanceStatement({ kind }) {
         <>
           <StatementTable data={data} kind={meta.rows} />
           {kind === "cash-flow" && data.balanced === false && (
-            <p style={{ fontSize: 13, marginTop: 8, color: "var(--danger)" }}>{t("statements.notBalanced")}</p>
+            <p style={{ fontSize: 13, marginTop: 8, color: "var(--danger-ink)" }}>{t("statements.notBalanced")}</p>
           )}
           {kind === "pnl" && Number(data.losses_unknown || 0) > 0 && (
             <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>

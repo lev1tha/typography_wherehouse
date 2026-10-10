@@ -5,6 +5,7 @@ import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import Field from "./Field.jsx";
 
 // Какие поля ставки заводятся у каждого вида — зеркало серверных `uses_*`
 // (services/models.py). У готовой услуги поля берутся из ответа сервера, а
@@ -83,35 +84,36 @@ export default function ServiceFormModal({ onClose, onSaved }) {
         </>
       }
     >
-      <div className="field">
-        <label>{t("pricing.serviceName")}</label>
+      <Field label={t("pricing.serviceName")}>
         <input
           autoFocus
           value={form.name}
           onChange={(e) => setForm({ ...form, name: e.target.value })}
           placeholder={t("pricing.serviceNamePh")}
         />
-      </div>
+      </Field>
 
-      <div className="field">
-        <label>{t("pricing.serviceKindLabel")}</label>
+      <Field label={t("pricing.serviceKindLabel")}>
         <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value, rates: {} })}>
           {KINDS.map((k) => (
             <option key={k} value={k}>{t(`serviceKind.${k}`)}</option>
           ))}
         </select>
-      </div>
+      </Field>
 
       {isCutting && (
-        <div className="field">
-          <label>{t("pricing.machine")}</label>
-          <select value={form.machine} onChange={(e) => setForm({ ...form, machine: e.target.value })}>
+        <Field label={t("pricing.machine")}>
+          {(a) => (
+            <>
+            <select {...a} value={form.machine} onChange={(e) => setForm({ ...form, machine: e.target.value })}>
             {MACHINES.map((m) => (
               <option key={m} value={m}>{t(`machine.${m}`)}</option>
             ))}
           </select>
-          <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("pricing.machineHint")}</p>
-        </div>
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("pricing.machineHint")}</p>
+            </>
+          )}
+        </Field>
       )}
 
       {rateFields.map(([key, label]) => (

@@ -21,6 +21,7 @@ from datetime import date
 from ..models import ExpenseEntry, ExpenseKind
 from ..periods import add_months, month_start
 from .money import ZERO, split_evenly
+from .scope import once
 
 
 def start_month(entry) -> date:
@@ -56,12 +57,18 @@ def capitalized_entries():
     ).select_related("kind")
 
 
+def _capitalized_before(day):
+    """Амортизируемые покупки до даты. Список читается один раз на отчёт."""
+    rows = once("capitalized_entries", lambda: list(capitalized_entries()))
+    return [e for e in rows if e.spent_at < day]
+
+
 def by_month(first_month: date, last_month: date) -> dict[date, dict]:
     """{месяц: {"depreciation": …, "disposal": …}} по всем активам за месяцы
     от `first_month` до `last_month` включительно."""
     first, last = month_start(first_month), month_start(last_month)
     out = defaultdict(lambda: {"depreciation": ZERO, "disposal": ZERO})
-    for entry in capitalized_entries().filter(spent_at__lt=add_months(last, 1)):
+    for entry in _capitalized_before(add_months(last, 1)):
         for month, (regular, disposal) in schedule(entry).items():
             if first <= month <= last:
                 out[month]["depreciation"] += regular

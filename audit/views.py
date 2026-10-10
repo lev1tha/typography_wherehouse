@@ -1,8 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
-from django.db.models import DecimalField, Sum
-from django.db.models.functions import Coalesce
+from django.db.models import Count
 from rest_framework import viewsets
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -23,20 +22,6 @@ def _parse_day(value):
         return date.fromisoformat(str(value))
     except ValueError:
         return None
-
-
-
-def _line_sum(items) -> Decimal:
-    """Выручка строк — вверх до целого сома, как `TransactionItem.line_total`
-    и итог чека. Раньше складывались сырые qty × price (147.6 вместо 148), и
-    на одном экране «материал 3 142 + работа 592» не давали «выручку 3 735».
-    Считаем в Python по Decimal, а не CEIL в базе: SQLite умножает в double и
-    0.554 × 1500 даёт 831.0000000000001 → 832 — тот же шум, от которого ушли
-    в кассе."""
-    return sum((it.line_total for it in items.only("quantity", "price_per_item", "is_returned")), Decimal("0"))
-
-# Себестоимость строк — снимок закупки на момент списания со склада.
-_COST_SUM = Coalesce(Sum("cost_total"), Decimal("0"), output_field=DecimalField())
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
@@ -101,7 +86,7 @@ class ClientPurchasesView(APIView):
             live = live.filter(created_at__date__lte=date_to)
 
         # Суммы строк — вверх до сома по Decimal, как в шапке Обзора (см.
-        # `_line_sum`); собираем по клиентам в Python — набор небольшой.
+        # `finance.reports.overview._line_sum` — одна реализация на оба экрана); собираем по клиентам в Python — набор небольшой.
         #
         # Заказы БЕЗ КЛИЕНТА (продажа с улицы) идут одной общей строкой, а не
         # выбрасываются: без неё сумма таблицы не сходилась с плиткой «Продали
@@ -132,16 +117,17 @@ class ClientPurchasesView(APIView):
         from clients.models import Client
 
         clients = {c.id: c for c in Client.objects.filter(id__in=by_client.keys())}
+        # Число заказов по всем клиентам — одним GROUP BY, а не запросом на
+        # клиента (на 800 клиентах это было 803 запроса).
+        orders_by_client = dict(
+            live.values_list("client").annotate(n=Count("id")).order_by().values_list("client", "n")
+        )
         result = []
         for client_id, acc in by_client.items():
             client = clients.get(client_id)
             if client_id and not client:
                 continue
-            orders = (
-                live.filter(client=client).count()
-                if client
-                else live.filter(client__isnull=True).count()
-            )
+            orders = orders_by_client.get(client.id if client else None, 0)
             result.append({
                 # У строки «без клиента» `client_id` пустой — по нему интерфейс
                 # и отличает её от обычной: ни карточки, ни телефона у неё нет.

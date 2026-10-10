@@ -2,6 +2,7 @@ from django.urls import path
 from rest_framework.routers import DefaultRouter
 
 from .views import (
+    LotCorrectionView,
     WasteView,
     InventoryLogViewSet,
     MaterialImageViewSet,
@@ -27,4 +28,8 @@ router.register("month-openings", MaterialMonthOpeningViewSet, basename="month-o
 router.register("suppliers", SupplierViewSet, basename="supplier")
 router.register("supplies", SupplyViewSet, basename="supply")
 
-urlpatterns = [path("waste/", WasteView.as_view(), name="waste")] + router.urls
+urlpatterns = [
+    path("waste/", WasteView.as_view(), name="waste"),
+    path("lot-correction/preview/", LotCorrectionView.as_view(mode="preview"), name="lot-correction-preview"),
+    path("lot-correction/apply/", LotCorrectionView.as_view(mode="apply"), name="lot-correction-apply"),
+] + router.urls

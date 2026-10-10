@@ -11,6 +11,7 @@ from django.db.models import (
     OuterRef,
     ProtectedError,
     Q,
+    Subquery,
     Sum,
     Value,
     When,
@@ -121,6 +122,19 @@ class ClientViewSet(viewsets.ModelViewSet):
                 sort_name=Lower(
                     Coalesce(NullIf("company_name", Value("")), NullIf("full_name", Value("")), "phone")
                 ),
+                # Сколько клиентов он привёл — подзапросом, а не join'ом: join по
+                # `referrals` размножил бы строки, и суммы долга/сдачи ниже
+                # умножились бы на число рефералов.
+                referrals_total=Coalesce(
+                    Subquery(
+                        Client.objects.filter(referred_by=OuterRef("pk"))
+                        .order_by()
+                        .values("referred_by")
+                        .annotate(n=Count("pk"))
+                        .values("n")
+                    ),
+                    Value(0),
+                ),
                 # distinct — иначе join по позициям чеков посчитал бы заказы по разу
                 # на каждую строку чека.
                 orders_count=Count("receipts", filter=live & in_period, distinct=True),
@@ -132,12 +146,16 @@ class ClientViewSet(viewsets.ModelViewSet):
                 # Сдача — зеркало долга: сколько ЦЕХ должен клиенту. Считается
                 # так же, «на сейчас», и период её не режет: деньги лежат в
                 # кассе независимо от того, какой месяц выбран в фильтре.
+                # Возвращённые целиком заказы НЕ отсекаем: деньги по ним лежат
+                # в кассе, а сдачу зачёт в новый заказ видит (sale_service
+                # `client_change_available`) — одно правило на все места.
                 change_due_total=Coalesce(
-                    Sum("receipts__change_due", filter=live),
+                    Sum("receipts__change_due"),
                     Value(Decimal("0")),
                     output_field=DecimalField(max_digits=14, decimal_places=2),
                 ),
             )
+            .select_related("referred_by")
             .prefetch_related(*prefetch)
             .order_by("sort_name")
         )
@@ -196,6 +214,28 @@ class ClientViewSet(viewsets.ModelViewSet):
             return ClientDetailSerializer
         return ClientSerializer
 
+    def perform_update(self, serializer):
+        """Смена телефона — это смена логина кабинета: пишем в журнал.
+
+        Токены клиента при этом отзывает сериализатор (версия учётных данных).
+        """
+        from .phones import phone_key
+
+        old_phone = serializer.instance.phone
+        old_discount = serializer.instance.discount_percent
+        client = serializer.save()
+        if client.discount_percent != old_discount:
+            AuditLog.record(
+                self.request.user,
+                f"Изменена скидка клиента «{client.display_name}»: "
+                f"{old_discount} → {client.discount_percent}%",
+            )
+        if phone_key(client.phone) != phone_key(old_phone):
+            AuditLog.record(
+                self.request.user,
+                f"Изменён телефон клиента «{client.display_name}»: {old_phone} → {client.phone}",
+            )
+
     def destroy(self, request, *args, **kwargs):
         """Удалить карточку — только пока по ней ничего не проходило.
 
@@ -248,7 +288,7 @@ class ClientViewSet(viewsets.ModelViewSet):
             # мешают. secrets, а не random — пароль всё-таки.
             raw = f"{secrets.randbelow(1_000_000):06d}"
         client.set_password(raw)
-        client.save(update_fields=["portal_password"])
+        client.save(update_fields=["portal_password", "credentials_version"])
         AuditLog.record(request.user, f"Выдан пароль кабинета клиенту «{client.display_name}»")
         return Response({"password": raw})
 

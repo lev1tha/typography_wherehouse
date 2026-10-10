@@ -196,7 +196,12 @@ class ExpenseEntry(models.Model):
         verbose_name = _("расход")
         verbose_name_plural = _("расходы")
         ordering = ["-spent_at", "-created_at"]
-        indexes = [models.Index(fields=["kind", "spent_at"])]
+        indexes = [
+            models.Index(fields=["kind", "spent_at"]),
+            # Отчёты берут траты по дате оплаты и по «за какой месяц».
+            models.Index(fields=["spent_at"], name="expense_spent_at_idx"),
+            models.Index(fields=["period"], name="expense_period_idx"),
+        ]
 
     def __str__(self) -> str:
         return f"{self.kind.name}: {self.name} — {self.amount}"
@@ -418,7 +423,11 @@ class CashEntry(models.Model):
         verbose_name = _("кассовая операция")
         verbose_name_plural = _("кассовая книга")
         ordering = ["-happened_on", "-created_at"]
-        indexes = [models.Index(fields=["account", "happened_on"])]
+        indexes = [
+            models.Index(fields=["account", "happened_on"]),
+            # ОДДС, ОПиУ и остатки фильтруют книгу по дате без счёта.
+            models.Index(fields=["happened_on"], name="cash_happened_on_idx"),
+        ]
 
     def __str__(self) -> str:
         sign = "+" if self.kind == self.Kind.IN else "−"

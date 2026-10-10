@@ -32,7 +32,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 
-from django.db.models import Min, Q
+from django.db.models import Min
 from django.utils import timezone
 
 from sales import reporting
@@ -44,6 +44,7 @@ from ..models import CashEntry, ExpenseEntry, ExpenseKind, TaxRate
 from ..periods import add_months, local_day, month_end, month_start
 from . import depreciation
 from .money import SUM, ZERO, cumulative_split, pct, split_evenly, total
+from .scope import once, report_scope
 
 # Порядок блоков операционных расходов. «Инвестиции» здесь — покупки дешевле
 # порога капвложения: они расход месяца (IAS 7, п. 16; D-22).
@@ -117,8 +118,20 @@ def lines_money(d_from, d_to, **flt):
     base = reporting._between(base, reporting.LINE_SOLD_ON, d_from, d_to)
     back = reporting.added_back(d_from, d_to).filter(**flt)
     out = reporting.returned_lines(d_from, d_to).filter(**flt)
-    money = reporting.money(base) + reporting.money(back) - reporting.money(out)
-    cost = reporting.cost(base) + reporting.cost(back) - reporting.cost(out)
+    (m_base, c_base), (m_back, c_back), (m_out, c_out) = (
+        _money_and_cost(part) for part in (base, back, out)
+    )
+    return m_base + m_back - m_out, c_base + c_back - c_out
+
+
+def _money_and_cost(lines):
+    """Стоимость и себестоимость строк за ОДИН проход по ним. Те же значения,
+    что `reporting.money` и `reporting.cost`, но те читали строки дважды
+    (стоимость — в Python, себестоимость — суммой в базе)."""
+    money = cost = ZERO
+    for it in lines.only("quantity", "price_per_item", "cost_total"):
+        money += it.sold_total
+        cost += it.cost_total or ZERO
     return money, cost
 
 
@@ -171,6 +184,35 @@ def cash_count(d_from, d_to):
 # --- То, что ложится в прибыль месяцем -------------------------------------------
 
 
+def tax_rate_for(month) -> Decimal:
+    """Ставка налога месяца, % (нет записи — 0). Тот же результат, что у
+    `TaxRate.rate_for`, но таблица ставок читается один раз на отчёт: годовая
+    таблица спрашивала её по три раза на каждый из 12 месяцев."""
+    rows = once("tax_rates", lambda: list(
+        TaxRate.objects.order_by("valid_from").values_list("valid_from", "rate")
+    ))
+    first = month_start(month)
+    rate = ZERO
+    for valid_from, value in rows:
+        if valid_from <= first:
+            rate = value
+    return rate
+
+
+def _load_expenses():
+    return list(ExpenseEntry.objects.select_related("kind"))
+
+
+def _expenses_of(month, last_day):
+    """Траты, относящиеся к месяцу в ОПиУ: «за какой месяц» (у старых без него —
+    месяц оплаты). Таблица трат читается один раз на отчёт."""
+    rows = once("expense_entries", _load_expenses)
+    return [
+        e for e in rows
+        if e.period == month or (e.period is None and month <= e.spent_at <= last_day)
+    ]
+
+
 def month_alloc(month) -> dict:
     """{ключ: {день: сумма}} месяца для строк, у которых дата — месяц.
 
@@ -184,10 +226,7 @@ def month_alloc(month) -> dict:
         for day, part in zip(days, split_evenly(amount, len(days))):
             alloc[key][day] += part
 
-    entries = ExpenseEntry.objects.filter(
-        Q(period=month) | Q(period__isnull=True, spent_at__gte=month, spent_at__lte=days[-1])
-    ).select_related("kind")
-    for entry in entries:
+    for entry in _expenses_of(month, days[-1]):
         mapping = chart.for_expense(entry)
         if mapping.pnl == chart.OPEX:
             key = ("opex", entry.kind_id)
@@ -207,7 +246,7 @@ def month_alloc(month) -> dict:
         if dep["disposal"]:
             alloc["disposal"][days[-1]] += dep["disposal"]
 
-    rate = TaxRate.rate_for(month)
+    rate = tax_rate_for(month)
     if rate:
         revenue_by_day, _ = reporting.by_day(month, days[-1])
         exact = [rate * revenue_by_day.get(day, ZERO) / 100 for day in days]
@@ -222,7 +261,7 @@ def _alloc_in(d_from, d_to):
     sums = defaultdict(lambda: ZERO)
     rates = set()
     for month in months_in(d_from, d_to):
-        rates.add(TaxRate.rate_for(month))
+        rates.add(tax_rate_for(month))
         for key, by_day in month_alloc(month).items():
             for day, value in by_day.items():
                 if d_from <= day <= d_to:
@@ -261,6 +300,7 @@ def tax_label(rates) -> str:
     return "Налог с выручки"
 
 
+@report_scope
 def pnl(d_from=None, d_to=None) -> dict:
     """ОПиУ за период. Расходные строки — положительными суммами."""
     d_from, d_to = resolve(d_from, d_to)
@@ -289,10 +329,12 @@ def pnl(d_from=None, d_to=None) -> dict:
     tax = sums["tax"]
     net = operating - interest - tax
 
-    capex = ExpenseEntry.objects.filter(
-        kind__role=ExpenseKind.Role.CAPEX, useful_life_months__isnull=False,
-        spent_at__gte=d_from, spent_at__lte=d_to,
-    ).aggregate(v=SUM("amount"))["v"]
+    capex = sum(
+        (e.amount for e in once("expense_entries", _load_expenses)
+         if e.kind.role == ExpenseKind.Role.CAPEX and e.useful_life_months is not None
+         and d_from <= e.spent_at <= d_to),
+        ZERO,
+    )
 
     return {
         "period": {"from": d_from, "to": d_to},
@@ -331,6 +373,7 @@ def pnl(d_from=None, d_to=None) -> dict:
 # --- ОПиУ по дням (график) ---------------------------------------------------------
 
 
+@report_scope
 def pnl_by_day(d_from, d_to) -> list[dict]:
     """Строки ОПиУ по дням периода: та же арифметика, что `pnl`, день за днём."""
     revenue, cogs = reporting.by_day(d_from, d_to)
@@ -380,6 +423,7 @@ def pnl_by_day(d_from, d_to) -> list[dict]:
 # --- ОПиУ по месяцам года (таблица) -------------------------------------------------
 
 
+@report_scope
 def pnl_year(year: int) -> dict:
     """Таблица ОПиУ: строки × 12 месяцев + итог года. Расходы — со знаком минус."""
     from datetime import date as _date
@@ -473,7 +517,7 @@ def pnl_year(year: int) -> dict:
 
     add("interest", chart.PNL_LINES[chart.INTEREST], neg(lambda p: p["interest"]),
         level=0, hint="interest")
-    year_rates = {TaxRate.rate_for(first) for first, _ in months}
+    year_rates = {tax_rate_for(first) for first, _ in months}
     add("tax", tax_label(year_rates), neg(lambda p: p["tax"]), level=0, hint="tax")
 
     net = col(lambda p: p["net_profit"])

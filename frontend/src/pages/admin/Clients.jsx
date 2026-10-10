@@ -6,12 +6,18 @@ import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import BulkPayModal from "../../components/BulkPayModal.jsx";
+import ClientPicker from "../../components/ClientPicker.jsx";
 import DataTable from "../../components/DataTable.jsx";
+import Field, { focusFirstInvalid } from "../../components/Field.jsx";
 import Icon from "../../components/Icon.jsx";
+import LoadError from "../../components/LoadError.jsx";
 import Modal from "../../components/Modal.jsx";
+import Pager, { usePage } from "../../components/Pager.jsx";
 import PrintAct from "../../components/PrintAct.jsx";
 import MonthPicker from "../../components/MonthPicker.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
+import { isCanceled, useLatest } from "../../utils/latest.js";
+import { formatDate, formatMoney, formatNumber } from "../../utils/format.js";
 
 // Сколько заказов показывать в карточке сразу — остальные под кнопкой.
 const ORDERS_PREVIEW = 5;
@@ -30,7 +36,7 @@ function rangeParams(r) {
   };
 }
 
-const money = (n) => Math.round(Number(n) || 0).toLocaleString("ru-RU");
+const money = (n) => formatNumber(n);
 const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, местная дата
 
 // Соседний день для стрелок ‹ ›. Полдень — чтобы переход на летнее время не
@@ -48,6 +54,9 @@ export default function Clients() {
   const { isAdmin, isAccountant } = useAuth();
   const canEdit = !isAccountant;
   const [clients, setClients] = useState([]);
+  // Сколько клиентов всего по фильтру (ответ приходит постранично).
+  const [count, setCount] = useState(0);
+  const [listError, setListError] = useState(false);
   const [search, setSearch] = useState("");
   const [detail, setDetail] = useState(null);
   // Клиент, по которому открыт акт сверки.
@@ -62,6 +71,8 @@ export default function Clients() {
   const [minOrders, setMinOrders] = useState("");
   // Клиента можно завести заранее, не дожидаясь продажи.
   const [creating, setCreating] = useState(null);
+  // Ошибки формы нового клиента — рядом с полями: {phone, full_name, company_name}.
+  const [createErr, setCreateErr] = useState({});
   // Общая выплата — одна сумма сразу за несколько заказов.
   const [payingClient, setPayingClient] = useState(null);
   // Склейка двойников: {from, preview} — что именно переедет, показываем до
@@ -76,6 +87,14 @@ export default function Clients() {
   // Стрелками месяца щёлкают быстро: ответ на старый запрос не должен
   // перетереть карточку за месяц, выбранный позже.
   const detailReq = useRef(0);
+  // Поиск шлёт запрос на каждое нажатие; побеждает последний.
+  const nextList = useLatest();
+
+  // Фильтры и сортировка одной строкой: смена любого сбрасывает страницу на
+  // первую, а устаревший ответ не перетирает свежий.
+  const filterKey = JSON.stringify([search, period.year, period.month, day, onlyDebt, onlyChange, minOrders, sort]);
+  const [page, setPage] = usePage(filterKey);
+  const filtered = !!(search || day || period.month || onlyDebt || onlyChange || minOrders);
 
   // День важнее месяца: выбран день — смотрим ровно его, иначе весь месяц.
   function listRange() {
@@ -85,6 +104,15 @@ export default function Clients() {
 
   const periodParams = () => rangeParams(listRange());
 
+  function resetFilters() {
+    setSearch("");
+    setDay("");
+    setPeriod((p) => ({ ...p, month: null }));
+    setOnlyDebt(false);
+    setOnlyChange(false);
+    setMinOrders("");
+  }
+
   function load() {
     const params = {
       ...(search ? { search } : {}),
@@ -93,15 +121,29 @@ export default function Clients() {
       ...(onlyChange ? { has_change: 1 } : {}),
       ...(Number(minOrders) > 0 ? { min_orders: Number(minOrders) } : {}),
       ordering: (sort.dir === "desc" ? "-" : "") + sort.key,
+      ...(page > 1 ? { page } : {}),
     };
-    api.get("/clients/clients/", { params }).then((r) => setClients(r.data.results));
+    api
+      .get("/clients/clients/", { params, signal: nextList() })
+      .then((r) => {
+        setClients(r.data.results);
+        setCount(r.data.count ?? r.data.results.length);
+        setListError(false);
+      })
+      .catch((e) => {
+        if (isCanceled(e)) return;
+        // Страница, которой больше нет (клиентов стало меньше) — на первую.
+        if (e.response?.status === 404 && page > 1) return setPage(1);
+        setListError(true);
+        toast(apiError(e, t("common.loadFailed")), "error");
+      });
   }
 
   useEffect(() => {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, period.year, period.month, day, onlyDebt, onlyChange, minOrders, sort.key, sort.dir]);
+  }, [filterKey, page]);
 
   function onSort(key) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "desc" }));
@@ -118,11 +160,15 @@ export default function Clients() {
   async function openDetail(c) {
     const range = listRange();
     setCardRange(range);
-    await fetchDetail(c.id, range);
+    try {
+      await fetchDetail(c.id, range);
+    } catch (e) {
+      // Без этого неудавшееся открытие карточки было «кнопка не нажимается».
+      return toast(apiError(e, t("common.error")), "error");
+    }
     setShowAllOrders(false);
     setShowAllPayments(false);
     setMerging(null);
-    setReqForm({ referred_by: "", reason: "" });
   }
 
   async function changeCardRange(next) {
@@ -173,7 +219,11 @@ export default function Clients() {
   // После выплаты перечитываем карточку и список: изменились и долги заказов,
   // и колонка «Долг» в таблице.
   async function refreshDetail(id) {
-    await fetchDetail(id);
+    try {
+      await fetchDetail(id);
+    } catch (e) {
+      toast(apiError(e, t("common.error")), "error");
+    }
     load();
   }
 
@@ -190,6 +240,27 @@ export default function Clients() {
       toast(t("common.saved"));
     } catch (e) {
       input.value = prev;
+      toast(apiError(e, t("common.error")), "error");
+    }
+  }
+
+  // Постоянная скидка клиента, % (CLI-02): касса подставляет её сама. Задаёт
+  // только админ; число сравниваем как число — с сервера приходит «5.00».
+  async function saveDiscount(input) {
+    const raw = input.value.trim();
+    const prev = Number(detail.discount_percent || 0);
+    const next = raw === "" ? 0 : Number(raw);
+    if (Number.isNaN(next) || next < 0 || next > 100) {
+      input.value = String(prev);
+      return toast(t("clients.discountBad"), "error");
+    }
+    if (next === prev) return;
+    try {
+      await api.patch(`/clients/clients/${detail.id}/`, { discount_percent: next });
+      await refreshDetail(detail.id);
+      toast(t("common.saved"));
+    } catch (e) {
+      input.value = String(prev);
       toast(apiError(e, t("common.error")), "error");
     }
   }
@@ -211,13 +282,35 @@ export default function Clients() {
 
   async function createClient() {
     const body = { ...creating };
-    if (!body.phone?.trim()) return toast(t("clients.needPhone"), "error");
+    if (body.discount_percent === "" || body.discount_percent == null) delete body.discount_percent;
+    // Ошибки — рядом с полем, и фокус на первом неверном: тост на три секунды
+    // не говорил, ЧТО именно заполнено не так.
+    const errs = {};
+    if (!body.phone?.trim()) errs.phone = t("clients.needPhone");
+    if (body.type === "OSOO") {
+      if (!body.company_name?.trim()) errs.company_name = t("checkout.needCompany");
+    } else if (!body.full_name?.trim()) errs.full_name = t("checkout.needName");
+    setCreateErr(errs);
+    if (Object.keys(errs).length) return focusFirstInvalid();
     try {
       await api.post("/clients/clients/", body);
       setCreating(null);
+      setCreateErr({});
       load();
       toast(t("clients.created"));
     } catch (e) {
+      // 400 с полями ({"phone": ["Этот номер уже записан…"]}) — к своим полям.
+      const data = e.response?.data;
+      if (e.response?.status === 400 && data && typeof data === "object") {
+        const fieldMsgs = {};
+        ["phone", "full_name", "company_name", "inn", "discount_percent"].forEach((k) => {
+          if (data[k]) fieldMsgs[k] = [].concat(data[k]).join(" ");
+        });
+        if (Object.keys(fieldMsgs).length) {
+          setCreateErr(fieldMsgs);
+          return focusFirstInvalid();
+        }
+      }
       toast(errMsg(e), "error");
     }
   }
@@ -319,8 +412,8 @@ export default function Clients() {
       sortKey: "debt",
       render: (c) =>
         Number(c.debt) > 0 ? (
-          <span style={{ color: "var(--danger)", fontWeight: 600 }}>
-            {Number(c.debt).toLocaleString("ru-RU")} сом
+          <span style={{ color: "var(--danger-ink)", fontWeight: 600 }}>
+            {formatMoney(c.debt)}
           </span>
         ) : (
           // Ноль долга — не достижение, а обычное состояние: приглушённый
@@ -336,8 +429,8 @@ export default function Clients() {
       sortKey: "change_due_total",
       render: (c) =>
         Number(c.change_due) > 0 ? (
-          <span style={{ color: "var(--accent-strong)", fontWeight: 600 }}>
-            {Number(c.change_due).toLocaleString("ru-RU")} сом
+          <span style={{ color: "var(--accent-ink)", fontWeight: 600 }}>
+            {formatMoney(c.change_due)}
           </span>
         ) : (
           <span className="muted">—</span>
@@ -356,7 +449,11 @@ export default function Clients() {
       key: "actions",
       label: t("common.actions"),
       render: (c) => (
-        <button className="ghost" onClick={() => openDetail(c)} aria-label={t("common.edit")}>
+        <button
+          className="ghost"
+          onClick={(e) => { e.stopPropagation(); openDetail(c); }}
+          aria-label={`${t("common.edit")}: ${c.display_name}`}
+        >
           <Icon name="arrow-right" size={18} />
         </button>
       ),
@@ -369,13 +466,15 @@ export default function Clients() {
       <div className="toolbar">
         <input
           className="search"
+          type="search"
+          aria-label={t("common.search")}
           placeholder={`${t("common.search")} (${t("clients.searchHint")})`}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
         <button
           type="button"
-          onClick={() => setCreating({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" })}
+          onClick={() => { setCreateErr({}); setCreating({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" }); }}
         >
           + {t("clients.newClient")}
         </button>
@@ -385,20 +484,19 @@ export default function Clients() {
           которые заказывали в это время; «Заказов» тогда — за этот же период. */}
       <div className="toolbar" style={{ alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
         <MonthPicker value={period} onChange={(v) => { setPeriod(v); setDay(""); }} />
-        <div className="field" style={{ margin: 0 }}>
-          <label>{t("clients.filterDay")}</label>
+        <Field style={{ margin: 0 }} label={t("clients.filterDay")}>
           <input type="date" value={day} onChange={(e) => setDay(e.target.value)} />
-        </div>
-        <div className="field" style={{ margin: 0, width: 130 }}>
-          <label>{t("clients.minOrders")}</label>
+        </Field>
+        <Field style={{ margin: 0, width: 130 }} label={t("clients.minOrders")}>
           <input
             type="number"
             min="0"
+            inputMode="numeric"
             value={minOrders}
             onChange={(e) => setMinOrders(e.target.value)}
             placeholder="0"
           />
-        </div>
+        </Field>
         <div className="field" style={{ margin: 0 }}>
           <label>{t("clients.debtFilter")}</label>
           <div className="row" style={{ margin: 0, gap: 8 }}>
@@ -420,16 +518,7 @@ export default function Clients() {
           </div>
         </div>
         {(day || period.month || onlyDebt || onlyChange || minOrders) && (
-          <button
-            className="ghost"
-            onClick={() => {
-              setDay("");
-              setPeriod({ ...period, month: null });
-              setOnlyDebt(false);
-              setOnlyChange(false);
-              setMinOrders("");
-            }}
-          >
+          <button className="ghost" onClick={resetFilters}>
             {t("common.reset")}
           </button>
         )}
@@ -438,7 +527,20 @@ export default function Clients() {
         <p className="muted" style={{ fontSize: 13, marginTop: -4 }}>{t("clients.periodHint")}</p>
       )}
 
-      <DataTable columns={columns} rows={clients} sort={sort} onSort={onSort} />
+      {listError && !clients.length ? (
+        <LoadError onRetry={load} />
+      ) : (
+        <DataTable
+          columns={columns}
+          rows={clients}
+          sort={sort}
+          onSort={onSort}
+          onRowClick={openDetail}
+          filtered={filtered}
+          onReset={resetFilters}
+        />
+      )}
+      <Pager page={page} count={count} onPage={setPage} />
 
       {detail && (
         <Modal title={detail.display_name} onClose={() => setDetail(null)}>
@@ -452,6 +554,7 @@ export default function Clients() {
               {canEdit ? (
                 <input
                   key={`company-${detail.id}`}
+                  aria-label={t("clients.companyName")}
                   defaultValue={detail.company_name || ""}
                   style={{ width: 240, height: 34, textAlign: "right" }}
                   onBlur={(e) => saveField("company_name", e.target)}
@@ -466,6 +569,7 @@ export default function Clients() {
             {canEdit ? (
               <input
                 key={`name-${detail.id}`}
+                aria-label={t("clients.fullName")}
                 defaultValue={detail.full_name || ""}
                 style={{ width: 240, height: 34, textAlign: "right" }}
                 onBlur={(e) => saveField("full_name", e.target)}
@@ -490,6 +594,7 @@ export default function Clients() {
               {isAdmin ? (
                 <input
                   key={`inn-${detail.id}`}
+                  aria-label={t("clients.inn")}
                   defaultValue={detail.inn || ""}
                   placeholder={t("clients.innPh")}
                   style={{ width: 200, height: 34, textAlign: "right" }}
@@ -500,6 +605,25 @@ export default function Clients() {
               )}
             </div>
           )}
+          <div className="crow">
+            <span className="k">{t("clients.discount")}</span>
+            {isAdmin ? (
+              <input
+                key={`disc-${detail.id}-${detail.discount_percent}`}
+                type="number"
+                inputMode="decimal"
+                min="0"
+                max="100"
+                aria-label={t("clients.discount")}
+                title={t("clients.discountHint")}
+                defaultValue={String(+Number(detail.discount_percent || 0))}
+                style={{ width: 120, height: 34, textAlign: "right" }}
+                onBlur={(e) => saveDiscount(e.target)}
+              />
+            ) : (
+              <span>{Number(detail.discount_percent) > 0 ? `${formatNumber(detail.discount_percent, { max: 2 })} %` : "—"}</span>
+            )}
+          </div>
           <div className="crow">
             <span className="k">{t("clients.telegram")}</span>
             <span>{detail.is_telegram_linked ? t("clients.linked") : t("clients.notLinked")}</span>
@@ -515,15 +639,15 @@ export default function Clients() {
           </div>
           <div className="crow">
             <span className="k">{t("clients.ltv")}</span>
-            <span><strong>{Number(detail.stats?.lifetime_value || 0).toLocaleString("ru-RU")} сом</strong></span>
+            <span><strong>{formatMoney(detail.stats?.lifetime_value || 0)}</strong></span>
           </div>
           <div className="crow">
             <span className="k">{t("receipts.debt")}</span>
             <span className="row" style={{ gap: 8, alignItems: "center", margin: 0 }}>
               {Number(detail.debt) > 0 ? (
-                <strong style={{ color: "var(--danger)" }}>{Number(detail.debt).toLocaleString("ru-RU")} сом</strong>
+                <strong style={{ color: "var(--danger-ink)" }}>{formatMoney(detail.debt)}</strong>
               ) : (
-                <span className="paid">0 сом</span>
+                <span className="paid">{formatMoney(0)}</span>
               )}
               {/* Общая выплата: клиент гасит несколько заказов одной суммой.
                   Деньги — за админом, как и оплата по отдельному чеку. */}
@@ -545,8 +669,8 @@ export default function Clients() {
           {Number(detail.change_due) > 0 && (
             <div className="crow">
               <span className="k">{t("clients.changeDue")}</span>
-              <strong style={{ color: "var(--accent-strong)" }}>
-                {Number(detail.change_due).toLocaleString("ru-RU")} сом
+              <strong style={{ color: "var(--accent-ink)" }}>
+                {formatMoney(detail.change_due)}
               </strong>
             </div>
           )}
@@ -563,7 +687,7 @@ export default function Clients() {
                 <button
                   type="button"
                   className="ghost"
-                  style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-strong)" }}
+                  style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-ink)" }}
                   onClick={issuePassword}
                 >
                   {detail.has_password ? t("clients.reissuePass") : t("clients.issuePass")}
@@ -641,9 +765,9 @@ export default function Clients() {
                 >
                   <span>{t("clients.periodOrders", { n: live })}</span>
                   <span>
-                    <strong>{money(sum)} сом</strong>
+                    <strong>{formatMoney(sum)}</strong>
                     {debt > 0 && (
-                      <span style={{ color: "var(--danger)", fontSize: 13 }}>
+                      <span style={{ color: "var(--danger-ink)", fontSize: 13 }}>
                         {" · "}{t("receipts.debt")}: {money(debt)}
                       </span>
                     )}
@@ -662,13 +786,13 @@ export default function Clients() {
                       {o.title ? <span className="muted" style={{ fontWeight: 400 }}> · {o.title}</span> : null}
                     </strong>
                     <span className="muted" style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      {new Date(o.created_at).toLocaleDateString("ru-RU")}
+                      {formatDate(o.created_at)}
                       {/* «Ещё раз то же самое» — самый частый разговор у стойки.
                           Отсюда до кассы один клик, состав уже собран. */}
                       <button
                         type="button"
                         className="ghost"
-                        style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-strong)" }}
+                        style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-ink)" }}
                         onClick={() => navigate(`${isAdmin ? "/admin" : "/app/checkout"}?repeat=${o.id}`)}
                         title={t("receipts.repeatHint")}
                       >
@@ -690,25 +814,25 @@ export default function Clients() {
                         )}
                       </span>
                       <span style={it.is_returned ? { textDecoration: "line-through", color: "var(--ink-muted)" } : undefined}>
-                        {Number(it.line_total).toLocaleString("ru-RU")} сом
+                        {formatMoney(it.line_total)}
                       </span>
                     </div>
                   ))}
                   <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 4, paddingTop: 4 }}>
-                    <strong>{Number(o.total_price).toLocaleString("ru-RU")} сом</strong>
+                    <strong>{formatMoney(o.total_price)}</strong>
                     {Number(o.refunded_amount) > 0 && (
                       <span className="muted" style={{ fontSize: 13 }}>
-                        {t("clients.orderRefunded", { sum: Number(o.refunded_amount).toLocaleString("ru-RU") })}
+                        {t("clients.orderRefunded", { sum: formatNumber(o.refunded_amount) })}
                       </span>
                     )}
                     {Number(o.debt) > 0 && (
-                      <span style={{ color: "var(--danger)", fontSize: 13 }}>
-                        {t("receipts.debt")}: {Number(o.debt).toLocaleString("ru-RU")}
+                      <span style={{ color: "var(--danger-ink)", fontSize: 13 }}>
+                        {t("receipts.debt")}: {formatNumber(o.debt)}
                       </span>
                     )}
                     {Number(o.change_due) > 0 && (
-                      <span style={{ color: "var(--accent-strong)", fontSize: 13 }}>
-                        {t("receipts.change")}: {Number(o.change_due).toLocaleString("ru-RU")}
+                      <span style={{ color: "var(--accent-ink)", fontSize: 13 }}>
+                        {t("receipts.change")}: {formatNumber(o.change_due)}
                       </span>
                     )}
                   </div>
@@ -720,7 +844,7 @@ export default function Clients() {
             {detail.orders?.length > ORDERS_PREVIEW && (
               <button
                 className="ghost"
-                style={{ color: "var(--accent-strong)" }}
+                style={{ color: "var(--accent-ink)" }}
                 onClick={() => setShowAllOrders((v) => !v)}
               >
                 {showAllOrders
@@ -739,13 +863,13 @@ export default function Clients() {
               {(showAllPayments ? detail.payments : detail.payments.slice(0, PAYMENTS_PREVIEW)).map((p) => (
                 <div className="crow" key={p.id} style={{ fontSize: 13 }}>
                   <span>
-                    <span className="muted">{new Date(p.paid_on).toLocaleDateString("ru-RU")}</span>
+                    <span className="muted">{formatDate(p.paid_on)}</span>
                     {" · "}
                     №{p.order_number}
                     {p.order_title ? <span className="muted"> · {p.order_title}</span> : null}
                   </span>
                   <span>
-                    <strong>{Math.round(Number(p.amount)).toLocaleString("ru-RU")} сом</strong>
+                    <strong>{formatMoney(p.amount)}</strong>
                     <span className="muted" style={{ fontSize: 12 }}> · {p.method_display}</span>
                   </span>
                 </div>
@@ -753,7 +877,7 @@ export default function Clients() {
               {detail.payments.length > PAYMENTS_PREVIEW && (
                 <button
                   className="ghost"
-                  style={{ color: "var(--accent-strong)" }}
+                  style={{ color: "var(--accent-ink)" }}
                   onClick={() => setShowAllPayments((v) => !v)}
                 >
                   {showAllPayments
@@ -767,31 +891,22 @@ export default function Clients() {
           {/* Кто привёл клиента. Поставить можно один раз; сменить уже
               поставленного — только админ, прямо здесь. */}
           <div className="field" style={{ marginTop: 14 }}>
-            <label>{t("clients.referredByLabel")}</label>
-            {!detail.referred_by ? (
-              // Not set yet → anyone can pick once.
-              <select value="" onChange={(e) => setReferrer(e.target.value)}>
-                <option value="">— {t("clients.noReferrer")} —</option>
-                {clients
-                  .filter((c) => c.id !== detail.id)
-                  .map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.display_name} ({c.phone})
-                    </option>
-                  ))}
-              </select>
-            ) : isAdmin ? (
-              // Admin override → edit directly.
-              <select value={detail.referred_by} onChange={(e) => setReferrer(e.target.value)}>
-                <option value="">— {t("clients.noReferrer")} —</option>
-                {clients
-                  .filter((c) => c.id !== detail.id)
-                  .map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.display_name} ({c.phone})
-                    </option>
-                  ))}
-              </select>
+            <label htmlFor="referrer-picker">{t("clients.referredByLabel")}</label>
+            {/* Выбор — через поиск по серверу (ClientPicker), а не <select> с
+                первыми 25 клиентами: при поиске в нём оставалась единственная
+                опция «— никто —», и администратор мог затереть настоящего
+                реферера, не заметив. Не предлагаем самого клиента и тех, кого
+                он привёл (получилось бы кольцо); остальные звенья цепочки
+                проверяет сервер. */}
+            {!detail.referred_by || isAdmin ? (
+              <ClientPicker
+                id="referrer-picker"
+                value={detail.referred_by || ""}
+                valueLabel={detail.referred_by ? detail.referred_by_name : undefined}
+                noneLabel={t("clients.noReferrer")}
+                excludeIds={[detail.id, ...(detail.referrals?.list || []).map((r) => r.id)]}
+                onChange={(id) => id !== (detail.referred_by || "") && setReferrer(id)}
+              />
             ) : (
               // Складовщик → реферер зафиксирован; сменить его может админ в
               // этой же карточке. Очереди заявок больше нет (27.09).
@@ -809,7 +924,7 @@ export default function Clients() {
             <label>
               {t("clients.referrals")}: {detail.referrals?.count || 0}
               {detail.referrals?.count > 0 && (
-                <span className="muted"> · {Number(detail.referrals.total_value).toLocaleString("ru-RU")} сом</span>
+                <span className="muted"> · {formatMoney(detail.referrals.total_value)}</span>
               )}
             </label>
             {Number(detail.referrals?.bonus) > 0 && (
@@ -822,9 +937,9 @@ export default function Clients() {
                   marginBottom: 6,
                 }}
               >
-                <strong style={{ color: "var(--accent-strong)" }}>{t("clients.referralBonus")}</strong>
-                <strong style={{ color: "var(--accent-strong)" }}>
-                  {Number(detail.referrals.bonus).toLocaleString("ru-RU")} сом
+                <strong style={{ color: "var(--accent-ink)" }}>{t("clients.referralBonus")}</strong>
+                <strong style={{ color: "var(--accent-ink)" }}>
+                  {formatMoney(detail.referrals.bonus)}
                 </strong>
               </div>
             )}
@@ -834,7 +949,7 @@ export default function Clients() {
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                     <Icon name="user" size={15} /> {r.display_name}
                   </span>
-                  <span className="muted">{Number(r.lifetime_value).toLocaleString("ru-RU")} сом</span>
+                  <span className="muted">{formatMoney(r.lifetime_value)}</span>
                 </div>
               ))
             ) : (
@@ -860,19 +975,13 @@ export default function Clients() {
                 {t("clients.mergeTitle")}
               </summary>
               <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>{t("clients.mergeHint")}</p>
-              <select
+              <ClientPicker
                 value={merging?.from || ""}
-                onChange={(e) => previewMerge(e.target.value)}
-              >
-                <option value="">— {t("clients.mergePick")} —</option>
-                {clients
-                  .filter((c) => c.id !== detail.id)
-                  .map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.display_name} ({c.phone})
-                    </option>
-                  ))}
-              </select>
+                noneLabel={t("clients.mergePick")}
+                excludeIds={[detail.id]}
+                onChange={(id) => previewMerge(id)}
+                aria-label={t("clients.mergeTitle")}
+              />
 
               {merging?.preview && (
                 <div className="card" style={{ background: "var(--canvas)", padding: 12, marginTop: 8 }}>
@@ -883,8 +992,8 @@ export default function Clients() {
                   {Number(merging.preview.debt) > 0 && (
                     <div className="crow">
                       <span className="k">{t("receipts.debt")}</span>
-                      <strong style={{ color: "var(--danger)" }}>
-                        {Number(merging.preview.debt).toLocaleString("ru-RU")} сом
+                      <strong style={{ color: "var(--danger-ink)" }}>
+                        {formatMoney(merging.preview.debt)}
                       </strong>
                     </div>
                   )}
@@ -907,68 +1016,91 @@ export default function Clients() {
       {creating && (
         <Modal
           title={t("clients.newClient")}
-          onClose={() => setCreating(null)}
+          onClose={() => { setCreating(null); setCreateErr({}); }}
           footer={
             <>
-              <button className="secondary" onClick={() => setCreating(null)}>{t("common.cancel")}</button>
+              <button className="secondary" onClick={() => { setCreating(null); setCreateErr({}); }}>{t("common.cancel")}</button>
               <button onClick={createClient}>{t("common.add")}</button>
             </>
           }
         >
-          <div className="field">
-            <label>{t("clients.type")}</label>
-            <select value={creating.type} onChange={(e) => setCreating({ ...creating, type: e.target.value })}>
+          <Field label={t("clients.type")}>
+            <select
+              value={creating.type}
+              onChange={(e) => {
+                setCreating({ ...creating, type: e.target.value });
+                setCreateErr({});
+              }}
+            >
               <option value="PHYSICAL">{t("clients.physical")}</option>
               <option value="OSOO">{t("clients.osoo")}</option>
             </select>
-          </div>
+          </Field>
           {/* ФИО и компания — оба поля, а не «или-или».
               Раньше форма показывала одно вместо другого: у ОсОО нельзя было
               записать контактное лицо (кому звонить по заказу), а у физлица —
               компанию, от которой он заказывает. При этом в базе есть оба поля
               и заполнены оба — форма просто не давала их ввести. */}
-          <div className="field">
-            <label>{t("clients.fullName")}</label>
+          <Field
+            label={t("clients.fullName")}
+            required={creating.type !== "OSOO"}
+            error={createErr.full_name}
+          >
             <input
               value={creating.full_name}
               onChange={(e) => setCreating({ ...creating, full_name: e.target.value })}
               placeholder={creating.type === "OSOO" ? t("clients.contactPh") : ""}
+              autoComplete="name"
               autoFocus
             />
-          </div>
-          <div className="field">
-            <label>
-              {t("clients.companyName")}
-              {creating.type !== "OSOO" && (
-                <span className="muted"> — {t("common.optional")}</span>
-              )}
-            </label>
+          </Field>
+          <Field
+            label={t("clients.companyName")}
+            required={creating.type === "OSOO"}
+            optional={creating.type !== "OSOO"}
+            optionalLabel={t("common.optional")}
+            error={createErr.company_name}
+          >
             <input
               value={creating.company_name}
               onChange={(e) => setCreating({ ...creating, company_name: e.target.value })}
               placeholder={t("clients.companyPh")}
+              autoComplete="organization"
             />
-          </div>
-          <div className="field">
-            <label>{t("clients.phone")}</label>
+          </Field>
+          <Field label={t("clients.phone")} required error={createErr.phone}>
             <input
+              type="tel"
               value={creating.phone}
               onChange={(e) => setCreating({ ...creating, phone: e.target.value })}
               placeholder="+996…"
               inputMode="tel"
+              autoComplete="tel"
             />
-          </div>
+          </Field>
           {/* ИНН спрашиваем только у юрлица и только ради счёта на оплату: без
               него бухгалтерия клиента счёт не проведёт. У физлица его нет. */}
           {creating.type === "OSOO" && (
-            <div className="field">
-              <label>{t("clients.inn")}</label>
+            <Field label={t("clients.inn")} error={createErr.inn}>
               <input
                 value={creating.inn ?? ""}
                 onChange={(e) => setCreating({ ...creating, inn: e.target.value })}
                 placeholder={t("clients.innPh")}
               />
-            </div>
+            </Field>
+          )}
+          {isAdmin && (
+            <Field label={t("clients.discount")} error={createErr.discount_percent} hint={t("clients.discountHint")}>
+              <input
+                type="number"
+                inputMode="decimal"
+                min="0"
+                max="100"
+                value={creating.discount_percent ?? ""}
+                onChange={(e) => setCreating({ ...creating, discount_percent: e.target.value })}
+                placeholder="0"
+              />
+            </Field>
           )}
         </Modal>
       )}

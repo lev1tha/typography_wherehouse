@@ -6,6 +6,9 @@ import { useAuth } from "../auth/AuthContext.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 import { areaOf } from "../utils/area.js";
+import { formatMoney } from "../utils/format.js";
+import { rulesLabel } from "../utils/pricingRules.js";
+import Field from "./Field.jsx";
 
 // Как на сервере (TransactionItem.line_total): каждая строка — вверх до сома.
 const ceilSom = (v) => Math.max(0, Math.ceil((Number(v) || 0) - 1e-6));
@@ -38,7 +41,7 @@ const EMPTY_CFG = {
 };
 
 /** Configure and append one item (дозаказ) to an existing receipt. */
-export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
+export default function AddToOrderModal({ receiptId, receipt = null, onClose, onAdded }) {
   const { t } = useTranslation();
   const { toast } = useUI();
   const { isAdmin } = useAuth();
@@ -246,8 +249,7 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
         </>
       }
     >
-      <div className="field">
-        <label>{t("checkout.addItem")}</label>
+      <Field label={t("checkout.addItem")}>
         <select value={pick} onChange={(e) => { setPick(e.target.value); setCfg({ ...EMPTY_CFG, materialId: areaMaterials[0]?.id ? String(areaMaterials[0].id) : "" }); }}>
           <option value="">—</option>
           <optgroup label={t("checkout.service")}>
@@ -265,7 +267,7 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
             ))}
           </optgroup>
         </select>
-      </div>
+      </Field>
 
       {svc?.uses_letter_type && (
         <div className="field">
@@ -303,19 +305,21 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
           {wasteMode === "SQM" ? (
             <>
               <div className="row">
-                <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value, wasteAmount: "" })} /></div>
-                <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value, wasteAmount: "" })} /></div>
+                <Field className="grow" label={t("supply.width")}>
+                  <input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value, wasteAmount: "" })} />
+                </Field>
+                <Field className="grow" label={t("supply.length")}>
+                  <input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value, wasteAmount: "" })} />
+                </Field>
               </div>
-              <div className="field">
-                <label>{t("checkout.wasteAreaDirect")}</label>
+              <Field label={t("checkout.wasteAreaDirect")}>
                 <input type="number" step="any" value={cfg.wasteAmount} onChange={(e) => setCfg({ ...cfg, wasteAmount: e.target.value, width: "", length: "" })} />
-              </div>
+              </Field>
             </>
           ) : (
-            <div className="field">
-              <label>{wasteMode === "METER" ? t("checkout.wasteMetres") : t("checkout.wastePieces")} *</label>
+            <Field label={<>{wasteMode === "METER" ? t("checkout.wasteMetres") : t("checkout.wastePieces")} *</>}>
               <input type="number" step="any" value={cfg.wasteAmount} onChange={(e) => setCfg({ ...cfg, wasteAmount: e.target.value })} />
-            </div>
+            </Field>
           )}
           <div className="field">
             <label>{t("checkout.wasteRate", { unit: wasteUnit })} *</label>
@@ -327,17 +331,16 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
               placeholder={String(wasteCatalogue)}
             />
             {!(wasteRate > 0) && (
-              <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.wasteNeedRate")}</p>
+              <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.wasteNeedRate")}</p>
             )}
           </div>
-          <div className="field">
-            <label>{t("checkout.wasteNote")}</label>
+          <Field label={t("checkout.wasteNote")}>
             <input
               value={cfg.note}
               onChange={(e) => setCfg({ ...cfg, note: e.target.value })}
               placeholder={t("checkout.wasteNotePh")}
             />
-          </div>
+          </Field>
         </>
       )}
 
@@ -360,8 +363,7 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
             <p className="muted" style={{ fontSize: 12, margin: "0 0 10px" }}>{t("checkout.engravingHint")}</p>
           )}
           {!ownCut && !isEngraving && (
-          <div className="field">
-            <label>{t("checkout.cutMaterial")}</label>
+          <Field label={t("checkout.cutMaterial")}>
             <select value={cfg.materialId} onChange={(e) => setCfg({ ...cfg, materialId: e.target.value })}>
               <option value="">—</option>
               {/* Цена за кв.м лежит в sqm_price; price_per_unit у листовых
@@ -372,12 +374,16 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
                 </option>
               ))}
             </select>
-          </div>
+          </Field>
           )}
           {!ownCut && (
           <div className="row">
-            <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} /></div>
-            <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} /></div>
+            <Field className="grow" label={t("supply.width")}>
+              <input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} />
+            </Field>
+            <Field className="grow" label={t("supply.length")}>
+              <input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} />
+            </Field>
           </div>
           )}
           {ownCut && (
@@ -391,7 +397,7 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
                 autoFocus
               />
               {!(runM > 0) && (
-                <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.ownCutNeedLength")}</p>
+                <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.ownCutNeedLength")}</p>
               )}
             </div>
           )}
@@ -423,7 +429,7 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
                   />
                   <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("checkout.runMetersHint")}</p>
                   {runMMissing && (
-                    <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>
+                    <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "4px 0 0" }}>
                       {t("checkout.runMetersRequired")}
                     </p>
                   )}
@@ -440,10 +446,7 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
           {/* Ставка. У обычной резки её правит только админ; у материала
               клиента и у гравировки — и складовщик (решение владельца). */}
           {((isAdmin && usesRunM) || ownCut || isEngraving) && (
-            <div className="field">
-              <label>
-                {ownCut ? t("checkout.ownCutRate") : isEngraving ? t("checkout.engravingRate") : t("checkout.cutRateLabel")}
-              </label>
+            <Field label={ownCut ? t("checkout.ownCutRate") : isEngraving ? t("checkout.engravingRate") : t("checkout.cutRateLabel")}>
               <input
                 type="number"
                 step="any"
@@ -451,10 +454,10 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
                 onChange={(e) => setCfg({ ...cfg, cutRate: e.target.value })}
                 placeholder={String(baseRate)}
               />
-            </div>
+            </Field>
           )}
           {rateMissing && (
-            <p style={{ color: "var(--danger)", fontSize: 12, margin: "0 0 8px" }}>
+            <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "0 0 8px" }}>
               {t(
                 ownCut ? "checkout.ownCutNeedRate"
                 : isEngraving ? "checkout.engravingNeedRate"
@@ -463,22 +466,21 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
             </p>
           )}
           {(ownCut || isEngraving) && (
-            <div className="field">
-              <label>{ownCut ? t("checkout.ownCutNote") : t("checkout.engravingNote")}</label>
+            <Field label={ownCut ? t("checkout.ownCutNote") : t("checkout.engravingNote")}>
               <input
                 value={cfg.note}
                 onChange={(e) => setCfg({ ...cfg, note: e.target.value })}
                 placeholder={ownCut ? t("checkout.ownCutNotePh") : t("checkout.engravingNotePh")}
               />
-            </div>
+            </Field>
           )}
           {cutMatPriceMissing && (
-            <p style={{ color: "var(--danger)", fontSize: 12, margin: "0 0 8px" }}>{t("checkout.priceMissing")}</p>
+            <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "0 0 8px" }}>{t("checkout.priceMissing")}</p>
           )}
         </>
       )}
       {sel?.type === "material" && matPriceMissing && matMode !== "METER" && (
-        <p style={{ color: "var(--danger)", fontSize: 12, margin: "0 0 8px" }}>{t("checkout.priceMissing")}</p>
+        <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "0 0 8px" }}>{t("checkout.priceMissing")}</p>
       )}
 
       {/* Рулон: одно поле — длина; ширина надписью, режем поперёк на всю. */}
@@ -487,12 +489,11 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
           <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
             {t("checkout.rollWidthFixed", { width: mat.roll_width })}
           </p>
-          <div className="field">
-            <label>{t("checkout.rollLength")}</label>
+          <Field label={t("checkout.rollLength")}>
             <input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} autoFocus />
-          </div>
+          </Field>
           {!(Number(mat.price_per_pm) > 0) && (
-            <p style={{ color: "var(--danger)", fontSize: 13, margin: "0 0 8px" }}>{t("checkout.rollNoPrice")}</p>
+            <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "0 0 8px" }}>{t("checkout.rollNoPrice")}</p>
           )}
         </>
       )}
@@ -524,8 +525,12 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
           ) : (
             <>
               <div className="row">
-                <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} /></div>
-                <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} /></div>
+                <Field className="grow" label={t("supply.width")}>
+                  <input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} />
+                </Field>
+                <Field className="grow" label={t("supply.length")}>
+                  <input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} />
+                </Field>
               </div>
               <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
                 {t("checkout.sizeHint")}{matArea > 0 ? ` · ${matArea} ${t("unit.SQM")} × ${matAreaPrice}` : ""}
@@ -536,15 +541,21 @@ export default function AddToOrderModal({ receiptId, onClose, onAdded }) {
       )}
 
       {sel && !usesArea && !isWaste && !matRoll && !matSheet && (
-        <div className="field">
-          <label>{sel.type === "service" && svc.uses_pieces ? t("receipts.letters") : t("common.quantity")}</label>
+        <Field label={sel.type === "service" && svc.uses_pieces ? t("receipts.letters") : t("common.quantity")}>
           <input type="number" value={cfg.qty} onChange={(e) => setCfg({ ...cfg, qty: e.target.value })} />
-        </div>
+        </Field>
       )}
 
       {sel && preview > 0 && (
         <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
-          <div className="crow"><span className="k">{t("checkout.submit")}</span><strong style={{ fontSize: 18 }}>+{preview.toFixed(0)} сом</strong></div>
+          <div className="crow"><span className="k">{t("checkout.submit")}</span><strong style={{ fontSize: 18 }}>+{formatMoney(preview)}</strong></div>
+          {/* Дозаказ считается по правилам заказа (срочность, скидка) — сумма
+              выше по каталогу, точную посчитает сервер. */}
+          {receipt && rulesLabel(receipt, t) && (
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+              {t("checkout.addRulesNote", { rules: rulesLabel(receipt, t) })}
+            </p>
+          )}
         </div>
       )}
     </Modal>

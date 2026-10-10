@@ -7,8 +7,22 @@ from rest_framework import serializers
 from .models import Client
 
 
+# Продажа, которая состоялась: у неоплаченного онлайн-счёта выручка не признана
+# (D-7, D-37 — «не выручка, не долг, нигде не числится»), и в сумму покупок
+# клиента он входить не должен.
+RECOGNIZED = Q(revenue_recognized_at__isnull=False)
+
+
+# Телефон: короче девяти цифр это не номер, длиннее пятнадцати (E.164) — тоже.
+MIN_PHONE_DIGITS = 9
+MAX_PHONE_DIGITS = 15
+
+
 def client_ltv(client) -> Decimal:
-    agg = client.receipts.aggregate(gross=Sum("total_price"), refunded=Sum("refunded_amount"))
+    agg = client.receipts.aggregate(
+        gross=Sum("total_price", filter=RECOGNIZED),
+        refunded=Sum("refunded_amount", filter=RECOGNIZED),
+    )
     return (agg["gross"] or Decimal("0")) - (agg["refunded"] or Decimal("0"))
 
 
@@ -54,6 +68,8 @@ class ClientSerializer(serializers.ModelSerializer):
             "referred_by",
             "referred_by_name",
             "referrals_count",
+            # Постоянная скидка, % — касса подставляет её сама (2026-10-10).
+            "discount_percent",
             "debt",
             "change_due",
             "orders_count",
@@ -62,7 +78,9 @@ class ClientSerializer(serializers.ModelSerializer):
         read_only_fields = ["telegram_chat_id", "created_at"]
 
     def get_referrals_count(self, obj):
-        return obj.referrals.count()
+        # Вьюсет считает аннотацией (`referrals_total`); без неё — запросом.
+        annotated = getattr(obj, "referrals_total", None)
+        return annotated if annotated is not None else obj.referrals.count()
 
     def get_debt(self, obj):
         # Вьюсет считает долг аннотацией (её же использует сортировка по клику).
@@ -117,21 +135,66 @@ class ClientSerializer(serializers.ModelSerializer):
                     )
         return value
 
+    def validate_discount_percent(self, value):
+        """Скидку клиента задаёт и меняет только админ (CLI-02). Складовщик
+        её видит и применяет в кассе, но назначить её себе «по знакомству»
+        не может — ни в карточке, ни при заведении клиента из кассы."""
+        current = getattr(self.instance, "discount_percent", Decimal("0"))
+        if value != current:
+            request = self.context.get("request")
+            if not (request and getattr(request.user, "is_admin_role", False)):
+                raise serializers.ValidationError(
+                    "Скидку клиента задаёт только администратор."
+                )
+        return value
+
     def validate_phone(self, value):
         """Тот же номер в другом написании — тот же клиент, а не новый.
 
         Уникальность на поле проверяет СТРОКУ, поэтому `0555 111 222` спокойно
         заводился поверх `+996555111222`, и один человек оказывался в списке
         дважды. Ловим это по цифрам и говорим, под кем номер уже записан.
-        """
-        from .phones import find_client_by_phone
 
+        Телефон — ещё и ЛОГИН кабинета клиента, поэтому:
+          * номер должен быть похож на номер: от 9 до 15 цифр (раньше проходило
+            «1» и «абв»);
+          * менять номер существующего клиента (другие цифры, а не другое
+            написание) может только администратор.
+        Незатронутый номер (в PATCH/PUT пришёл тот же, что в базе) не
+        перепроверяем: у старых карточек бывают короткие номера, и править в них
+        имя это не должно мешать.
+        """
+        from .phones import find_client_by_phone, only_digits, phone_key
+
+        if self.instance is not None and value == self.instance.phone:
+            return value
+        digits = only_digits(value)
+        if not MIN_PHONE_DIGITS <= len(digits) <= MAX_PHONE_DIGITS:
+            raise serializers.ValidationError(
+                f"Телефон: от {MIN_PHONE_DIGITS} до {MAX_PHONE_DIGITS} цифр, например "
+                "+996 555 11 22 33."
+            )
+        if self.instance is not None and phone_key(value) != phone_key(self.instance.phone):
+            request = self.context.get("request")
+            if not (request and getattr(request.user, "is_admin_role", False)):
+                raise serializers.ValidationError(
+                    "Менять телефон клиента может только администратор: это логин его кабинета."
+                )
         twin = find_client_by_phone(value)
         if twin and (self.instance is None or twin.pk != self.instance.pk):
             raise serializers.ValidationError(
                 f"Этот номер уже записан за клиентом «{twin.display_name}» ({twin.phone})."
             )
         return value
+
+    def update(self, instance, validated_data):
+        """Смена телефона (логина кабинета) отзывает выданные клиенту токены."""
+        from .phones import phone_key
+
+        new_phone = validated_data.get("phone")
+        if new_phone is not None and phone_key(new_phone) != phone_key(instance.phone):
+            validated_data["credentials_version"] = (instance.credentials_version or 0) + 1
+        return super().update(instance, validated_data)
 
     def validate(self, attrs):
         # Тип берём с запасным значением МОДЕЛИ, а не None. Раньше при создании
@@ -255,6 +318,10 @@ class ClientDetailSerializer(ClientSerializer):
                 "refunded_amount": r.refunded_amount,
                 "payment_status": r.payment_status,
                 "fulfillment_status": r.fulfillment_status,
+                # Дата признания выручки: пусто у неоплаченного онлайн-счёта —
+                # он не продажа и не долг (D-7). Акт сверки берёт в долг и
+                # обороты только заказы с этой датой.
+                "revenue_recognized_at": r.revenue_recognized_at,
                 "debt": r.debt,
                 "change_due": r.change_due,
                 "items": items,
@@ -272,8 +339,8 @@ class ClientDetailSerializer(ClientSerializer):
         agg = receipts.aggregate(
             orders=Count("id", filter=~Q(status=Receipt.Status.CANCELLED)),
             cancelled=Count("id", filter=Q(status=Receipt.Status.CANCELLED)),
-            gross=Sum("total_price"),
-            refunded=Sum("refunded_amount"),
+            gross=Sum("total_price", filter=RECOGNIZED),
+            refunded=Sum("refunded_amount", filter=RECOGNIZED),
         )
         gross = agg["gross"] or Decimal("0")
         refunded = agg["refunded"] or Decimal("0")

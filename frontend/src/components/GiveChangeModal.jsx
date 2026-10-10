@@ -4,8 +4,9 @@ import { useTranslation } from "react-i18next";
 import api from "../api/api.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { formatMoney } from "../utils/format.js";
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const som = (n) => formatMoney(n);
 
 // Выдача сдачи — зеркало приёма оплаты: там деньги пришли, тут ушли.
 // Частями можно специально: мелочи в кассе может не хватить и во второй раз,
@@ -51,7 +52,7 @@ export default function GiveChangeModal({ receipt, onClose, onGiven }) {
     >
       <div className="crow">
         <span className="k">{t("receipts.change")}</span>
-        <strong style={{ color: "var(--accent-strong)" }}>{som(due)}</strong>
+        <strong style={{ color: "var(--accent-ink)" }}>{som(due)}</strong>
       </div>
 
       <div className="field" style={{ marginTop: 10 }}>
@@ -77,7 +78,7 @@ export default function GiveChangeModal({ receipt, onClose, onGiven }) {
       {left > 0 && (
         <div className="crow">
           <span className="k">{t("receipts.changeLeft")}</span>
-          <strong style={{ color: "var(--accent-strong)" }}>{som(left)}</strong>
+          <strong style={{ color: "var(--accent-ink)" }}>{som(left)}</strong>
         </div>
       )}
     </Modal>

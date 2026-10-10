@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import api from "../api/api.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { formatMoney, formatNumber } from "../utils/format.js";
+import Field from "./Field.jsx";
 
 // Приём (поступление) нового прихода для КОНКРЕТНОГО материала — открывается с
 // его строки в «Складе». Рулонный: сегмент Рулон/Лист + размеры + цена за лист
@@ -113,6 +115,15 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
       ? Number(v.unit_cost) * pieces
       : 0
   );
+  // Размер листа против карточки (F7) — поворот листа не в счёт.
+  const sizeMismatch = (() => {
+    const cw = Number(material.sheet_width), ch = Number(material.sheet_height);
+    const w = Number(v.width), h = Number(v.height);
+    if (!(cw > 0 && ch > 0 && w > 0 && h > 0)) return false;
+    const [a, b] = [w, h].sort((x, y) => x - y);
+    const [c, d] = [cw, ch].sort((x, y) => x - y);
+    return Math.abs(a - c) > 0.005 || Math.abs(b - d) > 0.005;
+  })();
   // Недолив: заявлено минус принято.
   const shortfall =
     Number(v.declared_length) > 0 && Number(v.length) > 0
@@ -148,7 +159,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
         : Number(material.piece_area) || 0;
   const oldPerSqm = Number(material.purchase_price) || 0;
   const perSheet = (perSqm) => (sheetArea > 0 ? Math.round(perSqm * sheetArea) : null);
-  const money = (n) => Number(n).toLocaleString("ru-RU");
+  const money = (n) => formatNumber(n);
 
   const valid = !!v.payment && (roll
     ? (byArea
@@ -161,9 +172,10 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
 
   async function submit() {
     setBusy(true);
+    let posted = null;
     try {
       if (roll) {
-        await api.post("/warehouse/materials/receive-roll/", {
+        ({ data: posted } = await api.post("/warehouse/materials/receive-roll/", {
           material: material.id,
           // Форма партии — та, что выбрана вкладкой. Площадь это лишь способ
           // ввода: у ЛИСТА она уходит как есть (размеров в таком счёте нет), у
@@ -188,7 +200,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           purchase_cost: batchCost,
           received_on: v.received_on || null,
           payment: v.payment,
-        });
+        }));
       } else {
         await api.post("/warehouse/materials/supply/", {
           material: material.id,
@@ -200,6 +212,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
         });
       }
       toast(t("supply.done"));
+      (posted?.warnings || []).forEach((w) => toast(w.message, "error"));
       onDone?.();
       onClose();
     } catch (e) {
@@ -212,10 +225,9 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
   }
 
   const numField = (label, key, extra) => (
-    <div className="field grow" style={{ margin: 0 }}>
-      <label>{label}</label>
+    <Field className="grow" style={{ margin: 0 }} label={label}>
       <input type="number" step="any" value={v[key]} onChange={set(key)} {...extra} />
-    </div>
+    </Field>
   );
 
   return (
@@ -282,7 +294,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           {/* Недолив — на виду сразу, а не «когда-нибудь в отчёте»: рулон за
               рулоном по метру это чистый убыток, который иначе не свести. */}
           {shortfall > 0 && (
-            <p style={{ color: "var(--danger)", fontSize: 13, margin: "-4px 0 8px" }}>
+            <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "-4px 0 8px" }}>
               {t("supply.shortfall", { n: shortfall.toFixed(2) })}
             </p>
           )}
@@ -294,6 +306,17 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           {numField(t("supply.height"), "height")}
           {numField(t("supply.sheets"), "sheet_count")}
         </div>
+      )}
+      {/* Размер листа не тот, что в карточке (аудит F7): лист продаётся по
+          площади из карточки, и после продажи всей пачки на складе осталась бы
+          часть листа, которой нет на полке. Не запрет — предупреждение. */}
+      {roll && form === "SHEET" && !byArea && sizeMismatch && (
+        <p className="callout" role="status">
+          {t("supply.sheetSizeMismatch", {
+            got: `${v.width}×${v.height}`,
+            card: `${Number(material.sheet_width)}×${Number(material.sheet_height)}`,
+          })}
+        </p>
       )}
       {/* Квадратами: площадь и цена за квадрат — ровно две цифры из счёта.
           Размеры и количество листов тут не спрашиваем: их в таком счёте нет,
@@ -323,7 +346,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           {batchCost > 0 && (
             <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
               {t("supply.batchCost")}: {money(Number(v.cost_per_pm))} × {Number(v.length) || 0} ={" "}
-              <strong>{money(batchCost)}</strong> сом
+              <strong>{formatMoney(batchCost)}</strong>
             </p>
           )}
         </div>
@@ -340,7 +363,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
               стоит в накладной поставщика. */}
           {form === "SHEET" && batchCost > 0 && (
             <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
-              {t("supply.batchCost")}: {pieces} × {money(Number(v.unit_cost))} = <strong>{money(batchCost)}</strong> сом
+              {t("supply.batchCost")}: {pieces} × {money(Number(v.unit_cost))} = <strong>{formatMoney(batchCost)}</strong>
             </p>
           )}
           {/* Почём материал стоил до этого прихода — рядом, а не в другом
@@ -369,13 +392,16 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
         </>
       )}
 
-      <div className="field">
-        <label>{t("supply.receivedOn")}</label>
-        <input type="date" value={v.received_on} onChange={set("received_on")} />
-        <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+      <Field label={t("supply.receivedOn")}>
+        {(a) => (
+          <>
+          <input {...a} type="date" value={v.received_on} onChange={set("received_on")} />
+          <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
           {t("supply.receivedOnHint")}
         </p>
-      </div>
+          </>
+        )}
+      </Field>
 
       {/* ЧЕМ ЗАПЛАТИЛИ. Ничего не выбрано заранее: владелец платит по-разному,
           и угадывать за него — значит списать из ящика деньги, которых оттуда
@@ -411,19 +437,17 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
           («бишкек»), то есть свободным текстом — ни отфильтровать, ни свести.
           Подставляется из карточки: обычно возят оттуда же. */}
       <div className="row">
-        <div className="field grow" style={{ margin: 0 }}>
-          <label>{t("supply.rollCode")}</label>
+        <Field className="grow" style={{ margin: 0 }} label={t("supply.rollCode")}>
           <input value={v.code} onChange={set("code")} placeholder={t("supply.batchPlaceholder")} />
-        </div>
-        <div className="field grow" style={{ margin: 0 }}>
-          <label>{t("supply.production")}</label>
+        </Field>
+        <Field className="grow" style={{ margin: 0 }} label={t("supply.production")}>
           <select value={v.production ?? ""} onChange={set("production")}>
             <option value="">—</option>
             {sites.map((s) => (
               <option key={s.id} value={s.id}>{s.name}</option>
             ))}
           </select>
-        </div>
+        </Field>
       </div>
 
       {added > 0 && (
@@ -451,7 +475,7 @@ export default function ReceiveStockModal({ material, onClose, onDone }) {
                     <div className="crow">
                       <span className="k">{t("supply.costPerSheet", { unit: wholeUnit })}</span>
                       <strong>
-                        {money(perSheet(Number(costPerSqm)))} сом
+                        {formatMoney(perSheet(Number(costPerSqm)))}
                         {oldPerSqm > 0 && perSheet(oldPerSqm) && (
                           <span className="muted" style={{ fontWeight: 400 }}>
                             {" "}({t("supply.priceWas", { value: money(perSheet(oldPerSqm)) })})

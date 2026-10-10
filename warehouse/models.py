@@ -603,6 +603,11 @@ class InventoryLog(models.Model):
         RETURN = "RETURN", _("Возврат от клиента")
         ADJUSTMENT = "ADJUSTMENT", _("Корректировка/Инвентаризация")
         WRITE_OFF = "WRITE_OFF", _("Списание (порча/брак/утеря)")
+        # Исправление опечатки в принятой партии (2026-10-10, D-70). Сам приход
+        # правится на месте — как ячейка в Excel, — а эта запись хранит «было →
+        # стало». Движения она не несёт (количество 0, себестоимости нет): ни
+        # продажа, ни потеря, ни промер, в ОПиУ не попадает.
+        CORRECTION = "CORRECTION", _("Исправление прихода")
 
     type = models.CharField(max_length=20, choices=Type.choices)
     material = models.ForeignKey(
@@ -653,6 +658,18 @@ class InventoryLog(models.Model):
         related_name="inventory_logs",
         verbose_name=_("чек"),
     )
+    # Строка чека, которая породила это движение. Нужна правке состава: сторно
+    # должно задеть записи ИМЕННО этой строки, а не «первую продажу того же
+    # материала» — иначе при двух строках одного материала журнал переставал
+    # сходиться с остатком. Пусто у старых записей и у движений не из чека.
+    receipt_item = models.ForeignKey(
+        "sales.TransactionItem",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="inventory_logs",
+        verbose_name=_("строка чека"),
+    )
     # Приходная накладная, по которой материал пришёл. Ссылка, а не номер
     # текстом: из журнала видно не только «поступление», но и по какой бумаге —
     # и обратно, из накладной, весь её след на складе.
@@ -663,6 +680,18 @@ class InventoryLog(models.Model):
         blank=True,
         related_name="inventory_logs",
         verbose_name=_("накладная"),
+    )
+    # Партия, к которой относится запись: приход и его исправления. Раньше
+    # приход партии искали по материалу и площади — две одинаковые поставки
+    # не различались, а после исправления количества площадь уже не та.
+    # Пусто у старых записей и у движений не по партии.
+    roll = models.ForeignKey(
+        "Roll",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="inventory_logs",
+        verbose_name=_("партия"),
     )
     created_by = models.ForeignKey(
         "accounts.User",

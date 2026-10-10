@@ -107,6 +107,20 @@ def _paid_account(data):
     return value if value in ("CASH", "BANK") else None
 
 
+def _intake_warnings(rows) -> list:
+    """Предупреждения приёмки: лист не того размера, что в карточке (F7)."""
+    from .lot_correction import sheet_size_warning
+
+    out = []
+    for material, form, width, height in rows:
+        if form != "SHEET":
+            continue
+        warning = sheet_size_warning(material, width, height)
+        if warning:
+            out.append(warning)
+    return out
+
+
 class MaterialViewSet(viewsets.ModelViewSet):
     """Warehouse catalogue. Read for all staff; create/edit for admins.
 
@@ -524,10 +538,11 @@ class MaterialViewSet(viewsets.ModelViewSet):
                 f"недостача {roll.shortfall} м"
             )
         AuditLog.record(request.user, note)
-        return Response(
-            MaterialSerializer(roll.material, context={"request": request}).data,
-            status=status.HTTP_201_CREATED,
-        )
+        body = dict(MaterialSerializer(roll.material, context={"request": request}).data)
+        # Размер листа не совпал с карточкой (аудит F7) — не запрет, а
+        # предупреждение в момент приёмки: лист продаётся по площади карточки.
+        body["warnings"] = _intake_warnings([(roll.material, roll.form, roll.width, roll.height)])
+        return Response(body, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["post"], url_path="write-off", permission_classes=[IsAdmin])
     def write_off(self, request):
@@ -621,7 +636,7 @@ class InventoryLogViewSet(viewsets.ReadOnlyModelViewSet):
 class RollViewSet(viewsets.ReadOnlyModelViewSet):
     """Rolls (lots) of roll-materials — list & filter by material."""
 
-    queryset = Roll.objects.select_related("material").all()
+    queryset = Roll.objects.select_related("material", "supply_line__supply").all()
     serializer_class = RollSerializer
     permission_classes = [IsAuthenticated]
     filterset_fields = ["material"]
@@ -899,6 +914,16 @@ class SupplyViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        # Оплата поставщику — деньги из кассы, и проводит её администратор (как в
+        # `update` и `pay`). Накладную складовщик заводит без оплаты; приход с
+        # полями оплаты в теле раньше писал расход в кассу в обход этого права.
+        if not request.user.is_admin_role:
+            data = serializer.validated_data
+            if (data.get("paid_amount") or 0) > 0 or data.get("paid_account"):
+                return Response(
+                    {"detail": "Оплату поставщику проводит администратор."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
         # Приход двигает закуп месяца — в закрытый период его не заводим.
         ensure_open(serializer.validated_data.get("received_on"), "Провести накладную этой датой")
         lines = serializer.validated_data.pop("lines", [])
@@ -917,9 +942,11 @@ class SupplyViewSet(viewsets.ModelViewSet):
             f"{f' от {supply.supplier.name}' if supply.supplier_id else ''}: "
             f"{supply.lines.count()} поз. на {supply.total_cost} сом",
         )
-        return Response(
-            self.get_serializer(supply).data, status=status.HTTP_201_CREATED
-        )
+        body = dict(self.get_serializer(supply).data)
+        body["warnings"] = _intake_warnings([
+            (line.material, line.form, line.width, line.height) for line in supply.lines.all()
+        ])
+        return Response(body, status=status.HTTP_201_CREATED)
 
     def update(self, request, *args, **kwargs):
         """Состав накладной не правим — только её «бумажную» часть.
@@ -1057,3 +1084,38 @@ class WasteView(APIView):
             InventoryLogSerializer(entries, many=True, context={"request": request}).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class LotCorrectionView(APIView):
+    """«Исправить приход» — опечатка в цене или количестве принятой партии.
+
+    POST /warehouse/lot-correction/preview/ — что изменится (ничего не пишет);
+    POST /warehouse/lot-correction/apply/   — провести одной транзакцией.
+
+    Только администратор: правка меняет себестоимость проданного, закуп и долг
+    поставщику. Закрытый месяц — 400 с перечнем месяцев (`closed_months`).
+    """
+
+    permission_classes = [IsAdmin]
+    mode = "preview"
+
+    def post(self, request):
+        from .lot_correction import CorrectionError, apply, preview
+        from .serializers import LotCorrectionSerializer
+
+        serializer = LotCorrectionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = dict(serializer.validated_data)
+        roll = data.pop("roll", None)
+        line = data.pop("supply_line", None)
+        try:
+            if self.mode == "apply":
+                result = apply(roll=roll, line=line, data=data, user=request.user)
+            else:
+                result = preview(roll=roll, line=line, data=data)
+        except CorrectionError as e:
+            body = {"detail": str(e)}
+            if e.closed_months:
+                body["closed_months"] = e.closed_months
+            return Response(body, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)

@@ -3,24 +3,33 @@ import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
+import LoadError from "../../components/LoadError.jsx";
 import Modal from "../../components/Modal.jsx";
 import { FulfillmentBadge, PaymentBadge } from "../../components/StatusBadge.jsx";
+import { formatDate, formatMoney } from "../../utils/format.js";
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const som = (n) => formatMoney(n);
 
 export default function CustomerOrders() {
   const { t } = useTranslation();
   const { user } = useAuth();
   const [orders, setOrders] = useState(null);
+  const [failed, setFailed] = useState(false);
   const [showPay, setShowPay] = useState(false);
 
-  useEffect(() => {
+  function load() {
+    setFailed(false);
     api
       .get("/customer/orders/")
       .then((r) => setOrders(r.data))
-      .catch(() => setOrders([]));
-  }, []);
+      // Раньше сбой превращался в пустой список — клиент видел «Заказов 0,
+      // долг 0 сом» вместо «не удалось загрузить». Пустое и сломанное — разное.
+      .catch(() => setFailed(true));
+  }
 
+  useEffect(load, []);
+
+  if (failed) return <LoadError onRetry={load} />;
   if (orders === null) return <p className="muted">{t("common.loading")}</p>;
 
   const totalDebt = orders.reduce((s, o) => s + Number(o.debt), 0);
@@ -28,6 +37,11 @@ export default function CustomerOrders() {
   // перед цехом — а обратной стороны не было вовсе, хотя эта сдача идёт в
   // оплату его следующего заказа.
   const totalChange = orders.reduce((s, o) => s + Number(o.change_due || 0), 0);
+  // Ждать готовности имеет смысл, только если за долгом стоит заказ, который ещё
+  // делают. Выданный заказ и покупка без работы (лист бумаги) ждать нечего.
+  const waitsForProduction = orders.some(
+    (o) => Number(o.debt) > 0 && o.has_service && o.fulfillment_status !== "ISSUED"
+  );
 
   return (
     <>
@@ -44,7 +58,7 @@ export default function CustomerOrders() {
         </div>
         <div className="stat">
           <div className="label">{t("myOrders.totalDebt")}</div>
-          <div className="value" style={{ color: totalDebt > 0 ? "var(--danger)" : "var(--ok)" }}>
+          <div className="value" style={{ color: totalDebt > 0 ? "var(--danger-ink)" : "var(--ok-ink)" }}>
             {som(totalDebt)}
           </div>
           {totalDebt > 0 && (
@@ -56,7 +70,7 @@ export default function CustomerOrders() {
         {totalChange > 0 && (
           <div className="stat">
             <div className="label">{t("myOrders.changeDue")}</div>
-            <div className="value" style={{ color: "var(--accent-strong)" }}>{som(totalChange)}</div>
+            <div className="value" style={{ color: "var(--accent-ink)" }}>{som(totalChange)}</div>
             <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{t("myOrders.changeHint")}</div>
           </div>
         )}
@@ -80,7 +94,7 @@ export default function CustomerOrders() {
             <div className="data-card" key={o.id}>
               <div className="crow">
                 <strong>№{o.order_number}</strong>
-                <span className="muted">{new Date(o.created_at).toLocaleDateString("ru-RU")}</span>
+                <span className="muted">{formatDate(o.created_at)}</span>
               </div>
               <div style={{ margin: "8px 0" }}>
                 {o.items.map((it, i) => (
@@ -101,10 +115,24 @@ export default function CustomerOrders() {
                 <span className="k">{t("common.total")}</span>
                 <strong>{som(o.total_price)}</strong>
               </div>
+              {/* Сколько уже оплачено — поле приходит не от всех версий API,
+                  поэтому показываем только когда оно есть. */}
+              {o.amount_paid != null && Number(o.amount_paid) > 0 && (
+                <div className="crow">
+                  <span className="k">{t("myOrders.paid")}</span>
+                  <span>{som(o.amount_paid)}</span>
+                </div>
+              )}
+              {Number(o.refunded_amount) > 0 && (
+                <div className="crow">
+                  <span className="k">{t("myOrders.refunded")}</span>
+                  <span>{som(o.refunded_amount)}</span>
+                </div>
+              )}
               {Number(o.debt) > 0 && (
                 <div className="crow">
                   <span className="k">{t("receipts.debt")}</span>
-                  <strong style={{ color: "var(--danger)" }}>{som(o.debt)}</strong>
+                  <strong style={{ color: "var(--danger-ink)" }}>{som(o.debt)}</strong>
                 </div>
               )}
               <div className="crow" style={{ marginTop: 6, gap: 8, justifyContent: "flex-start", flexWrap: "wrap" }}>
@@ -134,11 +162,18 @@ export default function CustomerOrders() {
         >
           <div className="pos-total" style={{ fontSize: 18, marginBottom: 8 }}>
             <span>{t("myOrders.totalDebt")}</span>
-            <span style={{ color: "var(--danger)" }}>{som(totalDebt)}</span>
+            <span style={{ color: "var(--danger-ink)" }}>{som(totalDebt)}</span>
           </div>
-          <ol style={{ paddingLeft: 18, lineHeight: 1.8, margin: "8px 0" }}>
-            <li>{t("myOrders.payStep1")}</li>
-            <li>{t("myOrders.payStep2")}</li>
+          <ol className="pay-guide">
+            {waitsForProduction ? (
+              <>
+                <li>{t("myOrders.payStep1")}</li>
+                <li>{t("myOrders.payStep2")}</li>
+              </>
+            ) : (
+              // Заказ уже выдан или работы в нём нет — ждать нечего.
+              <li>{t("myOrders.payStepNow")}</li>
+            )}
           </ol>
           <p className="muted">{t("myOrders.payNote")}</p>
         </Modal>

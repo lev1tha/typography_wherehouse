@@ -1,5 +1,7 @@
+import uuid
 from decimal import Decimal
 
+from PIL import Image, UnidentifiedImageError
 from rest_framework import serializers
 
 from .models import (
@@ -24,7 +26,58 @@ def _sees_money(context) -> bool:
     return bool(request and getattr(request.user, "sees_money", False))
 
 
+# Фото материала: потолки до обработки. Размер файла и число пикселей проверяем
+# ДО того, как Pillow начнёт разбирать картинку: небольшой PNG с заявленными
+# 100 000 × 100 000 пикселей занимает килобайты, а при разборе съедает гигабайты
+# памяти (бомба распаковки).
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_PIXELS = 64_000_000
+IMAGE_EXTENSIONS = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp", "GIF": "gif"}
+
+
+class SafeImageField(serializers.ImageField):
+    """Картинка с потолками по размеру и пикселям и безопасным именем.
+
+    Имя файла берём не от клиента (`../x.php`, юникод, коллизии), а генерируем:
+    uuid + расширение по РЕАЛЬНОМУ формату, который определил Pillow, а не по
+    тому, что написано в имени.
+    """
+
+    def to_internal_value(self, data):
+        size = getattr(data, "size", None)
+        if size is not None and size > MAX_IMAGE_BYTES:
+            raise serializers.ValidationError(
+                f"Файл слишком большой: не больше {MAX_IMAGE_BYTES // (1024 * 1024)} МБ."
+            )
+        fmt = None
+        if hasattr(data, "seek") and hasattr(data, "read"):
+            try:
+                data.seek(0)
+                with Image.open(data) as img:     # читает только заголовок
+                    width, height = img.size
+                    fmt = img.format
+            except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+                raise serializers.ValidationError("Загрузите корректное изображение.")
+            finally:
+                data.seek(0)
+            if width * height > MAX_IMAGE_PIXELS:
+                raise serializers.ValidationError(
+                    "Изображение слишком большое по размерам "
+                    f"({width}×{height}). Уменьшите фото."
+                )
+            if fmt not in IMAGE_EXTENSIONS:
+                raise serializers.ValidationError(
+                    "Допустимые форматы фото: JPEG, PNG, WEBP, GIF."
+                )
+        file = super().to_internal_value(data)
+        if fmt:
+            file.name = f"{uuid.uuid4().hex}.{IMAGE_EXTENSIONS[fmt]}"
+        return file
+
+
 class MaterialImageSerializer(serializers.ModelSerializer):
+    image = SafeImageField()
+
     class Meta:
         model = MaterialImage
         fields = ["id", "material", "image", "is_primary", "uploaded_at"]
@@ -420,6 +473,25 @@ class RollSerializer(serializers.ModelSerializer):
         max_digits=10, decimal_places=2, read_only=True, allow_null=True
     )
 
+    # Накладная партии (если пришла документом) — карточке партии и кнопке
+    # «Исправить приход»: исправление двигает и сумму накладной.
+    supply = serializers.SerializerMethodField()
+    supply_number = serializers.SerializerMethodField()
+
+    def _line(self, obj):
+        try:
+            return obj.supply_line
+        except SupplyLine.DoesNotExist:
+            return None
+
+    def get_supply(self, obj):
+        line = self._line(obj)
+        return line.supply_id if line else None
+
+    def get_supply_number(self, obj):
+        line = self._line(obj)
+        return (line.supply.number or f"#{line.supply_id}") if line else None
+
     def get_cost_per_sqm(self, obj):
         return obj.cost_per_sqm if _sees_money(self.context) else None
 
@@ -462,6 +534,8 @@ class RollSerializer(serializers.ModelSerializer):
             "cost_per_sqm",
             "supplier_debt",
             "received_at",
+            "supply",
+            "supply_number",
         ]
 
 
@@ -752,8 +826,11 @@ class SupplyLineSerializer(serializers.ModelSerializer):
             "id", "material", "material_name", "form",
             "width", "height", "length", "sheet_count",
             "quantity", "unit", "unit_code", "cost", "unit_cost", "code",
+            # Партия строки — кнопке «Исправить приход» в карточке накладной.
+            "roll",
         ]
         extra_kwargs = {
+            "roll": {"read_only": True},
             # У штучного материала количество ВВОДЯТ, у площадного оно считается
             # из размеров и присланное значение игнорируется (см. `line_quantity`).
             "quantity": {"required": False},
@@ -878,3 +955,35 @@ class WasteSerializer(serializers.Serializer):
         if value and value > timezone.localdate():
             raise serializers.ValidationError("Дата отхода не может быть в будущем.")
         return value
+
+
+class LotCorrectionSerializer(serializers.Serializer):
+    """«Исправить приход»: что правим и на что (см. warehouse/lot_correction.py).
+
+    Партия (`roll`) или строка накладной без партии (`supply_line`, штучный
+    материал). Поля, которых нет в запросе, остаются как были; сумма не
+    указана — цена единицы та же, сумма идёт за количеством.
+    """
+
+    roll = serializers.PrimaryKeyRelatedField(queryset=Roll.objects.all(), required=False, allow_null=True)
+    supply_line = serializers.PrimaryKeyRelatedField(
+        queryset=SupplyLine.objects.all(), required=False, allow_null=True,
+    )
+    purchase_cost = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=0, required=False, allow_null=True,
+    )
+    width = serializers.DecimalField(max_digits=8, decimal_places=2, min_value=0, required=False, allow_null=True)
+    height = serializers.DecimalField(max_digits=8, decimal_places=2, min_value=0, required=False, allow_null=True)
+    length = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0, required=False, allow_null=True)
+    sheet_count = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=0, required=False, allow_null=True,
+    )
+    quantity = serializers.DecimalField(
+        max_digits=14, decimal_places=4, min_value=0, required=False, allow_null=True,
+    )
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+    def validate(self, attrs):
+        if bool(attrs.get("roll")) == bool(attrs.get("supply_line")):
+            raise serializers.ValidationError("Укажите партию или строку накладной.")
+        return attrs

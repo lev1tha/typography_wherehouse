@@ -123,7 +123,7 @@ def write_off_waste(lines: list[dict], *, user=None, happened_on=None, note: str
             if roll is None:
                 roll = (
                     Roll.objects.filter(material=material, remaining_area__gt=0, width__isnull=False)
-                    .order_by("received_at").first()
+                    .order_by("received_at", "pk").first()
                 )
                 if roll is None:
                     raise WasteError(f"«{material.name}»: нет рулонов с остатком — списывать не с чего.")

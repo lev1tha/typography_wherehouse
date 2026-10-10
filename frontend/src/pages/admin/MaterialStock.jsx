@@ -4,10 +4,11 @@ import { useTranslation } from "react-i18next";
 import api from "../../api/api.js";
 import MonthPicker from "../../components/MonthPicker.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
+import { formatNumber } from "../../utils/format.js";
 
-const q2 = (n) => Number(n || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+const q2 = (n) => formatNumber(n, { max: 2 });
 // Деньги — без копеек: заказчик ведёт лист в целых сомах.
-const som = (n) => Math.round(Number(n) || 0).toLocaleString("ru-RU");
+const som = (n) => formatNumber(n);
 const dayLabel = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
 
 // Складской лист по материалам: поступление · проданные · производство ·

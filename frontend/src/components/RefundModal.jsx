@@ -6,6 +6,7 @@ import { apiError } from "../api/errors.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 import { itemTitle } from "../utils/itemLabel.js";
+import { formatMoney } from "../utils/format.js";
 
 // Возврат по чеку — целиком или ОТДЕЛЬНЫМИ позициями.
 //
@@ -15,7 +16,7 @@ import { itemTitle } from "../utils/itemLabel.js";
 // лист из трёх. Здесь отмечают, что именно вернули (по умолчанию — всё):
 // материал этих строк уходит обратно на склад, деньги — расходом кассы (не
 // больше, чем по чеку принимали), остальные строки живут дальше.
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const som = (n) => formatMoney(n);
 
 export default function RefundModal({ receipt, onClose, onDone }) {
   const { t } = useTranslation();
@@ -82,7 +83,7 @@ export default function RefundModal({ receipt, onClose, onDone }) {
           <button
             type="button"
             className="ghost"
-            style={{ padding: 0, height: "auto", color: "var(--accent-strong)" }}
+            style={{ padding: 0, height: "auto", color: "var(--accent-ink)" }}
             onClick={() => setPicked(allPicked ? new Set() : new Set(items.map((i) => i.id)))}
           >
             {allPicked ? t("receipts.refundNone") : t("receipts.refundAll")}

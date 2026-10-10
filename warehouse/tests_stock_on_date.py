@@ -5,22 +5,50 @@
 а склад 1 184 614. Цифра из другого времени стояла среди месячных и читалась
 как месячная.
 """
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
+from unittest import mock
 
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
+from sales.models import Receipt
 from sales.sale_service import create_sale
-from warehouse.models import Material, Roll, stock_value_total
+from warehouse.models import InventoryLog, Material, Roll, stock_value_total
 from warehouse.rolls import receive_lot
+
+# «Сегодня» для этих тестов — середина месяца. Тесты считают «позавчера»,
+# «вчера» и «прошлый месяц» от сегодняшнего дня; запущенные 1-го и 2-го числа
+# они клали партию в ПРОШЛЫЙ месяц и ждали там пустой склад — и падали раз в
+# месяц. Фиксируем часы, а не пропускаем тесты.
+FROZEN_NOW = timezone.make_aware(datetime(2026, 10, 15, 12, 0))
+
+
+def freeze_now(testcase, moment=FROZEN_NOW):
+    """Остановить «сейчас» на время теста — ВКЛЮЧАЯ значения по умолчанию полей.
+
+    `timezone.now` подменяется как функция модуля, но поля вроде
+    `happened_at = DateTimeField(default=timezone.now)` держат ссылку на
+    ОРИГИНАЛ, взятую при импорте, и подмена модуля их не касается — запись
+    журнала получила бы настоящее время. Поэтому подменяем и их значение по
+    умолчанию.
+    """
+    patchers = [mock.patch("django.utils.timezone.now", return_value=moment)]
+    for model, name in [(InventoryLog, "happened_at"), (Roll, "received_at"),
+                        (Receipt, "created_at")]:
+        field = model._meta.get_field(name)
+        patchers.append(mock.patch.object(field, "_get_default", lambda: moment))
+    for patcher in patchers:
+        patcher.start()
+        testcase.addCleanup(patcher.stop)
 
 
 class StockValueOnDateTests(APITestCase):
     REPORT = "/api/finance/report/"
 
     def setUp(self):
+        freeze_now(self)
         self.admin = User.objects.create_user(
             username="sd_admin", password="x", role=User.Role.ADMIN
         )

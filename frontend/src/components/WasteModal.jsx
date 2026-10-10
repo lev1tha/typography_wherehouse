@@ -6,13 +6,15 @@ import { apiError } from "../api/errors.js";
 import Icon from "./Icon.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { formatNumber } from "../utils/format.js";
+import Field from "./Field.jsx";
 
 // Отход (брак) — сеткой, теми же мерками, что и приход (2026-09-04, просьба
 // владельца): лист — размер × количество листов, рулон — метры с рулона,
 // штучное — количество, или сразу площадью. Каждая строка уходит обычным
 // списанием, себестоимость выброшенного пишется в журнал склада.
 
-const q2 = (n) => Number(n || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+const q2 = (n) => formatNumber(n, { max: 2 });
 const today = () => new Date().toLocaleDateString("sv-SE");
 
 const EMPTY_LINE = {
@@ -153,14 +155,12 @@ export default function WasteModal({ materials, onClose, onDone }) {
     >
       <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>{t("waste.hint")}</p>
       <div className="row">
-        <div className="field" style={{ margin: 0, width: 170 }}>
-          <label>{t("waste.date")}</label>
+        <Field style={{ margin: 0, width: 170 }} label={t("waste.date")}>
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-        </div>
-        <div className="field grow" style={{ margin: 0 }}>
-          <label>{t("waste.note")}</label>
+        </Field>
+        <Field className="grow" style={{ margin: 0 }} label={t("waste.note")}>
           <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={t("waste.notePh")} />
-        </div>
+        </Field>
       </div>
 
       <div className="grid-wrap" style={{ marginTop: 14 }}>
@@ -227,7 +227,7 @@ export default function WasteModal({ materials, onClose, onDone }) {
                       </div>
                     )}
                     {err && l.material && (
-                      <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 2 }}>{err}</div>
+                      <div style={{ color: "var(--danger-ink)", fontSize: 11, marginTop: 2 }}>{err}</div>
                     )}
                   </td>
                   <td className="muted" style={{ whiteSpace: "nowrap" }}>
@@ -261,11 +261,11 @@ export default function WasteModal({ materials, onClose, onDone }) {
           </tbody>
         </table>
       </div>
-      <button className="ghost" style={{ marginTop: 8, color: "var(--accent-strong)", fontWeight: 600 }} onClick={addLine}>
+      <button className="ghost" style={{ marginTop: 8, color: "var(--accent-ink)", fontWeight: 600 }} onClick={addLine}>
         + {t("supplies.addLine")}
       </button>
       {problems.length > 0 && (
-        <p style={{ color: "var(--danger)", fontSize: 13, margin: "8px 0 0" }}>
+        <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "8px 0 0" }}>
           {t("waste.linesIncomplete", { rows: problems.map((x) => x.i + 1).join(", ") })}
         </p>
       )}

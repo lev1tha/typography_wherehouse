@@ -45,6 +45,7 @@ from ..periods import local_day, month_end
 from .cashflow import cash_flow, entries
 from .money import ZERO, q2, total
 from .pnl import pnl, resolve
+from .scope import once, report_scope
 
 A = CashEntry.Article
 CLIENT_ARTICLES = (A.SALE, A.CHANGE, A.UNPAY, A.REFUND)
@@ -71,36 +72,7 @@ LABELS = {
 
 def client_positions(days: list[date]) -> dict:
     """{день: (долг клиентов, их деньги у нас)} на конец каждого дня."""
-    group_of = {}
-    for rid, client_id in Receipt.objects.values_list("id", "client_id"):
-        group_of[rid] = f"c{client_id}" if client_id else f"r{rid}"
-
-    sold = []    # (группа, день признания, итог − возвращено)
-    for rid, recognized, total_price, refunded in (
-        Receipt.objects.exclude(status=Receipt.Status.CANCELLED)
-        .filter(revenue_recognized_at__isnull=False)
-        .values_list("id", "revenue_recognized_at", "total_price", "refunded_amount")
-    ):
-        sold.append((group_of[rid], local_day(recognized), total_price - refunded))
-    # Строки, вернувшиеся ПОЗЖЕ дня: в этот день они ещё были продажей.
-    returned = [
-        (group_of[it.receipt_id], local_day(it.receipt.revenue_recognized_at),
-         local_day(it.returned_at), it.sold_total)
-        for it in TransactionItem.objects.filter(
-            is_returned=True, returned_at__isnull=False,
-            receipt__revenue_recognized_at__isnull=False,
-        ).exclude(receipt__status=Receipt.Status.CANCELLED)
-        .select_related("receipt").only("quantity", "price_per_item", "returned_at",
-                                        "receipt__revenue_recognized_at", "receipt_id")
-    ]
-    cash = [
-        (group_of.get(rid, "deleted") if rid else "deleted", day,
-         amount if kind == CashEntry.Kind.IN else -amount)
-        for rid, day, kind, amount in CashEntry.objects.filter(
-            article__in=CLIENT_ARTICLES
-        ).values_list("receipt_id", "happened_on", "kind", "amount")
-    ]
-
+    sold, returned, cash = once("client_ledger", _client_ledger)
     out = {}
     for day in days:
         position = defaultdict(lambda: ZERO)
@@ -120,6 +92,47 @@ def client_positions(days: list[date]) -> dict:
     return out
 
 
+def _client_ledger():
+    """Продажи, поздние возвраты и деньги клиентов по группам («клиент» или
+    «чек без клиента»). Читается один раз на отчёт: годовая сверка спрашивала
+    эти таблицы заново для каждого месяца."""
+    group_of = {}
+    for rid, client_id in Receipt.objects.values_list("id", "client_id"):
+        group_of[rid] = f"c{client_id}" if client_id else f"r{rid}"
+
+    sold = []    # (группа, день признания, итог − возвращено)
+    for rid, recognized, total_price, refunded in (
+        Receipt.objects.exclude(status=Receipt.Status.CANCELLED)
+        .filter(revenue_recognized_at__isnull=False)
+        .values_list("id", "revenue_recognized_at", "total_price", "refunded_amount")
+    ):
+        sold.append((group_of[rid], local_day(recognized), total_price - refunded))
+    # Строки, вернувшиеся ПОЗЖЕ дня: в этот день они ещё были продажей. Целиком
+    # возвращённый заказ (статус «Отменён») здесь тоже нужен: из `sold` он
+    # исключён совсем, а в месяце продажи он был и выручкой, и деньгами —
+    # без этих строк сентябрь показывал «не объяснено −3 000», октябрь +3 000.
+    returned = [
+        (group_of[it.receipt_id], local_day(it.receipt.revenue_recognized_at),
+         local_day(it.returned_at), it.sold_total)
+        for it in TransactionItem.objects.filter(
+            is_returned=True, returned_at__isnull=False,
+            receipt__revenue_recognized_at__isnull=False,
+        )
+        .select_related("receipt").only("quantity", "price_per_item", "returned_at",
+                                        "receipt__revenue_recognized_at", "receipt_id")
+    ]
+    cash = [
+        (group_of.get(rid, "deleted") if rid else "deleted", day,
+         amount if kind == CashEntry.Kind.IN else -amount)
+        for rid, day, kind, amount in CashEntry.objects.filter(
+            article__in=CLIENT_ARTICLES
+        ).values_list("receipt_id", "happened_on", "kind", "amount")
+    ]
+
+    return sold, returned, cash
+
+
+@report_scope
 def bridge(d_from=None, d_to=None) -> dict:
     """Сверка за период: строки, итог и «Не объяснено»."""
     d_from, d_to = resolve(d_from, d_to)
@@ -179,6 +192,7 @@ def bridge(d_from=None, d_to=None) -> dict:
     }
 
 
+@report_scope
 def bridge_year(year: int) -> dict:
     today = timezone.localdate()
     months = [(date(year, m, 1), month_end(date(year, m, 1))) for m in range(1, 13)]

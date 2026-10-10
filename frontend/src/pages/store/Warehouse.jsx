@@ -4,15 +4,20 @@ import { useTranslation } from "react-i18next";
 import api from "../../api/api.js";
 import GalleryModal from "../../components/GalleryModal.jsx";
 import Icon from "../../components/Icon.jsx";
+import { formatMoney, formatNumber } from "../../utils/format.js";
+import { apiError } from "../../api/errors.js";
+import LoadError from "../../components/LoadError.jsx";
+import { useUI } from "../../components/UIProvider.jsx";
+import { isCanceled, useLatest } from "../../utils/latest.js";
 
 // Остаток до сотых, без хвостовых нулей — как в каталоге админа. В базе он
 // хранится с четырьмя знаками, чтобы целые листы не превращались в дробь.
-const qty = (v) => Number(v || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+const qty = (v) => formatNumber(v, { max: 2 });
 // Толщина без хвостовых нулей и с запятой — «2,5 мм», как её пишет заказчик.
 const trim = (v) => String(v).replace(/\.?0+$/, "").replace(".", ",");
 
-const num = (n) => Math.round(Number(n) || 0).toLocaleString("ru-RU");
-const som = (n) => `${num(n)} сом`;
+const num = (n) => formatNumber(n);
+const som = (n) => formatMoney(n);
 
 export default function Warehouse() {
   const { t } = useTranslation();
@@ -24,12 +29,26 @@ export default function Warehouse() {
   const [typeId, setTypeId] = useState("");
   const [types, setTypes] = useState([]);
   const [gallery, setGallery] = useState(null);
+  const [failed, setFailed] = useState(false);
+  const { toast } = useUI();
+  // Поиск шлёт запрос на каждое нажатие — побеждает последний.
+  const next = useLatest();
 
   function load() {
     const params = { ordering: "name", page_size: 500 };
     if (search) params.search = search;
     if (typeId) params.type = typeId;
-    api.get("/warehouse/materials/", { params }).then((r) => setMaterials(r.data.results));
+    api
+      .get("/warehouse/materials/", { params, signal: next() })
+      .then((r) => {
+        setMaterials(r.data.results);
+        setFailed(false);
+      })
+      .catch((e) => {
+        if (isCanceled(e)) return;
+        setFailed(true);
+        toast(apiError(e, t("common.loadFailed")), "error");
+      });
   }
   useEffect(() => {
     const id = setTimeout(load, 250);
@@ -47,11 +66,13 @@ export default function Warehouse() {
       <div className="toolbar">
         <input
           className="search"
+          type="search"
+          aria-label={t("common.search")}
           placeholder={t("common.search")}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <select value={typeId} onChange={(e) => setTypeId(e.target.value)}>
+        <select aria-label={t("warehouse.allTypes")} value={typeId} onChange={(e) => setTypeId(e.target.value)}>
           <option value="">{t("warehouse.allTypes")}</option>
           {types.map((x) => (
             <option key={x.id} value={x.id}>
@@ -61,7 +82,10 @@ export default function Warehouse() {
         </select>
       </div>
 
-      <div className="stat-grid">
+      {failed && !materials.length && <LoadError onRetry={load} />}
+      {/* Карточки не уже 260px: на 176px (ширина плитки статистики) название
+          материала переносилось по два слова в строке. */}
+      <div className="mat-cards">
         {materials.map((m) => (
           <div
             key={m.id}
@@ -78,16 +102,19 @@ export default function Warehouse() {
             }}
           >
             {m.primary_image ? (
-              <div
+              <button
+                type="button"
+                className="ghost"
                 onClick={() => setGallery(m)}
-                style={{ height: 150, background: "var(--canvas)", cursor: "pointer" }}
+                aria-label={m.name}
+                style={{ display: "block", width: "100%", height: 150, padding: 0, borderRadius: 0, background: "var(--canvas)", cursor: "pointer" }}
               >
                 <img
                   src={m.primary_image}
-                  alt={m.name}
+                  alt=""
                   style={{ width: "100%", height: "100%", objectFit: "cover" }}
                 />
-              </div>
+              </button>
             ) : (
               <div
                 style={{
@@ -96,7 +123,7 @@ export default function Warehouse() {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  color: "var(--ink-faint)",
+                  color: "var(--ink-icon)",
                 }}
                 title={t("common.empty")}
               >

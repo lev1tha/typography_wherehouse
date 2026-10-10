@@ -6,6 +6,7 @@
 """
 from decimal import Decimal
 
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
@@ -150,7 +151,10 @@ class StockJournalTests(APITestCase):
     def test_journal_month_filter_and_garbage_params(self):
         self.client.force_authenticate(self.admin)
         log = self._logs(InventoryLog.Type.SUPPLY).get()
-        year, month = log.happened_at.year, log.happened_at.month
+        # Месяц в часовом поясе цеха, а не в UTC: в 00:20 первого числа
+        # (Бишкек) по UTC это ещё прошлый месяц, и фильтр «правильно» не находил запись.
+        happened = timezone.localtime(log.happened_at)
+        year, month = happened.year, happened.month
         hit = self.client.get(f"/api/warehouse/inventory-logs/?year={year}&month={month}")
         self.assertEqual(hit.data["count"], 1)
         other = 1 if month != 1 else 2

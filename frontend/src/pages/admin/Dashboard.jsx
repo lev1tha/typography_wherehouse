@@ -3,6 +3,9 @@ import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
 import HeadlineTiles from "../../components/HeadlineTiles.jsx";
+import { formatDate, formatMoney, formatNumber } from "../../utils/format.js";
+import LoadError from "../../components/LoadError.jsx";
+import Field from "../../components/Field.jsx";
 
 const COLORS = ["#e8853a", "#ffc592", "#2a9d99", "#d6b6f6", "#7a4a1e", "#1aae39"];
 
@@ -31,7 +34,7 @@ const expenseRows = (fin, t) => [
 ];
 
 // Количества без хвоста нулей и с разрядами — как в каталоге («2», «0», «14,88»).
-const qtyFmt = (v) => Number(v || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+const qtyFmt = (v) => formatNumber(v, { max: 2 });
 
 // Единица, в которой складской лист считает материал: рулон в погонных метрах,
 // лист листами, штучный своей. Та же функция, что в «Остатках по месяцам», —
@@ -45,7 +48,7 @@ function Stat({ label, value, suffix, color, sub }) {
   return (
     <div className="stat">
       <div className="label">{label}</div>
-      <div className="value" style={color ? { color: `var(--${color})` } : undefined}>
+      <div className="value" style={color ? { color: `var(--${color}-ink)` } : undefined}>
         {value}
         {suffix ? <span className="muted" style={{ fontSize: "1rem" }}> {suffix}</span> : null}
       </div>
@@ -136,7 +139,7 @@ export default function Dashboard() {
     const seq = (requestSeq.current += 1);
     const fresh = () => seq === requestSeq.current;
     api.get("/audit/dashboard/", { params })
-      .then((r) => { if (fresh()) setData(r.data); })
+      .then((r) => { if (fresh()) { setData(r.data); setError(""); } })
       .catch(() => { if (fresh()) setError(t("common.error")); });
     // Покупки по клиентам — за тот же период и на той же базе, что «Продали
     // материала на …» выше: иначе сумма таблицы не сходилась с плиткой.
@@ -156,7 +159,8 @@ export default function Dashboard() {
     // и сумма по типам не сходилась со «Стоимостью склада» вверху той же страницы.
     api
       .get("/warehouse/materials/", { params: { ordering: "name", page_size: 500 } })
-      .then((r) => setMaterials(r.data.results));
+      .then((r) => setMaterials(r.data.results))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -201,14 +205,24 @@ export default function Dashboard() {
     [matSales]
   );
 
-  if (error) return <div className="error">{error}</div>;
+  // Сбой загрузки — с кнопкой «Повторить», а не голой красной строкой: раньше
+  // экран оставался пустым до перезагрузки страницы целиком.
+  if (error)
+    return (
+      <LoadError
+        onRetry={() => {
+          setError("");
+          loadDashboard();
+        }}
+      />
+    );
   if (!data) return <p className="muted">{t("common.loading")}</p>;
 
-  const som = (v) => `${Math.round(Number(v) || 0).toLocaleString("ru-RU")} сом`;
+  const som = (v) => formatMoney(v);
   // Дата, на которую посчитан склад: она же стоит в поле «По», если этот день
   // уже прошёл. Пусто — склад сегодняшний.
   const stockAsOf =
-    to && to < new Date().toLocaleDateString("sv-SE") ? to.split("-").reverse().join(".") : "";
+    to && to < new Date().toLocaleDateString("sv-SE") ? formatDate(to) : "";
   const rev = data.revenue;
   const revTotal = Number(rev.total);
   const maxCat = Math.max(1, ...byCategory.map((x) => x.value));
@@ -285,14 +299,12 @@ export default function Dashboard() {
 
       {/* Фильтр периода + экспорт */}
       <div className="toolbar" style={{ alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
-        <div className="field" style={{ margin: 0 }}>
-          <label>{t("dashboard.from")}</label>
+        <Field style={{ margin: 0 }} label={t("dashboard.from")}>
           <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-        </div>
-        <div className="field" style={{ margin: 0 }}>
-          <label>{t("dashboard.to")}</label>
+        </Field>
+        <Field style={{ margin: 0 }} label={t("dashboard.to")}>
           <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-        </div>
+        </Field>
         <button
           className="ghost"
           onClick={() => {
@@ -395,11 +407,11 @@ export default function Dashboard() {
             </div>
             <div className="crow">
               <span className="k">{t("dashboard.materialCost")}</span>
-              <span style={{ color: "var(--danger)" }}>− {som(data.breakdown.material_cost)}</span>
+              <span style={{ color: "var(--danger-ink)" }}>− {som(data.breakdown.material_cost)}</span>
             </div>
             <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6, paddingTop: 8 }}>
-              <strong style={{ color: "var(--accent-strong)" }}>{t("dashboard.materialProfit")}</strong>
-              <strong style={{ color: "var(--accent-strong)" }}>{som(data.breakdown.material_profit)}</strong>
+              <strong style={{ color: "var(--accent-ink)" }}>{t("dashboard.materialProfit")}</strong>
+              <strong style={{ color: "var(--accent-ink)" }}>{som(data.breakdown.material_profit)}</strong>
             </div>
           </div>
         </>
@@ -433,8 +445,8 @@ export default function Dashboard() {
                 </div>
               ))}
               <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6, paddingTop: 8 }}>
-                <strong style={{ color: "var(--accent-strong)" }}>{t("finance.expenses")}</strong>
-                <strong style={{ color: "var(--accent-strong)" }}>{som(fin.total_expenses)}</strong>
+                <strong style={{ color: "var(--accent-ink)" }}>{t("finance.expenses")}</strong>
+                <strong style={{ color: "var(--accent-ink)" }}>{som(fin.total_expenses)}</strong>
               </div>
               {/* Себестоимость проданного — справочная, в итог не входит (материал
                   уже посчитан закупом). Раньше стояла строкой ВНУТРИ списка, и
@@ -455,8 +467,8 @@ export default function Dashboard() {
                 </div>
               ))}
               <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6, paddingTop: 8 }}>
-                <strong style={{ color: "var(--accent-strong)" }}>{t("finance.investmentsTotal")}</strong>
-                <strong style={{ color: "var(--accent-strong)" }}>{som(fin.investments.total)}</strong>
+                <strong style={{ color: "var(--accent-ink)" }}>{t("finance.investmentsTotal")}</strong>
+                <strong style={{ color: "var(--accent-ink)" }}>{som(fin.investments.total)}</strong>
               </div>
             </div>
           </div>
@@ -627,7 +639,7 @@ export default function Dashboard() {
                       {Number(m.quantity) > 0 ? t("warehouse.lowStock") : t("checkout.outOfStock")}
                     </span>
                   </td>
-                  <td style={{ color: Number(m.quantity) > 0 ? "var(--danger)" : "var(--ink-muted)", fontWeight: 600 }}>
+                  <td style={{ color: Number(m.quantity) > 0 ? "var(--danger-ink)" : "var(--ink-muted)", fontWeight: 600 }}>
                     {qtyFmt(m.quantity)} {t(`unit.${m.unit}`)}
                     {m.sheets_remaining != null ? ` · ≈${Math.round(Number(m.sheets_remaining))} ${t("warehouse.sheetsShort")}` : ""}
                   </td>

@@ -9,14 +9,16 @@
  * Месяц по умолчанию НЕ выбран. Поставки вносят задним числом, и лента,
  * обрезанная текущим месяцем, прятала бы приход ровно в момент его ввода.
  */
+import { formatDate } from "../utils/format.js";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
 import DataTable from "./DataTable.jsx";
 import MonthPicker from "./MonthPicker.jsx";
+import Field from "./Field.jsx";
 
-const TYPES = ["SUPPLY", "SALE", "RETURN", "WRITE_OFF", "ADJUSTMENT"];
+const TYPES = ["SUPPLY", "SALE", "RETURN", "WRITE_OFF", "ADJUSTMENT", "CORRECTION"];
 
 /** Причина без того, что уже написано в соседних колонках.
  *
@@ -40,6 +42,8 @@ const TONE = {
   RETURN: "blue",
   WRITE_OFF: "amber",
   ADJUSTMENT: "",
+  // Исправление прихода — запись «было → стало» без движения (D-70).
+  CORRECTION: "blue",
 };
 
 export default function StockJournal() {
@@ -87,8 +91,7 @@ export default function StockJournal() {
 
   const pageSize = 25;
   const pages = Math.max(1, Math.ceil(count / pageSize));
-  const fmtDate = (iso) =>
-    new Date(iso).toLocaleDateString(i18n.language, { day: "2-digit", month: "2-digit", year: "numeric" });
+  const fmtDate = (iso) => formatDate(iso);
 
   const columns = [
     {
@@ -116,10 +119,13 @@ export default function StockJournal() {
         const metres = r.metres_changed == null ? null : Number(r.metres_changed);
         const value = metres ?? Number(r.quantity_changed);
         const unit = metres == null ? t(`unit.${r.material_unit}`) : t("unit.METER");
+        // Исправление прихода движения не несёт: сам приход поправлен на
+        // месте, а «было → стало» — в причине.
+        if (r.type === "CORRECTION") return <span className="muted">—</span>;
         return (
           <strong
             style={{
-              color: value < 0 ? "var(--danger)" : "var(--ok)",
+              color: value < 0 ? "var(--danger-ink)" : "var(--ok-ink)",
               whiteSpace: "nowrap",  // «−44.65 кв.м» не должно ломаться на две строки
             }}
           >
@@ -156,24 +162,22 @@ export default function StockJournal() {
           природе, и без подписей у соседей ряд выглядел как случайный набор
           выпадашек разной высоты. */}
       <div className="toolbar" style={{ alignItems: "flex-end" }}>
-        <div className="field" style={{ margin: 0 }}>
-          <label>{t("journal.type")}</label>
+        <Field style={{ margin: 0 }} label={t("journal.type")}>
           <select value={type} onChange={(e) => filter(setType)(e.target.value)}>
             <option value="">{t("journal.allTypes")}</option>
             {TYPES.map((code) => (
               <option key={code} value={code}>{t(`logType.${code}`)}</option>
             ))}
           </select>
-        </div>
-        <div className="field" style={{ margin: 0 }}>
-          <label>{t("checkout.material")}</label>
+        </Field>
+        <Field style={{ margin: 0 }} label={t("checkout.material")}>
           <select value={material} onChange={(e) => filter(setMaterial)(e.target.value)}>
             <option value="">{t("journal.allMaterials")}</option>
             {materials.map((m) => (
               <option key={m.id} value={m.id}>{m.name}</option>
             ))}
           </select>
-        </div>
+        </Field>
         <MonthPicker value={period} onChange={filter(setPeriod)} />
       </div>
 

@@ -1,26 +1,14 @@
-"""Исправить цену закупки у уже принятой партии.
+"""Исправить цену закупки у уже принятой партии — из командной строки.
 
 Цену при приёмке путают: вбивают цену за лист в поле за кв.м, промахиваются
 нулём, берут прайс другой поставки. На проде 20.09 нашлись две такие партии —
 форекс 8мм принят по 1 100 вместо 900, а лист золота за 1 сом вместо 2 000.
 
-Почему командой, а не руками в админке. Цена партии лежит в ТРЁХ местах, и
-править их по одному — значит развести склад с финотчётом:
-
-  * `Roll.purchase_cost` — по нему считаются стоимость склада и FIFO;
-  * `InventoryLog.actual_price` — по нему считается ЗАКУП в финотчёте
-    (`purchases_from_stock`), и это отдельная запись;
-  * `Material.purchase_price` — цена последнего прихода, ею оценивается
-    остаток сверх партий.
-
-Поправить одно и забыть другое — обычное дело, а расходится потом «Склад
-(оборот)» с «Не объяснено», и ищи. Здесь все три двигаются разом, в одной
-транзакции, и в журнал действий уходит запись.
-
-ЧЕГО КОМАНДА НЕ ДЕЛАЕТ: не переписывает себестоимость того, что из партии уже
-ушло. Она снята в момент движения (`TransactionItem.cost_total` у продажи,
-`InventoryLog.cost` у списания) и относится к закрытым заказам и к уже
-посчитанной прибыли тех дней. Если из партии уже брали, команда об этом скажет.
+С 10.10 это обёртка над «Исправить приход» (`warehouse/lot_correction.py`, та
+же кнопка в интерфейсе): двигается всё разом — партия, запись прихода в
+журнале (закуп), цена карточки, строка накладной и долг поставщику, А ТАКЖЕ
+себестоимость уже проданного из партии (по записям партий строк чеков).
+Закрытый месяц — отказ.
 
     python manage.py fix_lot_cost 14 9000            # посмотреть, что изменится
     python manage.py fix_lot_cost 14 9000 --yes      # и применить
@@ -28,10 +16,7 @@
 from decimal import Decimal, InvalidOperation
 
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
-
-from audit.models import AuditLog
-from warehouse.models import InventoryLog, Roll
+from warehouse.models import Roll
 
 
 def _som(v) -> str:
@@ -62,76 +47,47 @@ class Command(BaseCommand):
         except Roll.DoesNotExist:
             raise CommandError(f"Партии №{options['roll_id']} нет.")
 
-        material = roll.material
-        old_cost = roll.purchase_cost
-        old_per_sqm = roll.cost_per_sqm
-        new_per_sqm = (
-            (new_cost / roll.initial_area).quantize(Decimal("0.01"))
-            if roll.initial_area else Decimal("0")
-        )
+        from warehouse.lot_correction import CorrectionError, apply, preview
 
-        # Приход в журнале — по нему считается закуп. Своей ссылки на партию у
-        # записи нет, поэтому ищем по материалу и площади; если таких приходов
-        # несколько (одинаковую поставку приняли дважды), разводим их по дате.
-        # `receive_lot` пишет партию и запись вместе, датой поступления.
-        logs = list(InventoryLog.objects.filter(
-            material=material, type=InventoryLog.Type.SUPPLY,
-            quantity_changed=roll.initial_area,
-        ))
-        if len(logs) > 1:
-            same_moment = [l for l in logs if l.happened_at == roll.received_at]
-            if same_moment:
-                logs = same_moment
-        if len(logs) != 1:
-            raise CommandError(
-                f"У партии №{roll.id} нашлось {len(logs)} подходящих записей журнала "
-                "вместо одной — поправьте вручную, иначе закуп разойдётся со складом."
-            )
-        log = logs[0]
-
-        # Цена материала — это цена ПОСЛЕДНЕГО прихода. Двигаем её, только если
-        # правим именно его: иначе затрём более свежую.
-        last = material.rolls.order_by("-received_at", "-id").first()
-        touch_material = last is not None and last.id == roll.id
-
-        sold = roll.initial_area - roll.remaining_area
-        self.stdout.write(f"Партия №{roll.id} · {material.name}")
+        data = {"purchase_cost": new_cost}
+        try:
+            plan = preview(roll=roll, data=data)
+        except CorrectionError as e:
+            raise CommandError(str(e))
+        before, after = plan["before"], plan["after"]
+        self.stdout.write(f"Партия №{roll.id} · {roll.material.name}")
         self.stdout.write(f"  принято {roll.initial_area} кв.м, осталось {roll.remaining_area}")
-        self.stdout.write(f"  сумма закупки:  {_som(old_cost)} → {_som(new_cost)}")
-        self.stdout.write(f"  цена за кв.м:   {_som(old_per_sqm)} → {_som(new_per_sqm)}")
         self.stdout.write(
-            f"  закуп в отчёте: {_som(log.quantity_changed * (log.actual_price or 0))}"
-            f" → {_som(log.quantity_changed * new_per_sqm)}"
+            f"  сумма закупки:  {_som(before['purchase_cost'])} → {_som(after['purchase_cost'])}"
         )
-        if touch_material:
+        self.stdout.write(
+            f"  цена за кв.м:   {_som(before['cost_per_sqm'])} → {_som(after['cost_per_sqm'])}"
+        )
+        stock = plan["stock"]
+        if stock["purchase_price_before"] != stock["purchase_price_after"]:
             self.stdout.write(
-                f"  цена в карточке: {_som(material.purchase_price)} → {_som(new_per_sqm)}"
+                f"  цена в карточке: {_som(stock['purchase_price_before'])} → "
+                f"{_som(stock['purchase_price_after'])}"
             )
         else:
             self.stdout.write("  цена в карточке не меняется — партия не последняя")
-        if sold > 0:
+        if Decimal(plan["used"]) > 0:
             self.stdout.write(self.style.WARNING(
-                f"  ВНИМАНИЕ: из партии уже ушло {sold} кв.м — продажами или "
-                "списанием. Их себестоимость снята в момент движения и останется "
-                "прежней: она относится к закрытым заказам и к уже посчитанной "
-                "прибыли тех дней."
+                f"  из партии уже ушло {plan['used']} кв.м; себестоимость продаж "
+                f"меняется на {plan['cogs_delta']} сом (чеков: {len(plan['receipts'])}), "
+                f"не пересчитаны старые продажи без партий: {plan['legacy_count']}"
+            ))
+        for w in plan["warnings"]:
+            self.stdout.write(self.style.WARNING(f"  {w['message']}"))
+        if plan["closed_months"]:
+            self.stdout.write(self.style.ERROR(
+                "  закрытые месяцы: " + ", ".join(plan["closed_months"])
             ))
         if not options["yes"]:
             self.stdout.write(self.style.NOTICE("\nНичего не изменено. Повторите с --yes."))
             return
-
-        with transaction.atomic():
-            roll.purchase_cost = new_cost
-            roll.save(update_fields=["purchase_cost"])
-            log.actual_price = new_per_sqm
-            log.save(update_fields=["actual_price"])
-            if touch_material:
-                material.purchase_price = new_per_sqm
-                material.save(update_fields=["purchase_price", "updated_at"])
-            AuditLog.record(
-                None,
-                f"Исправлена цена партии №{roll.id} «{material.name}»: "
-                f"{_som(old_cost)} → {_som(new_cost)} сом "
-                f"({_som(old_per_sqm)} → {_som(new_per_sqm)} за кв.м)",
-            )
+        try:
+            apply(roll=roll, data=data)
+        except CorrectionError as e:
+            raise CommandError(str(e))
         self.stdout.write(self.style.SUCCESS("Готово."))

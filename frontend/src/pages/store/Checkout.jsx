@@ -1,22 +1,32 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 
 import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
+import ClientPicker from "../../components/ClientPicker.jsx";
+import Field, { focusFirstInvalid } from "../../components/Field.jsx";
+import GiveChangeModal from "../../components/GiveChangeModal.jsx";
 import Icon from "../../components/Icon.jsx";
+import LoadError from "../../components/LoadError.jsx";
 import Modal from "../../components/Modal.jsx";
+import PrintDocs from "../../components/PrintDocs.jsx";
 import { PaymentBadge } from "../../components/StatusBadge.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
+import { clearCheckoutDraft, loadCheckoutDraft, saveCheckoutDraft } from "../../utils/draft.js";
+import { useIdempotency } from "../../utils/idempotency.js";
+import { isCanceled, useLatest } from "../../utils/latest.js";
 import { areaOf } from "../../utils/area.js";
 import { itemTitle } from "../../utils/itemLabel.js";
+import { formatDate, formatMoney, formatNumber } from "../../utils/format.js";
+import { applyRules, lineRuled, receiptRuled, rulesLabel } from "../../utils/pricingRules.js";
 
 // Цену округляем ВВЕРХ до целого сома (решение заказчика), как на бэкенде
 // (TransactionItem.line_total). Эпсилон гасит float-шум, чтобы целое не «прыгало».
 const ceilSom = (v) => Math.max(0, Math.ceil((Number(v) || 0) - 1e-6));
 // Сумма целыми сомами с разрядами — как в чеках и печатных формах.
-const somFmt = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const somFmt = (n) => formatMoney(n);
 // Количество без хвоста нулей: 1.230 → 1.23, 2.000 → 2.
 const trimQty = (n) => String(+Number(n || 0).toFixed(3));
 
@@ -46,24 +56,48 @@ function lineQty(line) {
   if (line.kind === "material-metre") return Number(line.length);
   return line.kind === "material-area" ? Number(line.area) : line.qty;
 }
-function lineTotal(line) {
-  // Резка = работа (погонный метр × ставка) + материал (площадь × цена/кв.м).
-  // Резка = 2 строки в чеке (работа + материал), каждая округляется вверх
-  // отдельно — как на бэкенде.
+// Строки чека, на которые сервер разложит позицию кассы: сумма до округления и
+// чья это строка (услуга — с минимумом, материал — без). Резка = 2 строки в
+// чеке (работа + материал), каждая округляется вверх отдельно — как на бэкенде.
+function lineParts(line) {
+  const svc = (id) => ({ service: true, serviceId: id });
   if (line.kind === "cutting") {
-    const work = Number(line.rate) * Number(line.runM || 0);
-    const material = Number(line.materialPrice) * Number(line.area || 0);
-    return ceilSom(work) + ceilSom(material);
+    return [
+      { raw: Number(line.rate) * Number(line.runM || 0), ...svc(line.serviceId) },
+      { raw: Number(line.materialPrice) * Number(line.area || 0), service: false },
+    ];
   }
   // Работа реза на целом листе (без материала по площади): пог.м × ставка.
-  if (line.kind === "cut-work") return ceilSom(Number(line.rate) * Number(line.runM || 0));
   // Резка материала КЛИЕНТА: только работа — цена резки × сколько отрезано.
-  if (line.kind === "cut-own") return ceilSom(Number(line.rate) * Number(line.runM || 0));
+  if (line.kind === "cut-work" || line.kind === "cut-own")
+    return [{ raw: Number(line.rate) * Number(line.runM || 0), ...svc(line.serviceId) }];
   // Гравировка: площадь × цена за кв.м, материала в строке нет.
-  if (line.kind === "engraving") return ceilSom(Number(line.rate) * Number(line.area || 0));
+  if (line.kind === "engraving") return [{ raw: Number(line.rate) * Number(line.area || 0), ...svc(line.serviceId) }];
   // Отходы: цена × количество В ВЫБРАННОЙ МЕРКЕ (кв.м, пог.м или штуки).
-  if (line.kind === "waste") return ceilSom(Number(line.rate) * Number(line.amount || 0));
-  return ceilSom(unitPrice(line) * lineQty(line));
+  if (line.kind === "waste") return [{ raw: Number(line.rate) * Number(line.amount || 0), ...svc(line.serviceId) }];
+  if (line.kind === "service") return [{ raw: unitPrice(line) * lineQty(line), ...svc(line.id) }];
+  return [{ raw: unitPrice(line) * lineQty(line), service: false }];
+}
+// Сумма позиции по каталогу — без правил прайса.
+function lineTotal(line) {
+  return lineParts(line).reduce((sum, p) => sum + ceilSom(p.raw), 0);
+}
+// Сумма позиции по правилам прайса заказа — тот же порядок, что на сервере
+// (`sales/pricing_rules.py`): расчёт → минимум (только услуги, при цене > 0)
+// → ×(1+срочность) → ×(1−скидка) → вверх до сома, построчно. Итог считает
+// сервер; здесь — честный предпросмотр для кассира.
+function ruledTotal(line, rules) {
+  if (!rules) return lineTotal(line);
+  return lineParts(line).reduce(
+    (sum, p) =>
+      sum +
+      applyRules(p.raw, {
+        minimum: p.service ? rules.minFor(p.serviceId) : 0,
+        urgency: rules.urgency,
+        discount: rules.discount,
+      }),
+    0
+  );
 }
 
 // Сегодня в формате YYYY-MM-DD по МЕСТНОЙ дате: toISOString() отдаёт UTC и в
@@ -110,11 +144,16 @@ function cartFromReceipt(items, materials, services, t) {
   // Цена — сегодняшняя, но НЕ ноль: ставка реза может быть не проставлена в
   // каталоге (её вводили руками в момент продажи), и «повторить» тихо отдало
   // бы работу даром. Нет сегодняшней цены — берём ту, по которой продали.
-  const priceOrLast = (current, item) => Number(current) || Number(item.price_per_item) || 0;
+  // «Та, по которой продали» — цена ДО правил прайса (`catalog_price`):
+  // скидку и срочность прошлого заказа повтор не наследует, правила берутся
+  // сегодняшние (скидка клиента, переключатель «Срочно»). У строк, проданных
+  // до правил, `catalog_price` пуст — тогда их цена и есть цена.
+  const lastPrice = (item) => Number(item.catalog_price ?? item.price_per_item) || 0;
+  const priceOrLast = (current, item) => Number(current) || lastPrice(item);
   // Цена взята из старого чека, потому что в каталоге её нет: на сервер она
   // уходит ЯВНО (иначе сервер отклонит неявный ноль каталога), и админ видит
   // её как правленную руками — так и есть.
-  const fromLast = (current, item) => !Number(current) && Number(item.price_per_item) > 0;
+  const fromLast = (current, item) => !Number(current) && lastPrice(item) > 0;
   const lines = [];
   const used = new Set();
   let skipped = 0;
@@ -134,7 +173,7 @@ function cartFromReceipt(items, materials, services, t) {
         lines.push({
           key: `CO${s.id}-${i}`, kind: "cut-own", serviceId: s.id, name: s.name,
           machine: s.machine_display || "",
-          rate: Number(it.price_per_item) || 0, runM: qty, note: it.note || "", qty: 1,
+          rate: lastPrice(it), runM: qty, note: it.note || "", qty: 1,
         });
         return;
       }
@@ -278,27 +317,47 @@ function cartFromReceipt(items, materials, services, t) {
 
 export default function Checkout() {
   const { t } = useTranslation();
-  const { isAdmin } = useAuth();
-  const { toast } = useUI();
+  const { isAdmin, user } = useAuth();
+  const { toast, confirm } = useUI();
   // ?repeat=<id> — «повторить заказ» из «Чеков» или карточки клиента.
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // Черновик корзины из sessionStorage: собранный чек переживает уход на другой
+  // экран, F5 и выход по истёкшей сессии. Читаем ОДИН раз при монтировании;
+  // чужой черновик (другой пользователь на той же вкладке) не берём.
+  const uid = user?.id ?? user?.username ?? null;
+  const draftRef = useRef(undefined);
+  if (draftRef.current === undefined) {
+    const d = loadCheckoutDraft();
+    draftRef.current = d && d.user === uid && d.cart.length ? d : null;
+  }
+  const draft = draftRef.current;
+  const idem = useIdempotency();
+  const nextMatches = useLatest();
+
   const [materials, setMaterials] = useState([]);
   const [services, setServices] = useState([]);
-  const [cart, setCart] = useState([]);
+  // Каталог не загрузился — касса без товаров не «пустая», а сломанная.
+  const [catalogError, setCatalogError] = useState(false);
+  const [cart, setCart] = useState(draft?.cart || []);
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState("CASH");
-  const [prepay, setPrepay] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState(draft?.paymentMethod || "CASH");
+  const [prepay, setPrepay] = useState(draft?.prepay || "");
   // «Вся сумма» — не число, а намерение: сервер сам зачтёт ровно итог чека
   // (`pay_full`). Касса не должна угадывать сумму, которую посчитает сервер:
   // расхождение округлений в сом превращалось в фантомный долг.
-  const [payFull, setPayFull] = useState(false);
-  const [orderTitle, setOrderTitle] = useState(""); // наименование заказа
+  const [payFull, setPayFull] = useState(!!draft?.payFull);
+  const [orderTitle, setOrderTitle] = useState(draft?.orderTitle || ""); // наименование заказа
   const [titleHints, setTitleHints] = useState([]); // ранее использованные
   // Дата заказа: по умолчанию сегодня, админ может поставить прошедшую.
-  const [orderDate, setOrderDate] = useState(todayStr);
-  const [client, setClient] = useState({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" });
-  const [clientId, setClientId] = useState(null);
+  const [orderDate, setOrderDate] = useState(
+    isAdmin && draft?.orderDate && draft.orderDate <= todayStr() ? draft.orderDate : todayStr
+  );
+  const [client, setClient] = useState(
+    draft?.client || { type: "PHYSICAL", full_name: "", company_name: "", phone: "" }
+  );
+  const [clientId, setClientId] = useState(draft?.clientId || null);
   // Невыданная сдача выбранного клиента и решение кассира: зачесть её в этот
   // заказ или нет. Раньше сдача просто лежала на прошлом чеке и в новом заказе
   // не участвовала никак — её приходилось выдавать на руки и тут же принимать
@@ -310,27 +369,75 @@ export default function Checkout() {
   // цеха, а долг — деньги клиента, и решает он, платить ли сегодня.
   const [clientDebt, setClientDebt] = useState(0);
   const [payDebt, setPayDebt] = useState(false);
-  const [referredBy, setReferredBy] = useState("");
-  const [clientsList, setClientsList] = useState([]);
+  const [referredBy, setReferredBy] = useState(draft?.referredBy || "");
   const [matches, setMatches] = useState([]);
+  // Подсказка «найден клиент»: какая строка выбрана стрелками (-1 — никакая).
+  const [matchIdx, setMatchIdx] = useState(-1);
   const [receipt, setReceipt] = useState(null);
+  // Кто был в чеке (имя и телефон на момент оформления) — для окна «Чек №…».
+  const [receiptClient, setReceiptClient] = useState(null);
+  const [printing, setPrinting] = useState(null);
+  const [givingChange, setGivingChange] = useState(null);
   const [error, setError] = useState("");
+  // Ошибки ввода рядом с полями: {name, phone, prepay}.
+  const [fieldErr, setFieldErr] = useState({});
   const [busy, setBusy] = useState(false);
   const [cut, setCut] = useState(null); // unified material / service config modal
+  // Правила прайса (CALC-01, CLI-02): минимум строки и наценка за срочность —
+  // из настроек цен; скидка — из карточки клиента. 0 — правило выключено.
+  const [pricingRules, setPricingRules] = useState({ min_line_amount: 0, urgency_percent: 0 });
+  const [isUrgent, setIsUrgent] = useState(!!draft?.isUrgent);
+  const [clientDiscount, setClientDiscount] = useState(0);
+  // Своя скидка на этот заказ — только у админа (снять или поменять). null —
+  // берётся скидка клиента; складовщик её только применяет.
+  const [discountOverride, setDiscountOverride] = useState(isAdmin ? draft?.discountOverride ?? null : null);
 
-  useEffect(() => {
+  function loadCatalog() {
+    setCatalogError(false);
     // page_size обязателен: без него приходит первая страница из 25 материалов
     // (PAGE_SIZE в настройках). В кассе не было видно остальной номенклатуры, а
     // выпадашка «категория» собиралась по этим же 25 — и половины категорий в
     // ней просто не существовало.
-    api
-      .get("/warehouse/materials/", { params: { ordering: "name", page_size: 500 } })
-      .then((r) => setMaterials(r.data.results));
-    api.get("/services/services/").then((r) => setServices(r.data.results));
-    api.get("/clients/clients/").then((r) => setClientsList(r.data.results));
+    // Сбой каталога не прячем: пустая касса без единого объяснения похожа на
+    // «товаров нет», а на деле не ответил сервер.
+    Promise.all([
+      api.get("/warehouse/materials/", { params: { ordering: "name", page_size: 500 } }),
+      api.get("/services/services/"),
+    ])
+      .then(([m, sv]) => {
+        setMaterials(m.data.results);
+        setServices(sv.data.results);
+      })
+      .catch((e) => {
+        setCatalogError(true);
+        toast(apiError(e, t("common.loadFailed")), "error");
+      });
+  }
+
+  useEffect(() => {
+    loadCatalog();
+    api.get("/services/rules/").then((r) => setPricingRules(r.data)).catch(() => {});
     // Подсказки по названию заказа — как живой поиск клиента, чтобы повторные
     // работы назывались одинаково, а не «вывеска», «Вывеска», «вывеска2».
     api.get("/sales/receipts/titles/").then((r) => setTitleHints(r.data)).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Корзина — в sessionStorage при любом изменении: см. utils/draft.js. Пустая
+  // касса черновика не держит (после оформления и после «Очистить» он исчезает).
+  useEffect(() => {
+    const empty = !cart.length && !orderTitle && !client.phone && !client.full_name && !client.company_name;
+    if (empty) return clearCheckoutDraft();
+    saveCheckoutDraft({
+      user: uid, cart, orderTitle, client, clientId, paymentMethod, prepay, payFull, referredBy, orderDate,
+      isUrgent, discountOverride,
+    });
+  }, [cart, orderTitle, client, clientId, paymentMethod, prepay, payFull, referredBy, orderDate, uid,
+      isUrgent, discountOverride]);
+
+  useEffect(() => {
+    if (draft) toast(t("checkout.draftRestored", { n: draft.cart.length }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Повтор заказа: состав прошлого чека перекладывается в корзину. Ждём, пока
@@ -387,6 +494,7 @@ export default function Checkout() {
       setClientChange(0);
       setClientDebt(0);
       setPayDebt(false);
+      setClientDiscount(0);
       return;
     }
     api
@@ -394,20 +502,32 @@ export default function Checkout() {
       .then((r) => {
         setClientChange(Number(r.data.change_due) || 0);
         setClientDebt(Number(r.data.debt) || 0);
+        setClientDiscount(Number(r.data.discount_percent) || 0);
         setPayDebt(false);
       })
-      .catch(() => { setClientChange(0); setClientDebt(0); });
+      .catch(() => { setClientChange(0); setClientDebt(0); setClientDiscount(0); });
   }, [clientId]);
 
   useEffect(() => {
     // Живой поиск клиента по ИМЕНИ (ФИО или название компании), не по телефону.
     const name = (client.type === "OSOO" ? client.company_name : client.full_name) || "";
     if (name.trim().length < 2 || clientId) {
+      // Запрос, ушедший раньше выбора клиента, не должен вернуть подсказку
+      // после того, как клиент уже выбран: отменяем его.
+      nextMatches();
       setMatches([]);
       return;
     }
     const id = setTimeout(() => {
-      api.get("/clients/clients/", { params: { search: name.trim() } }).then((r) => setMatches(r.data.results.slice(0, 5)));
+      api
+        .get("/clients/clients/", { params: { search: name.trim(), page_size: 5 }, signal: nextMatches() })
+        .then((r) => {
+          setMatches(r.data.results.slice(0, 5));
+          setMatchIdx(-1);
+        })
+        .catch((e) => {
+          if (!isCanceled(e)) setMatches([]);
+        });
     }, 250);
     return () => clearTimeout(id);
   }, [client.full_name, client.company_name, client.type, clientId]);
@@ -511,7 +631,40 @@ export default function Checkout() {
     return true;
   });
 
-  const total = useMemo(() => cart.reduce((s, l) => s + lineTotal(l), 0), [cart]);
+  // Правила прайса заказа для предпросмотра: тот же порядок, что на сервере.
+  const urgencyPct = Number(pricingRules.urgency_percent) || 0;
+  const urgentOn = isUrgent && urgencyPct > 0;
+  const overrideOn = isAdmin && discountOverride !== null && discountOverride !== "";
+  const discountPct = overrideOn
+    ? Math.min(100, Math.max(0, Number(discountOverride) || 0))
+    : clientDiscount;
+  const rules = useMemo(() => {
+    const globalMin = Number(pricingRules.min_line_amount) || 0;
+    const svcMin = new Map(services.map((sv) => [sv.id, sv.min_line_amount]));
+    return {
+      urgency: urgentOn ? urgencyPct : 0,
+      discount: discountPct,
+      minFor: (id) => {
+        const own = svcMin.get(Number(id));
+        return own === null || own === undefined ? globalMin : Number(own) || 0;
+      },
+    };
+  }, [pricingRules, services, urgentOn, urgencyPct, discountPct]);
+  // По каталогу (до правил) и по правилам — «каталог → итог» в корзине.
+  const catalogTotal = useMemo(() => cart.reduce((s, l) => s + lineTotal(l), 0), [cart]);
+  const total = useMemo(() => cart.reduce((s, l) => s + ruledTotal(l, rules), 0), [cart, rules]);
+  const rulesChangeTotal = total !== catalogTotal;
+  // Сработал ли минимум хоть у одной строки — для подписи «каталог → итог».
+  const minHit = useMemo(
+    () =>
+      cart.some((l) =>
+        lineParts(l).some((p) => {
+          const min = p.service ? rules.minFor(p.serviceId) : 0;
+          return min > 0 && p.raw > 0 && p.raw < min;
+        })
+      ),
+    [cart, rules]
+  );
   // Сколько сдачи уйдёт в этот заказ и сколько после этого брать деньгами.
   // Сдача не может закрыть больше, чем стоит заказ: остаток так и лежит
   // сдачей — «зачли 1 500 из 4 000» это нормальная ситуация, а не ошибка.
@@ -893,11 +1046,57 @@ export default function Checkout() {
   function pickClient(c) {
     setClientId(c.id);
     setClient({ type: c.type, full_name: c.full_name || "", company_name: c.company_name || "", phone: c.phone });
+    // Другой клиент — другая скидка: своя скидка админа на прошлого не переносится.
+    if (c.id !== clientId) setDiscountOverride(null);
     setMatches([]);
+    setMatchIdx(-1);
+    setFieldErr((e) => ({ ...e, name: undefined, phone: undefined }));
+  }
+
+  // Очистить чек целиком: позиции, клиент, оплата. Спрашиваем — собранный на
+  // десять позиций чек стирается одним нажатием.
+  async function clearAll() {
+    if (!(await confirm(t("checkout.clearConfirm")))) return;
+    setCart([]);
+    setClient({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" });
+    setClientId(null);
+    setOrderTitle("");
+    setReferredBy("");
+    setPrepay("");
+    setPayFull(false);
+    setUseChange(true);
+    setPayDebt(false);
+    setIsUrgent(false);
+    setDiscountOverride(null);
+    setMatches([]);
+    setError("");
+    setFieldErr({});
+    idem.done();
+    clearCheckoutDraft();
+  }
+
+  // Стрелки/Enter в подсказке «найден клиент» — поле имени остаётся в фокусе.
+  function onNameKeyDown(e) {
+    if (!matches.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setMatchIdx((i) => Math.min(i + 1, matches.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setMatchIdx((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter" && matchIdx >= 0) {
+      e.preventDefault();
+      pickClient(matches[matchIdx]);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      setMatches([]);
+      setMatchIdx(-1);
+    }
   }
 
   async function submit() {
     setError("");
+    setFieldErr({});
     if (!cart.length) return setError(t("checkout.emptyCart"));
     // Резка без длины реза — работа за ноль; сервер такой заказ отклонит, но
     // причину лучше назвать здесь, вместе со строкой, которую надо переделать.
@@ -905,11 +1104,18 @@ export default function Checkout() {
     if (noRunM) return setError(t("checkout.runMetersRequiredCart", { name: noRunM.name }));
     // Гасить долг нечем, если не сказано, сколько принесли: пустое поле —
     // это «ничего не приняли», и долг из ничего не закрывается.
+    // Ошибки ввода — рядом с полем (Field) и с фокусом на первом из них, а не
+    // одной строкой внизу панели: касса длинная, и строку под кнопкой не видно.
+    const bad = {};
     if (payDebt && debtNow > 0 && paymentMethod !== "ONLINE" && !payFull && !(Number(prepay) > 0))
-      return setError(t("checkout.payDebtNeedsAmount"));
+      bad.prepay = t("checkout.payDebtNeedsAmount");
     if (!clientId && client.phone) {
-      if (client.type === "PHYSICAL" && !client.full_name.trim()) return setError(t("checkout.needName"));
-      if (client.type === "OSOO" && !client.company_name.trim()) return setError(t("checkout.needCompany"));
+      if (client.type === "PHYSICAL" && !client.full_name.trim()) bad.name = t("checkout.needName");
+      if (client.type === "OSOO" && !client.company_name.trim()) bad.name = t("checkout.needCompany");
+    }
+    if (Object.keys(bad).length) {
+      setFieldErr(bad);
+      return focusFirstInvalid();
     }
     setBusy(true);
     const items = cart.map((l) => {
@@ -988,6 +1194,11 @@ export default function Checkout() {
     });
     const payload = { payment_method: paymentMethod, items };
     if (orderTitle.trim()) payload.title = orderTitle.trim();
+    // Правила прайса: «Срочно» — только когда наценка задана; скидку шлёт
+    // только админ, поменявший её на этот заказ, — иначе сервер сам возьмёт
+    // скидку из карточки клиента.
+    if (urgentOn) payload.is_urgent = true;
+    if (overrideOn) payload.discount_percent = discountPct;
     // Дату шлём, только когда она не сегодняшняя: у складовщика этого поля нет,
     // и лишний параметр упёрся бы в проверку прав на пустом месте.
     if (isAdmin && orderDate && orderDate !== todayStr()) payload.order_date = orderDate;
@@ -1007,8 +1218,36 @@ export default function Checkout() {
     else if (client.phone)
       payload.client = { ...client, ...(referredBy ? { referred_by: Number(referredBy) } : {}) };
     try {
-      const { data } = await api.post("/sales/receipts/checkout/", payload);
+      // Один ключ на одну попытку одной и той же корзины: если ответ потерялся
+      // (обрыв, таймаут), повторное «Оформить» уйдёт с ТЕМ ЖЕ ключом, и сервер
+      // вернёт уже оформленный чек вместо второго.
+      const key = idem.keyFor(JSON.stringify(payload));
+      const { data } = await api.post("/sales/receipts/checkout/", payload, {
+        headers: { "Idempotency-Key": key },
+      });
+      idem.done();
+      clearCheckoutDraft();
+      setReceiptClient(
+        data.client_name || client.full_name || client.company_name || client.phone
+          ? {
+              name: data.client_name || (client.type === "OSOO" ? client.company_name : client.full_name) || "",
+              phone: data.client_phone || client.phone || "",
+            }
+          : null
+      );
       setReceipt(data);
+      // Предупреждения сервера (например, у части позиций неизвестна
+      // себестоимость) — тостом, который не гаснет сам: чек оформлен, но
+      // человеку надо знать, что в нём не так.
+      (data.warnings || []).forEach((w) => {
+        const known =
+          w.code === "cost_unknown"
+            ? t("checkout.warnCostUnknown")
+            : w.code === "below_cost"
+            ? t("checkout.warnBelowCost", { name: w.name, sum: formatMoney(w.line_total) })
+            : null;
+        toast(known || w.message || w.code, "warning");
+      });
       setCart([]);
       setClient({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" });
       setClientId(null);
@@ -1020,11 +1259,25 @@ export default function Checkout() {
       setPrepay("");
       setPayFull(false);
       setOrderTitle("");
+      setMatches([]);
+      setIsUrgent(false);
+      setDiscountOverride(null);
+      setClientDiscount(0);
       // Дату НЕ сбрасываем: заказы задним числом заносят пачкой за один день,
       // и возврат на сегодня после каждой продажи заставлял бы вводить её снова.
-      api.get("/clients/clients/").then((r) => setClientsList(r.data.results));
     } catch (e) {
-      setError(apiError(e, t("common.error")));
+      idem.failed(e);
+      // Ошибка валидации клиента ({"client": {"phone": [...]}}) — к своему полю.
+      const cd = e.response?.status === 400 ? e.response.data?.client : null;
+      if (cd && typeof cd === "object" && !Array.isArray(cd) && (cd.phone || cd.full_name || cd.company_name)) {
+        setFieldErr({
+          ...(cd.phone ? { phone: [].concat(cd.phone).join(" ") } : {}),
+          ...(cd.full_name || cd.company_name ? { name: [].concat(cd.full_name || cd.company_name).join(" ") } : {}),
+        });
+        focusFirstInvalid();
+      } else {
+        setError(apiError(e, t("common.error")));
+      }
     } finally {
       setBusy(false);
     }
@@ -1207,6 +1460,40 @@ export default function Checkout() {
     ? ceilSom(cutPieceTotal) + ceilSom(cutPieceWork)
     : ceilSom(cutWork) + ceilSom(cutMaterialSum);
 
+  // Почему «Добавить» в окне позиции неактивна. Серая кнопка без причины читалась
+  // как поломка («нажимаю — не добавляется»); теперь под ней сказано, чего не
+  // хватает. Порядок проверок — тот же, что в прежнем условии disabled.
+  let addBlock = null;
+  if (cut) {
+    if (cut.ownCut) {
+      if (!(ownCutRunM > 0)) addBlock = "needRunM";
+      else if (!(ownCutRate > 0)) addBlock = "needRate";
+      else if (!svcById(cut.cutServiceId)) addBlock = "needMachine";
+    } else if (cut.waste) {
+      if (!(wasteAmount > 0)) addBlock = "needAmount";
+      else if (!(wasteRate > 0)) addBlock = "needRate";
+    } else if (cut.engraving) {
+      if (!cutArea) addBlock = "needSize";
+      else if (!(engRate > 0)) addBlock = "needRate";
+    } else if (cutNoService) {
+      addBlock = "noCutService";
+    } else if (cutRoll) {
+      if (!(cutRollLen > 0)) addBlock = "needRollLen";
+      else if (!(cutRollRate > 0)) addBlock = "needRollPrice";
+      else if (cutRollLeft < 0) addBlock = "rollShort";
+      else if (cutUsedWidth > cutFullWidth) addBlock = "rollTooWide";
+      else if (cutRollWorkOn && !(cutRollRunM > 0)) addBlock = "needRunM";
+    } else if (cutPiece) {
+      if (!(Number(cut.qty) > 0)) addBlock = "needAmount";
+      else if (!(cutPieceUnit > 0)) addBlock = "needPiecePrice";
+      else if (cutRunMMissing) addBlock = "needRunM";
+    } else if (!cutArea) addBlock = "needSize";
+    else if (cut.service && !cut.materialId) addBlock = "needMaterial";
+    else if (cutRunMMissing) addBlock = "needRunM";
+    else if (cutRateMissing) addBlock = "needRate";
+    else if (cutPriceMissing) addBlock = "needMatPrice";
+  }
+
   return (
     <>
       <h1>{t("checkout.title")}</h1>
@@ -1214,13 +1501,21 @@ export default function Checkout() {
       <div className="pos">
         <div className="pos-main">
           <div className="toolbar">
-            <input className="search" placeholder={t("common.search")} value={search} onChange={(e) => setSearch(e.target.value)} />
-            <select value={category} onChange={(e) => setCategory(e.target.value)}>
+            <input
+              className="search"
+              type="search"
+              aria-label={t("common.search")}
+              placeholder={t("common.search")}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            <select aria-label={t("common.category")} value={category} onChange={(e) => setCategory(e.target.value)}>
               <option value="">{t("common.all")}</option>
               {categories.map((c) => (<option key={c} value={c}>{c}</option>))}
             </select>
           </div>
 
+          {catalogError && !materials.length && !services.length && <LoadError onRetry={loadCatalog} />}
           <div className="pos-grid">
             {visibleProducts.map((p) => {
               const st = stockState(p);
@@ -1276,9 +1571,9 @@ export default function Checkout() {
                         )}
                       </>
                     ) : noPrice ? (
-                      <span style={{ color: "var(--danger)", fontSize: 12 }}>{t("checkout.priceMissingShort")}</span>
+                      <span style={{ color: "var(--danger-ink)", fontSize: 12 }}>{t("checkout.priceMissingShort")}</span>
                     ) : (
-                      `${ceilSom(p.price)} сом`
+                      formatMoney(ceilSom(p.price))
                     )
                   ) : p.uses_free_measure ? (
                     // Мерку и цену называют в окне: у отходов их три, и какая
@@ -1289,18 +1584,25 @@ export default function Checkout() {
                   ) : p.uses_pieces ? (
                     `${ceilSom(p.rate_per_piece)} сом/букву`
                   ) : (
-                    `${ceilSom(p.base_price)} сом`
+                    formatMoney(ceilSom(p.base_price))
                   )}
                 </div>
               </button>
               );
             })}
-            {!visibleProducts.length && <p className="muted">{t("common.empty")}</p>}
+            {!visibleProducts.length && !catalogError && <p className="muted">{t("common.empty")}</p>}
           </div>
         </div>
 
         <div className="pos-cart card">
-          <h3>{t("checkout.receipt")}</h3>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8, margin: "0 0 10px" }}>
+            <h3 style={{ margin: 0 }}>{t("checkout.receipt")}</h3>
+            {(cart.length > 0 || client.phone || client.full_name || client.company_name || orderTitle) && (
+              <button type="button" className="ghost" onClick={clearAll}>
+                {t("checkout.clear")}
+              </button>
+            )}
+          </div>
           {cart.length ? (
             cart.map((l) => (
               <div className="cart-line" key={l.key}>
@@ -1370,12 +1672,12 @@ export default function Checkout() {
                       )}
                     </div>
                   ) : (
-                    <div className="cl-sub">{unitPrice(l)} сом / ед.</div>
+                    <div className="cl-sub">{formatMoney(unitPrice(l))} / ед.</div>
                   )}
                 </div>
                 {!["cutting", "material-area", "material-metre", "cut-work", "cut-own", "engraving", "waste"].includes(l.kind) && (
                   <div className="stepper">
-                    <button onClick={() => changeQty(l.key, -1)}>−</button>
+                    <button onClick={() => changeQty(l.key, -1)} aria-label={t("checkout.qtyMinus")}>−</button>
                     {/* Поле, а не подпись: одну-две штуки удобнее доклацать
                         кнопками, две сотни — вписать. */}
                     <input
@@ -1390,12 +1692,19 @@ export default function Checkout() {
                         // нет смысла: убираем, как это делает минус до нуля.
                         if (!(Number(e.target.value) > 0)) removeLine(l.key);
                       }}
-                      aria-label={t("checkout.qty")}
+                      aria-label={`${t("checkout.qty")}: ${l.name}`}
                     />
-                    <button onClick={() => changeQty(l.key, 1)}>+</button>
+                    <button onClick={() => changeQty(l.key, 1)} aria-label={t("checkout.qtyPlus")}>+</button>
                   </div>
                 )}
-                <div className="cl-total">{lineTotal(l).toFixed(0)}</div>
+                <div className="cl-total">
+                  {/* «Каталог → итог»: правила прайса меняют строку — старая
+                      цена зачёркнута рядом, чтобы кассир видел, откуда сумма. */}
+                  {ruledTotal(l, rules) !== lineTotal(l) && (
+                    <s className="muted cl-was">{formatNumber(lineTotal(l))}</s>
+                  )}
+                  {formatNumber(ruledTotal(l, rules))}
+                </div>
                 <button className="ghost" onClick={() => removeLine(l.key)} title={t("common.delete")} aria-label={t("common.delete")}><Icon name="x" size={16} /></button>
               </div>
             ))
@@ -1403,103 +1712,210 @@ export default function Checkout() {
             <div className="pos-empty">{t("checkout.tapToAdd")}</div>
           )}
 
-          <div className="pos-total"><span>{t("common.total")}</span><span>{total.toFixed(0)} сом</span></div>
+          {/* Правила прайса заказа. «Срочно» закрыт, пока владелец не задал
+              наценку: молча оформить «срочно за 0 %» — обмануть кассира. */}
+          <div className="pos-rules">
+            <label
+              className={`pos-urgent${urgencyPct > 0 ? "" : " disabled"}`}
+              title={urgencyPct > 0 ? undefined : t("checkout.urgentOff")}
+            >
+              <input
+                type="checkbox"
+                checked={urgentOn}
+                disabled={!(urgencyPct > 0)}
+                onChange={(e) => setIsUrgent(e.target.checked)}
+                aria-label={t("checkout.urgent")}
+                aria-describedby={urgencyPct > 0 ? undefined : "urgent-hint"}
+              />
+              <span>
+                {t("checkout.urgent")}
+                {urgencyPct > 0 && <span className="muted"> +{formatNumber(urgencyPct, { max: 2 })} %</span>}
+              </span>
+            </label>
+            {!(urgencyPct > 0) && (
+              <p id="urgent-hint" className="muted" style={{ fontSize: 12, margin: "2px 0 0" }}>{t("checkout.urgentOff")}</p>
+            )}
+            {isAdmin ? (
+              <Field
+                style={{ margin: "8px 0 0" }}
+                label={t("checkout.discount")}
+                hint={
+                  clientDiscount > 0
+                    ? t("checkout.discountFromClient", { n: formatNumber(clientDiscount, { max: 2 }) })
+                    : t("checkout.discountAdminHint")
+                }
+              >
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  min="0"
+                  max="100"
+                  value={discountOverride ?? ""}
+                  placeholder={String(clientDiscount)}
+                  onChange={(e) => setDiscountOverride(e.target.value === "" ? null : e.target.value)}
+                />
+              </Field>
+            ) : (
+              clientDiscount > 0 && (
+                <p className="pos-discount">
+                  {t("checkout.clientDiscount", { n: formatNumber(clientDiscount, { max: 2 }) })}
+                </p>
+              )
+            )}
+          </div>
+
+          {rulesChangeTotal && cart.length > 0 && (
+            <div className="pos-catalog">
+              <div className="crow">
+                <span className="muted">{t("checkout.catalogTotal")}</span>
+                <s className="muted">{formatMoney(catalogTotal)}</s>
+              </div>
+              <div className="muted" style={{ fontSize: 12 }}>
+                {[
+                  urgentOn ? t("checkout.rulesUrgency", { n: formatNumber(urgencyPct, { max: 2 }) }) : null,
+                  discountPct > 0 ? t("checkout.rulesDiscount", { n: formatNumber(discountPct, { max: 2 }) }) : null,
+                  minHit ? t("checkout.rulesMinimum") : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </div>
+            </div>
+          )}
+
+          <div className="pos-total"><span>{t("common.total")}</span><span>{formatMoney(total)}</span></div>
 
           {/* Название заказа — чтобы потом в чеках узнавать работу, а не гадать
               по номеру. Необязательное. */}
-          <div className="field" style={{ marginTop: 10 }}>
-            <label>{t("checkout.orderTitle")}</label>
-            <input
+          <Field style={{ marginTop: 10 }} label={t("checkout.orderTitle")}>
+            {(a) => (
+              <>
+              <input {...a}
               value={orderTitle}
               onChange={(e) => setOrderTitle(e.target.value)}
               placeholder={t("checkout.orderTitlePh")}
               list="order-title-hints"
             />
-            <datalist id="order-title-hints">
+              <datalist id="order-title-hints">
               {titleHints.map((x) => (
                 <option key={x} value={x} />
               ))}
             </datalist>
-          </div>
+              </>
+            )}
+          </Field>
 
           {/* Дата заказа задним числом — только админу: по ней считаются
               выручка, прибыль по дням и складской лист, то есть она правит
               деньги уже закрытых месяцев. Складовщик оформляет сегодняшним. */}
           {isAdmin && (
-            <div className="field">
-              <label>{t("checkout.orderDate")}</label>
-              <input
+            <Field label={t("checkout.orderDate")}>
+              {(a) => (
+                <>
+                <input {...a}
                 type="date"
                 value={orderDate}
                 max={todayStr()}
                 onChange={(e) => setOrderDate(e.target.value)}
               />
-              <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+                <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
                 {orderDate !== todayStr() ? t("checkout.orderDateBack") : t("checkout.orderDateHint")}
               </p>
-            </div>
+                </>
+              )}
+            </Field>
           )}
 
-          <div className="row">
-            <div className="field" style={{ minWidth: 120, flex: "0 0 auto", margin: 0 }}>
-              <label>{t("clients.type")}</label>
-              <select value={client.type} onChange={(e) => { setClient({ ...client, type: e.target.value }); setClientId(null); }}>
+          <div className="row" style={{ marginBottom: 12 }}>
+            <Field style={{ minWidth: 120, flex: "0 0 auto", margin: 0 }} label={t("clients.type")}>
+              <select value={client.type} onChange={(e) => { setClient({ ...client, type: e.target.value }); setClientId(null); setFieldErr({}); }}>
                 <option value="PHYSICAL">{t("clients.physical")}</option>
                 <option value="OSOO">{t("clients.osoo")}</option>
               </select>
-            </div>
-            <div className="field grow" style={{ margin: 0, position: "relative" }}>
-              <label>{client.type === "OSOO" ? t("clients.companyName") : t("clients.fullName")}</label>
-              {client.type === "OSOO" ? (
-                <input
-                  value={client.company_name}
-                  onChange={(e) => { setClient({ ...client, company_name: e.target.value }); setClientId(null); }}
-                  placeholder={t("checkout.clientNamePlaceholder")}
-                />
-              ) : (
-                <input
-                  value={client.full_name}
-                  onChange={(e) => { setClient({ ...client, full_name: e.target.value }); setClientId(null); }}
-                  placeholder={t("checkout.clientNamePlaceholder")}
-                />
-              )}
-              {matches.length > 0 && (
-                <div className="card" style={{ position: "absolute", zIndex: 5, width: "100%", padding: 6 }}>
-                  {matches.map((m) => (
-                    <div key={m.id} className="crow" style={{ cursor: "pointer" }} onClick={() => pickClient(m)}>
-                      <span>{m.display_name}</span><span className="muted">{m.phone}</span>
+            </Field>
+            <Field
+              className="grow"
+              style={{ margin: 0, position: "relative" }}
+              label={client.type === "OSOO" ? t("clients.companyName") : t("clients.fullName")}
+              required={!clientId && !!client.phone}
+              error={fieldErr.name}
+            >
+              {(aria) => (
+                <>
+                  <input
+                    {...aria}
+                    value={client.type === "OSOO" ? client.company_name : client.full_name}
+                    onChange={(e) => {
+                      setClient({
+                        ...client,
+                        [client.type === "OSOO" ? "company_name" : "full_name"]: e.target.value,
+                      });
+                      setClientId(null);
+                      setFieldErr((er) => ({ ...er, name: undefined }));
+                    }}
+                    placeholder={t("checkout.clientNamePlaceholder")}
+                    autoComplete="off"
+                    role="combobox"
+                    aria-expanded={matches.length > 0}
+                    aria-controls="client-matches"
+                    aria-autocomplete="list"
+                    aria-activedescendant={matchIdx >= 0 ? `client-match-${matches[matchIdx]?.id}` : undefined}
+                    onKeyDown={onNameKeyDown}
+                  />
+                  {matches.length > 0 && (
+                    // Найденные клиенты — настоящие кнопки-варианты (role=option),
+                    // а не <div onClick>: их выбирают стрелками и Enter, не
+                    // убирая рук с клавиатуры.
+                    <div className="card client-matches" id="client-matches" role="listbox" style={{ position: "absolute", zIndex: 5, width: "100%", padding: 6 }}>
+                      {matches.map((m, i) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          role="option"
+                          id={`client-match-${m.id}`}
+                          aria-selected={i === matchIdx}
+                          tabIndex={-1}
+                          className={`crow client-match${i === matchIdx ? " active" : ""}`}
+                          onMouseDown={(e) => { e.preventDefault(); pickClient(m); }}
+                        >
+                          <span>{m.display_name}</span><span className="muted">{m.phone}</span>
+                        </button>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  )}
+                </>
               )}
-            </div>
+            </Field>
           </div>
-          <div className="field">
-            <label>{t("clients.phone")}</label>
-            <input value={client.phone} onChange={(e) => setClient({ ...client, phone: e.target.value })} placeholder="+996…" />
-          </div>
+          <Field label={t("clients.phone")} error={fieldErr.phone}>
+            <input
+              type="tel"
+              inputMode="tel"
+              autoComplete="tel"
+              value={client.phone}
+              onChange={(e) => { setClient({ ...client, phone: e.target.value }); setFieldErr((er) => ({ ...er, phone: undefined })); }}
+              placeholder="+996…"
+            />
+          </Field>
 
-          {/* Referral — only when registering a NEW client */}
+          {/* Referral — only when registering a NEW client. Выбор — поиском на
+              сервере: прежний <select> знал только первых 25 клиентов. */}
           {!clientId && client.phone && (
-            <div className="field">
-              <label>{t("clients.referredByLabel")}</label>
-              <select value={referredBy} onChange={(e) => setReferredBy(e.target.value)}>
-                <option value="">— {t("clients.noReferrer")} —</option>
-                {clientsList.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.display_name} ({c.phone})
-                  </option>
-                ))}
-              </select>
-            </div>
+            <Field label={t("clients.referredByLabel")}>
+              <ClientPicker
+                value={referredBy}
+                noneLabel={t("clients.noReferrer")}
+                onChange={(id) => setReferredBy(id === "" ? "" : String(id))}
+              />
+            </Field>
           )}
 
-          <label style={{ marginTop: 10 }}>{t("checkout.paymentMethod")}</label>
-          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          <label id="pay-method-label" style={{ marginTop: 10 }}>{t("checkout.paymentMethod")}</label>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }} role="group" aria-labelledby="pay-method-label">
             {["CASH", "MBANK", "DEMIRBANK", "ONLINE"].map((m) => (
               <button
                 key={m}
                 className={paymentMethod === m ? "" : "secondary"}
+                aria-pressed={paymentMethod === m}
                 style={{ flex: "1 1 45%" }}
                 onClick={() => setPaymentMethod(m)}
               >
@@ -1525,12 +1941,12 @@ export default function Checkout() {
                   style={{ width: 18, height: 18, marginTop: 2 }}
                 />
                 <span style={{ fontSize: 13 }}>
-                  {t("checkout.hasChange", { sum: clientChange.toLocaleString("ru-RU") })}
+                  {t("checkout.hasChange", { sum: formatNumber(clientChange) })}
                   <div className="muted" style={{ fontSize: 12 }}>
                     {useChange
                       ? t("checkout.changeApplied", {
-                          sum: appliedChange.toLocaleString("ru-RU"),
-                          left: toPay.toLocaleString("ru-RU"),
+                          sum: formatNumber(appliedChange),
+                          left: formatNumber(toPay),
                         })
                       : t("checkout.changeKept")}
                   </div>
@@ -1556,10 +1972,10 @@ export default function Checkout() {
                   style={{ width: 18, height: 18, marginTop: 2 }}
                 />
                 <span style={{ fontSize: 13 }}>
-                  {t("checkout.hasDebt", { sum: clientDebt.toLocaleString("ru-RU") })}
+                  {t("checkout.hasDebt", { sum: formatNumber(clientDebt) })}
                   <div className="muted" style={{ fontSize: 12 }}>
                     {payDebt
-                      ? `${t("checkout.debtWithOrder", { sum: cashNow.toLocaleString("ru-RU") })} ${t("checkout.payDebtHowTo")}`
+                      ? `${t("checkout.debtWithOrder", { sum: formatNumber(cashNow) })} ${t("checkout.payDebtHowTo")}`
                       : t("checkout.debtKept")}
                   </div>
                 </span>
@@ -1569,17 +1985,22 @@ export default function Checkout() {
 
           {paymentMethod !== "ONLINE" && (
             <div className="field" style={{ marginTop: 10 }}>
-              <label>{t("checkout.prepay")}</label>
+              <label htmlFor="prepay-input">{t("checkout.prepay")}</label>
               <div className="row" style={{ gap: 8, margin: 0 }}>
                 <input
+                  id="prepay-input"
                   type="number"
+                  inputMode="decimal"
                   min="0"
+                  aria-invalid={fieldErr.prepay ? true : undefined}
+                  aria-describedby={fieldErr.prepay ? "prepay-err" : undefined}
                   // С погашением долга «вся сумма» — это заказ и долг вместе:
                   // столько кассир и берёт из рук.
                   value={payFull ? String(owedNow.toFixed(0)) : prepay}
                   onChange={(e) => {
                     setPayFull(false);
                     setPrepay(e.target.value);
+                    setFieldErr((er) => ({ ...er, prepay: undefined }));
                   }}
                   placeholder="0"
                   style={{ flex: 1 }}
@@ -1598,6 +2019,9 @@ export default function Checkout() {
                   {t("checkout.payFull")}
                 </button>
               </div>
+              {fieldErr.prepay && (
+                <p className="field-error" id="prepay-err" role="alert">{fieldErr.prepay}</p>
+              )}
               <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
                 {debtNow > 0 ? t("checkout.prepayWithDebtHint") : t("checkout.prepayHint")}
               </p>
@@ -1609,8 +2033,8 @@ export default function Checkout() {
               {!payFull && Number(prepay || 0) < owedNow && (
                 <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
                   {t("receipts.debt")}:{" "}
-                  <strong style={{ color: "var(--danger)" }}>
-                    {(owedNow - Number(prepay || 0)).toFixed(0)} сом
+                  <strong style={{ color: "var(--danger-ink)" }}>
+                    {formatMoney(owedNow - Number(prepay || 0))}
                   </strong>
                   {/* Долг без имени спросить не с кого: в карточках клиентов
                       такого заказа нет, и в «Финансах» он висит отдельной
@@ -1618,7 +2042,7 @@ export default function Checkout() {
                       10 103 сома по четырём заказам. Предупреждаем, но не
                       запрещаем: бывает, что клиента заводят потом. */}
                   {!clientId && !client.phone && (
-                    <div style={{ fontSize: 12, color: "var(--danger)" }}>
+                    <div style={{ fontSize: 12, color: "var(--danger-ink)" }}>
                       {t("checkout.debtNeedsClient")}
                     </div>
                   )}
@@ -1631,8 +2055,8 @@ export default function Checkout() {
               {!payFull && Number(prepay || 0) > owedNow && total > 0 && (
                 <div className="muted" style={{ fontSize: 13, marginTop: 4 }}>
                   {t("checkout.change")}:{" "}
-                  <strong style={{ color: "var(--accent-strong)" }}>
-                    {(Number(prepay) - owedNow).toFixed(0)} сом
+                  <strong style={{ color: "var(--accent-ink)" }}>
+                    {formatMoney(Number(prepay) - owedNow)}
                   </strong>
                   <div style={{ fontSize: 12 }}>{t("checkout.changeHint")}</div>
                 </div>
@@ -1640,7 +2064,10 @@ export default function Checkout() {
             </div>
           )}
 
-          {error && <div className="error">{error}</div>}
+          {error && <div className="error" role="alert">{error}</div>}
+          {/* Нижняя часть панели — «Оформить» — закреплена внизу панели чека
+              (sticky): панель прокручивается сама, а кнопка всегда под рукой. */}
+          <div className="pos-submit">
           {/* На кнопке — сумма ЗАКАЗА. Когда гасим ещё и долг, под ней строкой
               стоит то, что кассир реально берёт из рук: заказ после зачёта
               сдачи плюс долг. Складывать это в одно число на кнопке нельзя —
@@ -1654,7 +2081,7 @@ export default function Checkout() {
               className="error"
               style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}
             >
-              <span>{t("checkout.backdatedWarn", { date: orderDate.split("-").reverse().join(".") })}</span>
+              <span>{t("checkout.backdatedWarn", { date: formatDate(orderDate) })}</span>
               <button
                 type="button"
                 className="secondary"
@@ -1665,19 +2092,20 @@ export default function Checkout() {
               </button>
             </div>
           )}
-          <button style={{ marginTop: 14, width: "100%", height: 52 }} onClick={submit} disabled={busy || !cart.length}>
+          <button style={{ marginTop: 0, width: "100%", height: 52 }} onClick={submit} disabled={busy || !cart.length}>
             {busy
               ? t("common.loading")
-              : `${t("checkout.submit")} · ${total.toFixed(0)} сом` +
+              : `${t("checkout.submit")} · ${formatMoney(total)}` +
                 (isAdmin && orderDate && orderDate !== todayStr()
-                  ? ` · ${orderDate.split("-").reverse().join(".")}`
+                  ? ` · ${formatDate(orderDate)}`
                   : "")}
           </button>
           {debtNow > 0 && (
             <p className="muted" style={{ fontSize: 13, margin: "6px 0 0", textAlign: "center" }}>
-              {t("checkout.takeNow")}: <strong>{cashNow.toLocaleString("ru-RU")} сом</strong>
+              {t("checkout.takeNow")}: <strong>{formatMoney(cashNow)}</strong>
             </p>
           )}
+          </div>
         </div>
       </div>
 
@@ -1691,34 +2119,8 @@ export default function Checkout() {
               <button className="secondary" onClick={() => setCut(null)}>{t("common.cancel")}</button>
               <button
                 onClick={addCutting}
-                disabled={
-                  // Материал клиента: нужны длина реза, цена и станок.
-                  cut.ownCut
-                    ? !(ownCutRunM > 0) || !(ownCutRate > 0) || !svcById(cut.cutServiceId)
-                    // Отходы: количество в выбранной мерке и цена.
-                    : cut.waste
-                    ? !(wasteAmount > 0) || !(wasteRate > 0)
-                    // Гравировка: площадь и цена за кв.м.
-                    : cut.engraving
-                    ? !cutArea || !(engRate > 0)
-                    // Резку просят, а услуги нет — добавлять нечего.
-                    : cutNoService ||
-                  cutRoll
-                    // Рулон: нужна длина, цена за метр, чтобы её хватило на
-                    // складе и чтобы ширина изделия не превышала рулон.
-                    ? !(cutRollLen > 0) ||
-                      !(cutRollRate > 0) ||
-                      cutRollLeft < 0 ||
-                      cutUsedWidth > cutFullWidth ||
-                      // Резку включили, а длину реза не назвали — работа ушла
-                      // бы в чек нулём. Сервер такую строку и не примет.
-                      (cutRollWorkOn && !(cutRollRunM > 0))
-                    : cutPiece
-                    ? !(Number(cut.qty) > 0) || !(cutPieceUnit > 0) || cutRunMMissing
-                    // Фигурный рез без длины кривой не добавляется: иначе работа
-                    // уходит в чек нулём.
-                    : !cutArea || (cut.service && !cut.materialId) || cutRunMMissing || cutRateMissing || cutPriceMissing
-                }
+                disabled={!!addBlock}
+                aria-describedby={addBlock ? "cut-add-reason" : undefined}
                 title={cutRunMMissing ? t("checkout.runMetersRequired") : undefined}
               >
                 {t("common.add")}
@@ -1739,7 +2141,7 @@ export default function Checkout() {
               выбор, которого нет. */}
           {isMatModal && !cutRoll && cutRollMat?.is_roll_material && (
             <>
-              <div className="tabs tabs-grid" style={{ marginTop: 0 }}>
+              <div className="tabs tabs-grid" style={{ marginTop: 0 }} role="group" aria-label={t("checkout.saleMode")}>
                 {MODES.map((mode) => {
                   // Продажа целиком возможна, только когда у материала задана
                   // цена за лист. Вкладку всё равно показываем — но неактивной
@@ -1750,6 +2152,7 @@ export default function Checkout() {
                     <button
                       key={mode}
                       className={cut.mode === mode ? "active" : ""}
+                      aria-pressed={cut.mode === mode}
                       disabled={noPiecePrice}
                       title={noPiecePrice ? t("checkout.modePieceNoPrice") : undefined}
                       onClick={() => setCut({ ...cut, mode })}
@@ -1770,7 +2173,7 @@ export default function Checkout() {
           {/* Услуги резки в каталоге нет — говорим об этом здесь, а не после
               оформления: без неё работа мастера в заказ не попадёт вовсе. */}
           {cutNoService && (
-            <p style={{ color: "var(--danger)", fontSize: 13, margin: "0 0 10px" }}>
+            <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "0 0 10px" }}>
               {isAdmin ? t("checkout.noCutServiceAdmin") : t("checkout.noCutService")}
             </p>
           )}
@@ -1810,11 +2213,12 @@ export default function Checkout() {
           {isMatModal && cuttingServices.length > 1 && (cutRoll ? cutRollWorkOn : CUT_MODES.includes(cut.mode) || cut.pieceCut) && (
             <div className="field">
               <label>{t("checkout.cutMachine")}</label>
-              <div className="tabs" style={{ marginTop: 0 }}>
+              <div className="tabs" style={{ marginTop: 0 }} role="group" aria-label={t("checkout.cutMachine")}>
                 {cuttingServices.map((s) => (
                   <button
                     key={s.id}
                     className={Number(cut.cutServiceId) === s.id ? "active" : ""}
+                    aria-pressed={Number(cut.cutServiceId) === s.id}
                     onClick={() =>
                       setCut({ ...cut, cutServiceId: s.id, cutRate: rateFor(s, cut.material) })
                     }
@@ -1830,8 +2234,7 @@ export default function Checkout() {
               в строке нет — она считается от площади рисунка; у отходов его
               нет тем более: отход уже списан, второй раз он уйдёт в минус. */}
           {cut.service && !cut.engraving && !cut.waste && (
-            <div className="field">
-              <label>{t("checkout.cutMaterial")}</label>
+            <Field label={t("checkout.cutMaterial")}>
               <select
                 value={cut.materialId}
                 onChange={(e) => {
@@ -1848,7 +2251,7 @@ export default function Checkout() {
                   </option>
                 ))}
               </select>
-            </div>
+            </Field>
           )}
 
           {/* Только резка — материал клиента: станок, сколько отрезано, цена
@@ -1861,11 +2264,12 @@ export default function Checkout() {
               {cuttingServices.length > 1 && (
                 <div className="field">
                   <label>{t("checkout.cutMachine")}</label>
-                  <div className="tabs" style={{ marginTop: 0 }}>
+                  <div className="tabs" style={{ marginTop: 0 }} role="group" aria-label={t("checkout.cutMachine")}>
                     {cuttingServices.map((s) => (
                       <button
                         key={s.id}
                         className={Number(cut.cutServiceId) === s.id ? "active" : ""}
+                        aria-pressed={Number(cut.cutServiceId) === s.id}
                         onClick={() =>
                           setCut({
                             ...cut,
@@ -1883,8 +2287,7 @@ export default function Checkout() {
                 </div>
               )}
               <div className="row">
-                <div className="field grow" style={{ margin: 0 }}>
-                  <label>{t("checkout.ownCutLength")} *</label>
+                <Field className="grow" style={{ margin: 0 }} label={<>{t("checkout.ownCutLength")} *</>}>
                   <input
                     type="number"
                     step="any"
@@ -1892,28 +2295,26 @@ export default function Checkout() {
                     onChange={(e) => setCut({ ...cut, running_meters: e.target.value })}
                     autoFocus
                   />
-                </div>
-                <div className="field grow" style={{ margin: 0 }}>
-                  <label>{t("checkout.ownCutRate")} *</label>
+                </Field>
+                <Field className="grow" style={{ margin: 0 }} label={<>{t("checkout.ownCutRate")} *</>}>
                   <input
                     type="number"
                     step="any"
                     value={cut.cutRate ?? ""}
                     onChange={(e) => setCut({ ...cut, cutRate: e.target.value })}
                   />
-                </div>
+                </Field>
               </div>
               {!(ownCutRate > 0) && (
-                <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.ownCutNeedRate")}</p>
+                <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.ownCutNeedRate")}</p>
               )}
-              <div className="field" style={{ marginTop: 10 }}>
-                <label>{t("checkout.ownCutNote")}</label>
+              <Field style={{ marginTop: 10 }} label={t("checkout.ownCutNote")}>
                 <input
                   value={cut.note ?? ""}
                   onChange={(e) => setCut({ ...cut, note: e.target.value })}
                   placeholder={t("checkout.ownCutNotePh")}
                 />
-              </div>
+              </Field>
               {ownCutRunM > 0 && ownCutRate > 0 && (
                 <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
                   <div className="crow">
@@ -1922,7 +2323,7 @@ export default function Checkout() {
                   </div>
                   <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
                     <strong>{t("common.total")}</strong>
-                    <strong style={{ fontSize: 18 }}>{ceilSom(ownCutRate * ownCutRunM)} сом</strong>
+                    <strong style={{ fontSize: 18 }}>{formatMoney(ceilSom(ownCutRate * ownCutRunM))}</strong>
                   </div>
                 </div>
               )}
@@ -1933,11 +2334,12 @@ export default function Checkout() {
               {/* Мерка — первым делом: от неё зависят и поля, и цена. */}
               <div className="field">
                 <label>{t("checkout.wasteMeasure")}</label>
-                <div className="tabs" style={{ marginTop: 0 }}>
+                <div className="tabs" style={{ marginTop: 0 }} role="group" aria-label={t("checkout.wasteMeasure")}>
                   {["SQM", "METER", "PIECE"].map((m) => (
                     <button
                       key={m}
                       className={cut.mode === m ? "active" : ""}
+                      aria-pressed={cut.mode === m}
                       onClick={() =>
                         setCut({
                           ...cut, mode: m,
@@ -1958,25 +2360,27 @@ export default function Checkout() {
               {cut.mode === "SQM" ? (
                 <>
                   <div className="row">
-                    <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cut.width} onChange={(e) => setCut({ ...cut, width: e.target.value, amount: "" })} autoFocus /></div>
-                    <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cut.length} onChange={(e) => setCut({ ...cut, length: e.target.value, amount: "" })} /></div>
+                    <Field className="grow" label={t("supply.width")}>
+                      <input type="number" step="any" value={cut.width} onChange={(e) => setCut({ ...cut, width: e.target.value, amount: "" })} autoFocus />
+                    </Field>
+                    <Field className="grow" label={t("supply.length")}>
+                      <input type="number" step="any" value={cut.length} onChange={(e) => setCut({ ...cut, length: e.target.value, amount: "" })} />
+                    </Field>
                   </div>
                   <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("checkout.sizeHint")}</p>
                   {/* Обрезок бывает и непрямоугольный — тогда площадь считают
                       сами и вписывают сюда, не выдумывая «ширину × длину». */}
-                  <div className="field">
-                    <label>{t("checkout.wasteAreaDirect")}</label>
+                  <Field label={t("checkout.wasteAreaDirect")}>
                     <input
                       type="number"
                       step="any"
                       value={cut.amount ?? ""}
                       onChange={(e) => setCut({ ...cut, amount: e.target.value, width: "", length: "" })}
                     />
-                  </div>
+                  </Field>
                 </>
               ) : (
-                <div className="field">
-                  <label>{cut.mode === "METER" ? t("checkout.wasteMetres") : t("checkout.wastePieces")} *</label>
+                <Field label={<>{cut.mode === "METER" ? t("checkout.wasteMetres") : t("checkout.wastePieces")} *</>}>
                   <input
                     type="number"
                     step="any"
@@ -1984,7 +2388,7 @@ export default function Checkout() {
                     onChange={(e) => setCut({ ...cut, amount: e.target.value })}
                     autoFocus
                   />
-                </div>
+                </Field>
               )}
               {/* Цена на отходы всегда договорная — её вписывает и складовщик. */}
               <div className="field">
@@ -1996,17 +2400,16 @@ export default function Checkout() {
                   onChange={(e) => setCut({ ...cut, rate: e.target.value })}
                 />
                 {!(wasteRate > 0) && (
-                  <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.wasteNeedRate")}</p>
+                  <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.wasteNeedRate")}</p>
                 )}
               </div>
-              <div className="field">
-                <label>{t("checkout.wasteNote")}</label>
+              <Field label={t("checkout.wasteNote")}>
                 <input
                   value={cut.note ?? ""}
                   onChange={(e) => setCut({ ...cut, note: e.target.value })}
                   placeholder={t("checkout.wasteNotePh")}
                 />
-              </div>
+              </Field>
               {wasteAmount > 0 && wasteRate > 0 && (
                 <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
                   <div className="crow">
@@ -2019,7 +2422,7 @@ export default function Checkout() {
                   </div>
                   <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
                     <strong>{t("common.total")}</strong>
-                    <strong style={{ fontSize: 18 }}>{ceilSom(wasteRate * wasteAmount)} сом</strong>
+                    <strong style={{ fontSize: 18 }}>{formatMoney(ceilSom(wasteRate * wasteAmount))}</strong>
                   </div>
                 </div>
               )}
@@ -2028,8 +2431,12 @@ export default function Checkout() {
             <>
               <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>{t("checkout.engravingHint")}</p>
               <div className="row">
-                <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cut.width} onChange={(e) => setCut({ ...cut, width: e.target.value })} autoFocus /></div>
-                <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cut.length} onChange={(e) => setCut({ ...cut, length: e.target.value })} /></div>
+                <Field className="grow" label={t("supply.width")}>
+                  <input type="number" step="any" value={cut.width} onChange={(e) => setCut({ ...cut, width: e.target.value })} autoFocus />
+                </Field>
+                <Field className="grow" label={t("supply.length")}>
+                  <input type="number" step="any" value={cut.length} onChange={(e) => setCut({ ...cut, length: e.target.value })} />
+                </Field>
               </div>
               <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("checkout.sizeHint")}</p>
               {/* Цена за кв.м — на виду и правится у всех: у крупных заказов
@@ -2043,17 +2450,16 @@ export default function Checkout() {
                   onChange={(e) => setCut({ ...cut, rate: e.target.value })}
                 />
                 {!(engRate > 0) && (
-                  <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.engravingNeedRate")}</p>
+                  <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.engravingNeedRate")}</p>
                 )}
               </div>
-              <div className="field">
-                <label>{t("checkout.engravingNote")}</label>
+              <Field label={t("checkout.engravingNote")}>
                 <input
                   value={cut.note ?? ""}
                   onChange={(e) => setCut({ ...cut, note: e.target.value })}
                   placeholder={t("checkout.engravingNotePh")}
                 />
-              </div>
+              </Field>
               <label className="field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <input
                   type="checkbox"
@@ -2072,7 +2478,7 @@ export default function Checkout() {
                   </div>
                   <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
                     <strong>{t("common.total")}</strong>
-                    <strong style={{ fontSize: 18 }}>{ceilSom(engRate * cutArea)} сом</strong>
+                    <strong style={{ fontSize: 18 }}>{formatMoney(ceilSom(engRate * cutArea))}</strong>
                   </div>
                 </div>
               )}
@@ -2112,13 +2518,12 @@ export default function Checkout() {
               {/* У рулона без цены за метр кнопка «Добавить» молча гасла, и
                   складовщик не понимал почему: цену правит только админ. */}
               {!(cutRollRate > 0) && (
-                <p style={{ color: "var(--danger)", fontSize: 13, margin: "0 0 8px" }}>
+                <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "0 0 8px" }}>
                   {isAdmin ? t("checkout.rollNoPriceAdmin") : t("checkout.rollNoPrice")}
                 </p>
               )}
               <div className="row">
-                <div className="field grow" style={{ margin: 0 }}>
-                  <label>{t("checkout.rollLength")}</label>
+                <Field className="grow" style={{ margin: 0 }} label={t("checkout.rollLength")}>
                   <input
                     type="number"
                     step="any"
@@ -2126,37 +2531,39 @@ export default function Checkout() {
                     onChange={(e) => setCut({ ...cut, length: e.target.value })}
                     autoFocus
                   />
-                </div>
+                </Field>
                 {isAdmin && (
-                  <div className="field grow" style={{ margin: 0 }}>
-                    <label>{t("checkout.rollRate")}</label>
+                  <Field className="grow" style={{ margin: 0 }} label={t("checkout.rollRate")}>
                     <input
                       type="number"
                       step="any"
                       value={cut.matPrice ?? ""}
                       onChange={(e) => setCut({ ...cut, matPrice: e.target.value, priceEdited: true })}
                     />
-                  </div>
+                  </Field>
                 )}
               </div>
               {/* Ширина изделия — необязательная. Заполнили меньше рулона —
                   система посчитает, сколько ушло в обрезок. Не заполнили —
                   считаем, что ушло всё, и ничего не выдумываем. */}
-              <div className="field" style={{ marginTop: 10 }}>
-                <label>{t("checkout.usedWidth")}</label>
-                <input
+              <Field style={{ marginTop: 10 }} label={t("checkout.usedWidth")}>
+                {(a) => (
+                  <>
+                  <input {...a}
                   type="number"
                   step="any"
                   value={cut.usedWidth ?? ""}
                   onChange={(e) => setCut({ ...cut, usedWidth: e.target.value })}
                   placeholder={String(cutFullWidth)}
                 />
-                <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+                  <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
                   {t("checkout.usedWidthHint", { width: cutFullWidth })}
                 </p>
-              </div>
+                  </>
+                )}
+              </Field>
               {cutUsedWidth > cutFullWidth && (
-                <p style={{ color: "var(--danger)", fontSize: 13, margin: "-4px 0 8px" }}>
+                <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "-4px 0 8px" }}>
                   {t("checkout.usedWidthTooWide", { width: cutFullWidth })}
                 </p>
               )}
@@ -2178,38 +2585,36 @@ export default function Checkout() {
               {cutRollWorkOn && (
                 <>
                   <div className="row">
-                    <div className="field grow" style={{ margin: 0 }}>
-                      <label>{t("checkout.runningMeters")}</label>
+                    <Field className="grow" style={{ margin: 0 }} label={t("checkout.runningMeters")}>
                       <input
                         type="number"
                         step="any"
                         value={cut.running_meters}
                         onChange={(e) => setCut({ ...cut, running_meters: e.target.value })}
                       />
-                    </div>
+                    </Field>
                     {isAdmin && (
-                      <div className="field grow" style={{ margin: 0 }}>
-                        <label>{t("checkout.cutRateLabel")}</label>
+                      <Field className="grow" style={{ margin: 0 }} label={t("checkout.cutRateLabel")}>
                         <input
                           type="number"
                           step="any"
                           value={cut.cutRate ?? ""}
                           onChange={(e) => setCut({ ...cut, cutRate: e.target.value, cutRateEdited: true })}
                         />
-                      </div>
+                      </Field>
                     )}
                   </div>
                   {/* Ставка 0 — работа за бесплатно. У листа об этом уже
                       предупреждают, рулон не исключение. */}
                   {!(cutRollWorkRate > 0) && (
-                    <p style={{ color: "var(--danger)", fontSize: 13, margin: "4px 0 0" }}>
+                    <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "4px 0 0" }}>
                       {isAdmin ? t("checkout.rateMissingAdmin") : t("checkout.rateMissing")}
                     </p>
                   )}
                 </>
               )}
               {cutRollLen > 0 && cutRollLeft < 0 && (
-                <p style={{ color: "var(--danger)", fontSize: 13, margin: "4px 0 0" }}>
+                <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "4px 0 0" }}>
                   {t("checkout.notEnough", {
                     name: cutRollMat.name,
                     need: cutRollLen,
@@ -2222,24 +2627,22 @@ export default function Checkout() {
           ) : cutPiece ? (
             <>
               <div className="row">
-                <div className="field grow" style={{ margin: 0 }}>
-                  <label>{t("common.quantity")} ({t("checkout.pieceUnit")})</label>
+                <Field className="grow" style={{ margin: 0 }} label={<>{t("common.quantity")} ({t("checkout.pieceUnit")})</>}>
                   <input type="number" value={cut.qty} onChange={(e) => setCut({ ...cut, qty: e.target.value })} />
-                </div>
+                </Field>
                 {/* Цена за лист/рулон — на виду и правится прямо здесь, как
                     цена за кв.м у куска. Раньше её в кассе не было вообще:
                     продать лист по особой цене можно было только через
                     справочник, то есть переписав цену всем следующим заказам. */}
                 {isAdmin && (
-                  <div className="field grow" style={{ margin: 0 }}>
-                    <label>{t("checkout.piecePriceLabel", { unit: cutWholeUnit })}</label>
+                  <Field className="grow" style={{ margin: 0 }} label={<>{t("checkout.piecePriceLabel", { unit: cutWholeUnit })}</>}>
                     <input
                       type="number"
                       step="any"
                       value={cut.piecePrice ?? ""}
                       onChange={(e) => setCut({ ...cut, piecePrice: e.target.value, priceEdited: true })}
                     />
-                  </div>
+                  </Field>
                 )}
               </div>
               {/* Резка — только у ЛИСТОВОГО материала: саморез и банку клея не
@@ -2269,16 +2672,15 @@ export default function Checkout() {
                     />
                     <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("checkout.pieceCutHint")}</p>
                     {cutRunMMissing && (
-                      <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>
+                      <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "4px 0 0" }}>
                         {t("checkout.runMetersRequired")}
                       </p>
                     )}
                   </div>
                   {isAdmin && (
-                    <div className="field">
-                      <label>{t("checkout.cutRateLabel")}</label>
+                    <Field label={t("checkout.cutRateLabel")}>
                       <input type="number" step="any" value={cut.cutRate ?? ""} onChange={(e) => setCut({ ...cut, cutRate: e.target.value, cutRateEdited: true })} />
-                    </div>
+                    </Field>
                   )}
                 </>
               )}
@@ -2286,8 +2688,12 @@ export default function Checkout() {
           ) : (
             <>
               <div className="row">
-                <div className="field grow"><label>{t("supply.width")}</label><input type="number" step="any" value={cut.width} onChange={(e) => setCut({ ...cut, width: e.target.value })} /></div>
-                <div className="field grow"><label>{t("supply.length")}</label><input type="number" step="any" value={cut.length} onChange={(e) => setCut({ ...cut, length: e.target.value })} /></div>
+                <Field className="grow" label={t("supply.width")}>
+                  <input type="number" step="any" value={cut.width} onChange={(e) => setCut({ ...cut, width: e.target.value })} />
+                </Field>
+                <Field className="grow" label={t("supply.length")}>
+                  <input type="number" step="any" value={cut.length} onChange={(e) => setCut({ ...cut, length: e.target.value })} />
+                </Field>
               </div>
               <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("checkout.sizeHint")}</p>
               {/* Длина кривой — только у фигурного реза. У обычного её вводить
@@ -2307,7 +2713,7 @@ export default function Checkout() {
                       обязательная величина: об этом говорим красным и держим
                       кнопку «Добавить» закрытой. */}
                   {cutRunMMissing && (
-                    <p style={{ color: "var(--danger)", fontSize: 12, margin: "4px 0 0" }}>
+                    <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "4px 0 0" }}>
                       {t("checkout.runMetersRequired")}
                     </p>
                   )}
@@ -2321,15 +2727,13 @@ export default function Checkout() {
               {/* Admin-only: override catalogue prices at sale time */}
               {isAdmin && (
                 <div className="row">
-                  <div className="field grow" style={{ margin: 0 }}>
-                    <label>{t("checkout.matPriceLabel")}</label>
+                  <Field className="grow" style={{ margin: 0 }} label={t("checkout.matPriceLabel")}>
                     <input type="number" step="any" value={cut.matPrice ?? ""} onChange={(e) => setCut({ ...cut, matPrice: e.target.value, matPriceEdited: true })} />
-                  </div>
+                  </Field>
                   {cutWorkOn && (
-                    <div className="field grow" style={{ margin: 0 }}>
-                      <label>{t("checkout.cutRateLabel")}</label>
+                    <Field className="grow" style={{ margin: 0 }} label={t("checkout.cutRateLabel")}>
                       <input type="number" step="any" value={cut.cutRate ?? ""} onChange={(e) => setCut({ ...cut, cutRate: e.target.value, cutRateEdited: true })} />
-                    </div>
+                    </Field>
                   )}
                 </div>
               )}
@@ -2352,7 +2756,7 @@ export default function Checkout() {
               )}
               <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
                 <strong>{t("common.total")}</strong>
-                <strong style={{ fontSize: 18 }}>{cutRollTotal + cutRollWork} сом</strong>
+                <strong style={{ fontSize: 18 }}>{formatMoney(cutRollTotal + cutRollWork)}</strong>
               </div>
               {/* Сколько ушло в отход — на виду в момент продажи, а не потом
                   в отчёте: здесь ещё можно передумать и отрезать иначе. */}
@@ -2423,13 +2827,13 @@ export default function Checkout() {
                     <div className="crow"><span className="k">{t("checkout.rateWork")}</span><span>{cutWorkRate} × {cutRunM} = {ceilSom(cutWork)}</span></div>
                   )}
                   {cutRateMissing && (
-                    <p style={{ color: "var(--danger)", fontSize: 12, margin: "0 0 6px" }}>
+                    <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "0 0 6px" }}>
                       {t(isAdmin ? "checkout.rateMissingAdmin" : "checkout.rateMissing")}
                     </p>
                   )}
                   <div className="crow"><span className="k">{t("checkout.rateMaterial")}</span><span>{cutMatSqm} × {cutArea} = {ceilSom(cutMaterialSum)}</span></div>
                   {cutPriceMissing && (
-                    <p style={{ color: "var(--danger)", fontSize: 12, margin: "0 0 6px" }}>
+                    <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "0 0 6px" }}>
                       {t(isAdmin ? "checkout.priceMissingAdmin" : "checkout.priceMissing")}
                     </p>
                   )}
@@ -2437,7 +2841,7 @@ export default function Checkout() {
               )}
               <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
                 <strong>{t("common.total")}</strong>
-                <strong style={{ fontSize: 18 }}>{cutTotal.toFixed(0)} сом</strong>
+                <strong style={{ fontSize: 18 }}>{formatMoney(cutTotal)}</strong>
               </div>
               {/* Нехватка остатка была видна только при отправке заказа: кассир
                   собирал весь чек, выбирал клиента и способ оплаты — и лишь
@@ -2445,7 +2849,7 @@ export default function Checkout() {
                   же строке, где посчитали площадь. */}
               {cutShort > 0 && (
                 <div className="crow" style={{ paddingTop: 6 }}>
-                  <span style={{ color: "var(--danger)", fontSize: 13 }}>
+                  <span style={{ color: "var(--danger-ink)", fontSize: 13 }}>
                     {t("checkout.notEnough", {
                       name: cutMat?.name,
                       need: cutNeed,
@@ -2457,11 +2861,54 @@ export default function Checkout() {
               )}
             </div>
           )}
+          {addBlock && (
+            <p className="disabled-reason" id="cut-add-reason" role="status">
+              {t(`checkout.block.${addBlock}`)}
+            </p>
+          )}
         </Modal>
       )}
 
       {receipt && (
-        <Modal title={`${t("checkout.receipt")} №${receipt.order_number}`} onClose={() => setReceipt(null)}>
+        <Modal
+          title={`${t("checkout.receipt")} №${receipt.order_number}`}
+          onClose={() => setReceipt(null)}
+          footer={
+            <>
+              {/* Печать и выдача сдачи — здесь же, сразу после оформления:
+                  раньше ради них надо было идти в «Чеки» и искать только что
+                  созданный чек. Сдачу выдаёт админ (так и в «Чеках»). */}
+              <button type="button" className="secondary" onClick={() => setPrinting(receipt)}>
+                <Icon name="printer" size={16} /> {t("print.print")}
+              </button>
+              {Number(receipt.change_due) > 0 && isAdmin && (
+                <button type="button" className="secondary" onClick={() => setGivingChange(receipt)}>
+                  {t("receipts.changeGive")}
+                </button>
+              )}
+              <button type="button" onClick={() => setReceipt(null)}>{t("common.close")}</button>
+            </>
+          }
+        >
+          {/* Кому оформлен чек. Кассир набирал имя и телефон на ходу, и по
+              окну чека должен видеть, на какую карточку лёг заказ. */}
+          {receiptClient && (
+            <div className="crow">
+              <span className="k">{t("checkout.client")}</span>
+              <span>
+                <strong>{receiptClient.name || "—"}</strong>
+                {receiptClient.phone && <span className="muted"> · {receiptClient.phone}</span>}
+              </span>
+            </div>
+          )}
+          {/* Телефон уже записан за другим человеком: заказ ушёл на ЕГО карточку,
+              а введённое имя сервер не принял. Об этом нельзя молчать — иначе
+              долг и история лягут не на того, кого имел в виду кассир. */}
+          {receipt.client_name_mismatch && (
+            <div className="callout" role="alert">
+              <strong>{t("checkout.nameMismatch", { name: receipt.client_name || receiptClient?.name || "" })}</strong>
+            </div>
+          )}
           {/* Строки — с единицей и ценой, суммы — целыми сомами, как в печатной
               форме и в списке чеков; «Акрил 3мм × 0.554» и «831.00 сом» ничего
               не объясняли. Ниже — что приняли, сдача и долг: это то, что
@@ -2475,9 +2922,22 @@ export default function Checkout() {
                   {" "}· {trimQty(it.price_per_item)} {t("checkout.perPieceShort", { unit: it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "" })}
                 </span>
               </span>
-              <span>{somFmt(it.line_total)}</span>
+              <span>
+                {lineRuled(it) && <s className="muted">{somFmt(it.catalog_total)}</s>}{" "}
+                {somFmt(it.line_total)}
+              </span>
             </div>
           ))}
+          {/* Правила прайса: сколько было бы по каталогу и что сработало. */}
+          {receiptRuled(receipt) && (
+            <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 8 }}>
+              <span className="k">
+                {t("checkout.catalogTotal")}
+                <span className="muted" style={{ display: "block", fontSize: 12 }}>{rulesLabel(receipt, t)}</span>
+              </span>
+              <s className="muted">{somFmt(receipt.catalog_total)}</s>
+            </div>
+          )}
           <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 8 }}>
             <strong>{t("common.total")}</strong><strong>{somFmt(receipt.total_price)}</strong>
           </div>
@@ -2501,20 +2961,20 @@ export default function Checkout() {
             </div>
           )}
           {receipt.debt_error && (
-            <p className="muted" style={{ fontSize: 12, color: "var(--danger)" }}>
+            <p className="muted" style={{ fontSize: 12, color: "var(--danger-ink)" }}>
               {receipt.debt_error}
             </p>
           )}
           {Number(receipt.change_due) > 0 && (
             <div className="crow">
               <span className="k">{t("checkout.change")}</span>
-              <strong style={{ color: "var(--accent-strong)" }}>{somFmt(receipt.change_due)}</strong>
+              <strong style={{ color: "var(--accent-ink)" }}>{somFmt(receipt.change_due)}</strong>
             </div>
           )}
           {Number(receipt.debt) > 0 && (
             <div className="crow">
               <span className="k">{t("receipts.debt")}</span>
-              <strong style={{ color: "var(--danger)" }}>{somFmt(receipt.debt)}</strong>
+              <strong style={{ color: "var(--danger-ink)" }}>{somFmt(receipt.debt)}</strong>
             </div>
           )}
           <div className="crow"><span className="k">{t("receipts.status")}</span><PaymentBadge status={receipt.payment_status} /></div>
@@ -2530,6 +2990,24 @@ export default function Checkout() {
             </>
           )}
         </Modal>
+      )}
+
+      {printing && <PrintDocs receipt={printing} onClose={() => setPrinting(null)} />}
+
+      {givingChange && (
+        <GiveChangeModal
+          receipt={givingChange}
+          onClose={() => setGivingChange(null)}
+          onGiven={() => {
+            const id = givingChange.id;
+            setGivingChange(null);
+            // Окно чека показывает остаток сдачи — перечитываем.
+            api
+              .get(`/sales/receipts/${id}/`)
+              .then((r) => setReceipt((prev) => (prev && prev.id === id ? { ...prev, ...r.data } : prev)))
+              .catch(() => {});
+          }}
+        />
       )}
     </>
   );

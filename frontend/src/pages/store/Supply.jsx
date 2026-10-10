@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import api from "../../api/api.js";
 import StockJournal from "../../components/StockJournal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
+import Tabs from "../../components/Tabs.jsx";
 
 // Module-level so they keep a stable identity across renders — defining these
 // inside the component remounts the inputs on every keystroke (focus loss).
@@ -141,13 +142,14 @@ export default function Supply({ embedded = false }) {
   return (
     <>
       {!embedded && <h1>{t("supply.title")}</h1>}
-      <div className="tabs">
-        {TABS.map(([key, label]) => (
-          <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
-            {label}
-          </button>
-        ))}
-      </div>
+      <Tabs
+        id="supply"
+        panel={false}
+        label={t("supply.title")}
+        value={tab}
+        onChange={setTab}
+        tabs={TABS.map(([key, label]) => ({ key, label }))}
+      />
 
       {tab === "log" && <StockJournal />}
 

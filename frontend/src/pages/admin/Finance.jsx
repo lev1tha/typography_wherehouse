@@ -19,19 +19,19 @@ import MonthPicker from "../../components/MonthPicker.jsx";
 import PaySupplierModal from "../../components/PaySupplierModal.jsx";
 import SupplierDebtModal from "../../components/SupplierDebtModal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
+import { formatDate, formatMoney, formatNumber } from "../../utils/format.js";
+import Tabs from "../../components/Tabs.jsx";
+import Field from "../../components/Field.jsx";
 
 // «2026-08-31» → «31.08.2026»: в подписи плитки дата должна читаться так же,
 // как её пишет заказчик.
-const ru = (iso) => (iso ? iso.split("-").reverse().join(".") : "");
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const ru = (iso) => formatDate(iso);
+const som = (n) => formatMoney(n);
 // Дробные величины (кв.м, пог.м) — по языку интерфейса: в английской версии
 // «1,11 sq.m» с русской запятой читается как «сто одиннадцать».
 // Целые суммы этим не задеты: там разделителя дробей нет, а «сом» заказчик
 // сознательно оставил непереведённым.
-const q2 = (n) =>
-  Number(n || 0).toLocaleString(i18n.language === "en" ? "en-US" : "ru-RU", {
-    maximumFractionDigits: 2,
-  });
+const q2 = (n) => formatNumber(n, { max: 2 });
 
 // Границы выбранного месяца. month = null → весь период (без дат).
 function periodParams({ year, month }) {
@@ -45,7 +45,7 @@ function Stat({ label, value, color, sub, hint }) {
   return (
     <div className="stat">
       <div className="label">{label}{hint ? <Hint text={hint} /> : null}</div>
-      <div className="value" style={color ? { color: `var(--${color})` } : undefined}>
+      <div className="value" style={color ? { color: `var(--${color}-ink)` } : undefined}>
         {value}
       </div>
       {/* Вторая строка — объём работы под суммой: 12 000 сом это много мелких
@@ -179,7 +179,7 @@ export default function Finance() {
       .then((r) => {
         setLock(r.data);
         setLockDraft(r.data.closed_through || "");
-        toast(value ? t("period.closed", { date: new Date(value).toLocaleDateString("ru-RU") }) : t("period.opened"));
+        toast(value ? t("period.closed", { date: formatDate(value) }) : t("period.opened"));
       })
       .catch((e) => toast(e.response?.data?.detail || t("common.error"), "error"));
   }
@@ -313,7 +313,7 @@ export default function Finance() {
         padding: "8px 14px",
         margin: "0 0 6px",
         fontWeight: 700,
-        color: "var(--accent-strong)",
+        color: "var(--accent-ink)",
       }}
     >
       {label}
@@ -329,8 +329,8 @@ export default function Finance() {
         marginTop: 8,
       }}
     >
-      <strong style={{ color: "var(--accent-strong)" }}>{label}</strong>
-      <strong style={{ color: "var(--accent-strong)" }}>{som(value)}</strong>
+      <strong style={{ color: "var(--accent-ink)" }}>{label}</strong>
+      <strong style={{ color: "var(--accent-ink)" }}>{som(value)}</strong>
     </div>
   );
 
@@ -381,7 +381,7 @@ export default function Finance() {
     readOnly ? null : (
       <button
         className="ghost"
-        style={{ marginTop: 6, color: "var(--accent-strong)", fontWeight: 600 }}
+        style={{ marginTop: 6, color: "var(--accent-ink)", fontWeight: 600 }}
         onClick={() => setEditKind({ block })}
       >
         + {t("kinds.add")}
@@ -411,18 +411,20 @@ export default function Finance() {
         )}
       </div>
 
-      <div className="tabs" style={{ marginTop: 12, marginBottom: 12 }}>
-        {[
-          ["summary", t("statements.tabSummary")],
-          ["pnl", t("statements.tabPnl")],
-          ["cash", t("statements.tabCashFlow")],
-          ["bridge", t("statements.tabBridge")],
-        ].map(([key, label]) => (
-          <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
-            {label}
-          </button>
-        ))}
-      </div>
+      <Tabs
+        id="finance"
+        panel={false}
+        label={t("finance.title")}
+        style={{ marginTop: 12, marginBottom: 12 }}
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { key: "summary", label: t("statements.tabSummary") },
+          { key: "pnl", label: t("statements.tabPnl") },
+          { key: "cash", label: t("statements.tabCashFlow") },
+          { key: "bridge", label: t("statements.tabBridge") },
+        ]}
+      />
 
       {tab === "pnl" && <FinanceStatement kind="pnl" />}
       {tab === "cash" && <FinanceStatement kind="cash-flow" />}
@@ -550,7 +552,7 @@ export default function Finance() {
                   {t("finance.cogs")}
                   <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{t("finance.cogsRowHint")}</div>
                 </span>
-                <span style={{ color: "var(--danger)" }}>− {som(report.cogs)}</span>
+                <span style={{ color: "var(--danger-ink)" }}>− {som(report.cogs)}</span>
               </div>
               {/* Потери материала (брак, недостача) — в себестоимости, до
                   валовой прибыли (D-15): маржа материала без них врала бы. */}
@@ -560,12 +562,12 @@ export default function Finance() {
                     {t("ladder.losses")}
                     <Hint text={t("terms.losses")} />
                   </span>
-                  <span style={{ color: "var(--danger)" }}>− {som(report.losses.cost)}</span>
+                  <span style={{ color: "var(--danger-ink)" }}>− {som(report.losses.cost)}</span>
                 </div>
               )}
               <div className="crow mat-result">
                 <strong>{t("finance.grossProfit")}</strong>
-                <strong style={{ color: Number(report.gross_margin) >= 0 ? "var(--ok)" : "var(--danger)" }}>
+                <strong style={{ color: Number(report.gross_margin) >= 0 ? "var(--ok-ink)" : "var(--danger-ink)" }}>
                   {som(report.gross_margin)}
                 </strong>
               </div>
@@ -579,6 +581,32 @@ export default function Finance() {
                     {q2(report.offcuts.area)} {t("finance.sqmShort")}{" "}
                     <span className="muted">· {som(report.offcuts.cost)}</span>
                   </span>
+                </div>
+              )}
+              {/* Правила прайса за период (D-62): уже внутри выручки — это
+                  раскладка «откуда разница с каталогом», не отдельные деньги. */}
+              {["urgency", "minimum", "discount"].some((k) => Number(report.pricing_rules?.[k]?.amount) > 0) && (
+                <div className="pricing-rules-block">
+                  <div className="mat-sub">
+                    {t("finance.rulesTitle")}
+                    <Hint text={t("finance.rulesHint")} />
+                  </div>
+                  {["urgency", "minimum", "discount"].map((k) =>
+                    Number(report.pricing_rules[k].amount) > 0 ? (
+                      <div className="crow" key={k}>
+                        <span className="k">
+                          {t(`finance.rules_${k}`)}
+                          <span className="muted" style={{ fontSize: 12 }}>
+                            {" "}· {t("finance.rulesOrders", { n: report.pricing_rules[k].orders })}
+                          </span>
+                        </span>
+                        <span style={k === "discount" ? { color: "var(--danger-ink)" } : undefined}>
+                          {k === "discount" ? "− " : "+ "}
+                          {som(report.pricing_rules[k].amount)}
+                        </span>
+                      </div>
+                    ) : null
+                  )}
                 </div>
               )}
             </div>
@@ -598,7 +626,7 @@ export default function Finance() {
                 </div>
                 <div className="crow">
                   <span className="k">{t("finance.stockSoldAtCost")}</span>
-                  <span style={{ color: "var(--danger)" }}>− {som(report.stock.reconcile.cogs)}</span>
+                  <span style={{ color: "var(--danger-ink)" }}>− {som(report.stock.reconcile.cogs)}</span>
                 </div>
                 <div className="crow mat-result">
                   <strong>
@@ -646,7 +674,7 @@ export default function Finance() {
               </div>
             </span>
             <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <span style={Number(report.suppliers?.total || 0) > 0 ? { color: "var(--danger)" } : undefined}>
+              <span style={Number(report.suppliers?.total || 0) > 0 ? { color: "var(--danger-ink)" } : undefined}>
                 {som(report.suppliers?.total || 0)}
               </span>
               <Icon name="chevron-right" size={14} />
@@ -745,9 +773,9 @@ export default function Finance() {
         <h3>{t("period.title")}</h3>
         <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("period.hint")}</p>
         {lock.closed_through ? (
-          <p style={{ margin: "0 0 12px", color: "var(--accent-strong)", fontWeight: 600 }}>
+          <p style={{ margin: "0 0 12px", color: "var(--accent-ink)", fontWeight: 600 }}>
             <Icon name="lock" size={15} />{" "}
-            {t("period.closedThrough", { date: new Date(lock.closed_through).toLocaleDateString("ru-RU") })}
+            {t("period.closedThrough", { date: formatDate(lock.closed_through) })}
             {lock.updated_by_name ? <span className="muted" style={{ fontWeight: 400 }}> · {lock.updated_by_name}</span> : null}
           </p>
         ) : (
@@ -758,15 +786,14 @@ export default function Finance() {
             отклоняет, а кнопка обещала обратное. */}
         {!readOnly && (
           <div className="row" style={{ gap: 10, alignItems: "flex-end", margin: 0, flexWrap: "wrap" }}>
-            <div className="field" style={{ margin: 0, width: 190 }}>
-              <label>{t("period.closeThrough")}</label>
+            <Field style={{ margin: 0, width: 190 }} label={t("period.closeThrough")}>
               <input
                 type="date"
                 value={lockDraft}
                 max={new Date().toLocaleDateString("sv-SE")}
                 onChange={(e) => setLockDraft(e.target.value)}
               />
-            </div>
+            </Field>
             <button onClick={() => saveLock(lockDraft)} disabled={!lockDraft}>
               {t("period.close")}
             </button>
@@ -874,23 +901,21 @@ export default function Finance() {
       </div>
 
       <details className="card" style={{ marginTop: 16 }}>
-        <summary style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent-strong)" }}>
+        <summary style={{ cursor: "pointer", fontWeight: 600, color: "var(--accent-ink)" }}>
           {t("finance.materialReportTitle")}
         </summary>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end", marginTop: 12, gap: 10, flexWrap: "wrap" }}>
-          <div className="field" style={{ margin: 0 }}>
-            <label>{t("clients.filterDay")}</label>
+          <Field style={{ margin: 0 }} label={t("clients.filterDay")}>
             <input type="date" value={matDay} onChange={(e) => setMatDay(e.target.value)} />
-          </div>
-          <div className="field" style={{ margin: 0, minWidth: 220 }}>
-            <label>{t("finance.filterMaterial")}</label>
+          </Field>
+          <Field style={{ margin: 0, minWidth: 220 }} label={t("finance.filterMaterial")}>
             <select value={matFilter} onChange={(e) => setMatFilter(e.target.value)}>
               <option value="">{t("common.all")}</option>
               {matReport.map((r) => (
                 <option key={r.id} value={r.id}>{r.name}</option>
               ))}
             </select>
-          </div>
+          </Field>
           <button className="secondary" onClick={downloadCsv} disabled={!filteredMat.length}>
             {t("finance.downloadCsv")}
           </button>
@@ -911,7 +936,7 @@ export default function Finance() {
                 gap: 12,
               }}
             >
-              <strong style={{ color: "var(--accent-strong)" }}>{t("finance.totalRow")}</strong>
+              <strong style={{ color: "var(--accent-ink)" }}>{t("finance.totalRow")}</strong>
               <span>
                 <span className="muted">{t("finance.colOrders")}:</span> <strong>{matTotals.orders}</strong>
                 {" · "}
@@ -920,7 +945,7 @@ export default function Finance() {
                 <span className="muted">{t("finance.colMatSum")}:</span> <strong>{som(matTotals.material_revenue)}</strong>
                 {" · "}
                 <span className="muted">{t("finance.colCutSum")}:</span>{" "}
-                <strong style={{ color: "var(--accent-strong)" }}>{som(matTotals.cut_revenue)}</strong>
+                <strong style={{ color: "var(--accent-ink)" }}>{som(matTotals.cut_revenue)}</strong>
                 {" · "}
                 <span className="muted">{t("finance.colReceived")}:</span> <strong>{q2(matTotals.received)}</strong>
               </span>

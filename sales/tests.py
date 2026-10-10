@@ -43,13 +43,13 @@ class CheckoutClientAPITests(APITestCase):
         r = self.client.post(
             "/api/sales/receipts/checkout/",
             self._payload({
-                "type": "PHYSICAL", "full_name": "Новый", "phone": "+711200",
+                "type": "PHYSICAL", "full_name": "Новый", "phone": "+996555711200",
                 "referred_by": self.referrer.id,
             }),
             format="json",
         )
         self.assertEqual(r.status_code, 201, r.data)
-        created = Client.objects.get(phone="+711200")
+        created = Client.objects.get(phone="+996555711200")
         self.assertEqual(created.referred_by_id, self.referrer.id)
 
     def test_existing_phone_does_not_400(self):

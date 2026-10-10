@@ -5,6 +5,7 @@ import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import Field from "./Field.jsx";
 
 // Промер рулона рулеткой. Не «правка остатка»: остаток тут тоже меняется, но
 // вместе с ним записывается АКТ — сколько было по системе, сколько намерили и
@@ -66,8 +67,7 @@ export default function RollStocktakeModal({ roll, onClose, onDone }) {
         <span className="k">{t("stocktake.expected")}</span>
         <strong>{expected} {t("unit.METER")}</strong>
       </div>
-      <div className="field">
-        <label>{t("stocktake.counted")}</label>
+      <Field label={t("stocktake.counted")}>
         <input
           type="number"
           step="any"
@@ -75,24 +75,23 @@ export default function RollStocktakeModal({ roll, onClose, onDone }) {
           onChange={(e) => setCounted(e.target.value)}
           autoFocus
         />
-      </div>
+      </Field>
       {/* Расхождение показываем сразу, пока рулетка ещё в руках: цифру проще
           перепроверить здесь, чем спорить о ней через неделю. */}
       {diff !== null && diff !== 0 && (
-        <p style={{ color: diff < 0 ? "var(--danger)" : "var(--accent-strong)", margin: "-4px 0 10px" }}>
+        <p style={{ color: diff < 0 ? "var(--danger-ink)" : "var(--accent-ink)", margin: "-4px 0 10px" }}>
           {diff < 0
             ? t("stocktake.short", { n: Math.abs(diff) })
             : t("stocktake.surplus", { n: diff })}
         </p>
       )}
-      <div className="field">
-        <label>{t("stocktake.reason")}</label>
+      <Field label={t("stocktake.reason")}>
         <select value={reason} onChange={(e) => setReason(e.target.value)}>
           {REASONS.map((code) => (
             <option key={code} value={code}>{t(`stocktake.reason${code}`)}</option>
           ))}
         </select>
-      </div>
+      </Field>
       <div className="field">
         <label>{t("stocktake.note")}{reason === "OTHER" ? " *" : ""}</label>
         <input value={note} onChange={(e) => setNote(e.target.value)} />

@@ -129,6 +129,9 @@ def receive_lot(
         created_by=user,
         # Накладная, если приход пришёл документом, а не одиночной кнопкой.
         supply=supply,
+        # Партия — чтобы «Исправить приход» находил свою запись наверняка, а
+        # не по материалу и площади (две одинаковые поставки не различить).
+        roll=roll,
     )
     if received_at:
         entry.happened_at = received_at
@@ -207,8 +210,13 @@ def consume_area(
     receipt=None,
     happened_at=None,
     preferred_roll=None,
+    trace=None,
 ) -> Decimal:
     """Consume `area` кв.м from a roll-material, FIFO across rolls.
+
+    ``trace`` — список, в который дописывается `(партия, площадь, None)` по
+    каждой партии, из которой реально взяли. Строка чека запоминает по нему,
+    откуда ушёл материал, и возврат кладёт его обратно туда же.
 
     Returns the total cost of goods consumed. Raises InsufficientStock if there
     is not enough remaining area across all rolls.
@@ -243,7 +251,7 @@ def consume_area(
     rolls = list(
         Roll.objects.select_for_update()
         .filter(material=locked, remaining_area__gt=0)
-        .order_by("received_at")
+        .order_by("received_at", "pk")
     )
     if preferred_roll is not None:
         pk = getattr(preferred_roll, "pk", preferred_roll)
@@ -259,6 +267,8 @@ def consume_area(
         roll.save(update_fields=["remaining_area"])
         cogs += take * roll.cost_per_sqm
         remaining -= take
+        if trace is not None:
+            trace.append((roll.pk, take, None))
 
     # Партии кончились, а остаток по материалу ещё есть. Это НЕ поломка: остаток
     # правит инвентаризация, партий при этом не создавая, и материал, лежавший на
@@ -320,8 +330,12 @@ def consume_metres(
     receipt=None,
     happened_at=None,
     preferred_roll=None,
+    trace=None,
 ) -> Decimal:
     """Списать `metres` погонных метров, идя по рулонам FIFO.
+
+    ``trace`` — как у `consume_area`: `(рулон, площадь, метры)` по каждому
+    рулону, с которого резали.
 
     `preferred_roll` — рулон, с которого мастер решил начать. Он встаёт первым,
     остальные идут за ним обычным порядком: если в выбранном не хватило, режем
@@ -344,7 +358,7 @@ def consume_metres(
     rolls = list(
         Roll.objects.select_for_update()
         .filter(material=locked, remaining_area__gt=0)
-        .order_by("received_at")
+        .order_by("received_at", "pk")
     )
     if preferred_roll is not None:
         # Выбранный рулон встаёт первым, остальные — обычным порядком.
@@ -376,6 +390,8 @@ def consume_metres(
         cogs += take_area * roll.cost_per_sqm
         area_taken += take_area
         remaining -= take_m
+        if trace is not None:
+            trace.append((roll.pk, take_area, take_m))
 
     locked.quantity -= area_taken
     locked.save(update_fields=["quantity", "updated_at"])
@@ -415,19 +431,24 @@ def restore_metres(
     receipt=None,
     happened_at=None,
     preferred_roll=None,
+    lots=None,
 ) -> None:
     """Вернуть `metres` погонных метров — зеркало `consume_metres`.
 
     Доливаем рулоны от старых к новым, каждый не выше его исходной площади, и
     переводим метры в площадь ЕГО шириной: рулон должен вернуться ровно в то
     состояние, из которого его резали.
+
+    ``lots`` — `(рулон, площадь, метры)`, записанные при продаже: если строку
+    резали с нескольких рулонов, каждому возвращается ровно его доля. Без них
+    (старые строки) — прежнее поведение.
     """
     locked = Material.objects.select_for_update().get(pk=material.pk)
     add = Decimal(metres)
     if add <= 0:
         return
     rolls = list(
-        Roll.objects.select_for_update().filter(material=locked).order_by("received_at")
+        Roll.objects.select_for_update().filter(material=locked).order_by("received_at", "pk")
     )
     if preferred_roll is not None:
         # Выбранный рулон встаёт первым, остальные — обычным порядком.
@@ -437,6 +458,23 @@ def restore_metres(
             rolls = [chosen] + [r for r in rolls if r.pk != chosen.pk]
     remaining = add
     area_added = Decimal("0")
+    by_pk = {r.pk: r for r in rolls}
+    for pk, part_area, part_metres in lots or ():
+        roll = by_pk.get(pk)
+        if remaining <= 0:
+            break
+        if roll is None or not roll.width:
+            continue
+        headroom_area = roll.initial_area - roll.remaining_area
+        if headroom_area <= 0:
+            continue
+        want_m = part_metres if part_metres is not None else part_area / roll.width
+        give_m = min(headroom_area / roll.width, want_m, remaining)
+        give_area = give_m * roll.width
+        roll.remaining_area += give_area
+        roll.save(update_fields=["remaining_area"])
+        area_added += give_area
+        remaining -= give_m
     for roll in rolls:
         if remaining <= 0:
             break
@@ -626,8 +664,15 @@ def restore_area(
     receipt=None,
     happened_at=None,
     preferred_roll=None,
+    lots=None,
 ) -> None:
     """Return `area` кв.м back to stock (refund).
+
+    ``lots`` — `(партия, площадь, …)`, записанные при продаже этой строки:
+    каждая партия получает обратно ровно то, что с неё взяли. Продажа из двух
+    партий (1000 + 3000) раньше после возврата целиком ложилась в старейшую —
+    остаток дорогой партии пропадал, а следующие продажи шли по дешёвой цене.
+    Без записей (строки, проданные до учёта партий) — прежнее поведение.
 
     Mirrors the FIFO drawdown: refills lots oldest-first, each only up to its
     original capacity (initial_area), so a refund spanning several lots restores
@@ -645,7 +690,7 @@ def restore_area(
     if add <= 0:
         return
     rolls = list(
-        Roll.objects.select_for_update().filter(material=locked).order_by("received_at")
+        Roll.objects.select_for_update().filter(material=locked).order_by("received_at", "pk")
     )
     if preferred_roll is not None:
         pk = getattr(preferred_roll, "pk", preferred_roll)
@@ -653,6 +698,18 @@ def restore_area(
         if chosen is not None:
             rolls = [chosen] + [r for r in rolls if r.pk != chosen.pk]
     remaining = add
+    by_pk = {r.pk: r for r in rolls}
+    for pk, part_area, _metres in lots or ():
+        roll = by_pk.get(pk)
+        if roll is None or remaining <= 0:
+            continue
+        headroom = roll.initial_area - roll.remaining_area
+        give = min(headroom, part_area, remaining)
+        if give <= 0:
+            continue
+        roll.remaining_area += give
+        roll.save(update_fields=["remaining_area"])
+        remaining -= give
     for roll in rolls:
         if remaining <= 0:
             break

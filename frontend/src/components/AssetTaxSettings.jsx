@@ -5,8 +5,10 @@ import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
 import Icon from "./Icon.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { formatMoney, formatNumber } from "../utils/format.js";
+import Field from "./Field.jsx";
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const som = (n) => formatMoney(n);
 const monthLabel = (ym) => {
   if (!ym) return "";
   const [y, m] = ym.split("-");
@@ -120,7 +122,7 @@ export default function AssetTaxSettings({ settings, readOnly, onSettings, onCha
               {rate.note && <div className="muted" style={{ fontSize: 12 }}>{rate.note}</div>}
             </span>
             <span className="row" style={{ gap: 4, margin: 0, alignItems: "center" }}>
-              <strong>{Number(rate.rate).toLocaleString("ru-RU")} %</strong>
+              <strong>{formatNumber(rate.rate)} %</strong>
               {!readOnly && (
                 <button className="ghost" onClick={() => removeRate(rate)} aria-label={t("common.delete")}>
                   <Icon name="trash" size={16} />
@@ -132,16 +134,14 @@ export default function AssetTaxSettings({ settings, readOnly, onSettings, onCha
       )}
       {!readOnly && (
         <div className="row" style={{ gap: 10, alignItems: "flex-end", marginTop: 10, flexWrap: "wrap" }}>
-          <div className="field" style={{ margin: 0, width: 170 }}>
-            <label>{t("taxRates.validFrom")}</label>
+          <Field style={{ margin: 0, width: 170 }} label={t("taxRates.validFrom")}>
             <input
               type="month"
               value={draft.valid_from}
               onChange={(e) => setDraft({ ...draft, valid_from: e.target.value })}
             />
-          </div>
-          <div className="field" style={{ margin: 0, width: 110 }}>
-            <label>{t("taxRates.rate")}</label>
+          </Field>
+          <Field style={{ margin: 0, width: 110 }} label={t("taxRates.rate")}>
             <input
               type="number"
               step="0.01"
@@ -150,7 +150,7 @@ export default function AssetTaxSettings({ settings, readOnly, onSettings, onCha
               value={draft.rate}
               onChange={(e) => setDraft({ ...draft, rate: e.target.value })}
             />
-          </div>
+          </Field>
           <button onClick={addRate}>{t("taxRates.add")}</button>
         </div>
       )}

@@ -1,10 +1,15 @@
 from decimal import Decimal
 
-from django.db.models import Case, DecimalField, F, Q, Sum, Value, When
+from django.db import transaction
+from django.db.models import (
+    Case, DecimalField, Exists, F, IntegerField, OuterRef, Q, Sum, Value, When,
+)
 from django.db.models.functions import Coalesce
 from django.utils import timezone
-from rest_framework import status, viewsets
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import serializers, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -19,8 +24,11 @@ from integrations.telegram import notify_customer, send_customer_receipt
 from warehouse.models import InventoryLog
 from warehouse.rolls import InsufficientStock
 
+from . import idempotency
 from .models import Receipt, TransactionItem
+from .reporting import day_after, day_start
 from .sale_service import (
+    DeleteRejected,
     ItemEditRejected,
     OrderClosed,
     PaymentRejected,
@@ -30,11 +38,13 @@ from .sale_service import (
     day_to_moment,
     delete_receipt,
     give_change,
+    lock_receipt,
     parse_amount,
     parse_paid_on,
     receipt_summary,
     refund_receipt,
     return_applied_change,
+    strip_cost,
     update_receipt_items,
 )
 from .serializers import (
@@ -141,6 +151,41 @@ def _price_override_forbidden(items, user):
     return None
 
 
+def _order_pricing(data, client, user):
+    """Правила прайса нового заказа: (срочно, наценка %, скидка %) или отказ.
+
+    Отказ — пара (текст, HTTP-код). Скидка не прислана — подставляется
+    скидка из карточки клиента. Свою скидку (другую, чем в карточке, в том
+    числе снять её) задаёт только админ: складовщик применяет настроенную —
+    как и ручную цену правит только админ (`_price_override_forbidden`).
+    Срочность ставит любой, но только когда владелец задал наценку: при 0
+    переключатель в кассе закрыт, и молча оформить «срочно за 0 %» значило бы
+    обмануть того, кто его нажал.
+    """
+    from services.models import PricingSettings
+
+    urgent = bool(data.get("is_urgent"))
+    urgency = Decimal("0")
+    if urgent:
+        urgency = PricingSettings.load().urgency_percent
+        if urgency <= 0:
+            return None, (
+                "Наценка за срочность не задана — задайте процент в «Ценах и "
+                "услугах» или оформите заказ без «Срочно».",
+                status.HTTP_400_BAD_REQUEST,
+            )
+    configured = client.discount_percent if client is not None else Decimal("0")
+    asked = data.get("discount_percent")
+    discount = configured if asked is None else asked
+    if discount != configured and not user.is_admin_role:
+        return None, (
+            "Скидку на заказ задаёт только администратор. Складовщик применяет "
+            "скидку из карточки клиента.",
+            status.HTTP_403_FORBIDDEN,
+        )
+    return (urgent, urgency, discount), None
+
+
 def _rate_open_to_staff(item) -> bool:
     """Ставку этой строки складовщик вписывает сам (2026-09-04, решение
     владельца): резка МАТЕРИАЛА КЛИЕНТА — каталожной ставки у чужого листа
@@ -167,6 +212,62 @@ def _check_backdate(day):
     return None
 
 
+def _normalize_query(raw: str) -> str:
+    """Запрос поиска без «№», «#» и пробелов по краям: «№100» = «100»."""
+    return (raw or "").replace("№", " ").replace("#", " ").strip()
+
+
+def _search_number(raw: str):
+    """Число, если запрос — только цифры (после «№»/«#»/пробелов), иначе None."""
+    query = _normalize_query(raw).replace(" ", "")
+    return query if query.isdigit() else None
+
+
+# Столько цифр и меньше — это номер чека, а не кусок телефона: телефон короче
+# четырёх цифр никто не набирает, зато «5» раньше находило 242 заказа из 280
+# (любой номер, телефон или название с пятёркой внутри).
+SHORT_NUMBER_DIGITS = 3
+
+
+def _same_name(a: str, b: str) -> bool:
+    fold = lambda x: " ".join((x or "").casefold().split())  # noqa: E731
+    return fold(a) == fold(b)
+
+
+def _name_differs(client, client_data) -> bool:
+    """Введённое в кассе имя не совпадает с именем найденного по телефону клиента.
+
+    Сравниваем без учёта регистра и лишних пробелов, и с любым из имён карточки
+    (ФИО, компания, отображаемое). Имя не вводили — расхождения нет.
+    """
+    typed = (client_data.get("full_name") or client_data.get("company_name") or "").strip()
+    if not typed:
+        return False
+    known = (client.full_name, client.company_name, client.display_name)
+    return not any(name and _same_name(typed, name) for name in known)
+
+
+class ReceiptSearchFilter(SearchFilter):
+    """Поиск чеков: цифры — это номер заказа, а не подстрока чего угодно.
+
+    - «№100», «#100», « 100 » — то же, что «100»;
+    - до трёх цифр — ТОЧНЫЙ номер чека;
+    - от четырёх цифр — точный номер ИЛИ вхождение в телефон клиента;
+    - всё остальное (слова) — как раньше: название, клиент, компания, телефон.
+    """
+
+    def filter_queryset(self, request, queryset, view):
+        raw = request.query_params.get(self.search_param, "")
+        digits = _search_number(raw)
+        if digits is None:
+            return super().filter_queryset(request, queryset, view)
+        number = int(digits)
+        exact = Q(order_number=number) if number < 2**31 else Q(pk__in=[])
+        if len(digits) <= SHORT_NUMBER_DIGITS:
+            return queryset.filter(exact)
+        return queryset.filter(exact | Q(client__phone__icontains=digits))
+
+
 class ReceiptViewSet(viewsets.ModelViewSet):
     """Sales / receipts. Storekeepers create sales and issue refunds; admins
     see everything with filtering by date, cashier, payment method and status.
@@ -178,13 +279,14 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     """
 
     queryset = Receipt.objects.select_related("client", "cashier").prefetch_related(
-        "items__material", "items__service", "payments"
+        "items__material", "items__service", "items__roll", "payments"
     )
     serializer_class = ReceiptSerializer
     # Бухгалтер чеки видит (с себестоимостью и маржой), но не оформляет: он
     # проверяющий, а не участник продажи.
     permission_classes = [IsAuthenticated, IsNotAccountant]
     filterset_fields = ["payment_method", "payment_status", "status", "cashier", "client"]
+    filter_backends = [DjangoFilterBackend, ReceiptSearchFilter, OrderingFilter]
     search_fields = ["order_number", "title", "client__phone", "client__full_name", "client__company_name"]
     # По умолчанию: у кого долг выше — тот вверху, затем по дате (новые выше).
     # Долг — вычисляемое поле, поэтому аннотируем `_debt` в get_queryset.
@@ -199,10 +301,12 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         # не по дню, когда его завели.
         d_from = _parse_date(self.request.query_params.get("date_from"))
         d_to = _parse_date(self.request.query_params.get("date_to"))
+        # Диапазон по границам местных суток, а не `created_at__date`: так
+        # работает индекс, а набор чеков тот же.
         if d_from:
-            qs = qs.filter(created_at__date__gte=d_from)
+            qs = qs.filter(created_at__gte=day_start(d_from))
         if d_to:
-            qs = qs.filter(created_at__date__lte=d_to)
+            qs = qs.filter(created_at__lt=day_after(d_to))
         # ?has_change=1 — только заказы, по которым цех не вернул сдачу. Это
         # рабочий список кассира: «кому мы ещё должны отдать».
         if self.request.query_params.get("has_change") == "1":
@@ -219,6 +323,13 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         # Долг = остаток (сумма − оплачено − возвраты) для открытых чеков, иначе 0.
         # Совпадает с логикой свойства Receipt.debt; используется для сортировки.
         return qs.annotate(
+            # Признак «есть услуга» — одним запросом на страницу, а не
+            # по запросу на каждый чек (`Receipt.has_service`).
+            _has_service=Exists(
+                TransactionItem.objects.filter(
+                    receipt=OuterRef("pk"), type=TransactionItem.Type.SERVICE
+                )
+            ),
             _debt=Case(
                 When(
                     Q(payment_status__in=Receipt.OWING_STATUSES)
@@ -231,6 +342,22 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 output_field=DecimalField(max_digits=14, decimal_places=2),
             )
         )
+
+    def filter_queryset(self, queryset):
+        qs = super().filter_queryset(queryset)
+        # Поиск по номеру: чек с точным совпадением — первым, если порядок не
+        # задан явно (?ordering=...). Иначе при «1234» точный №1234 тонет среди
+        # заказов с этим числом в телефоне.
+        digits = _search_number(self.request.query_params.get("search", ""))
+        if digits and int(digits) < 2**31 and "ordering" not in self.request.query_params:
+            qs = qs.annotate(
+                _exact=Case(
+                    When(order_number=int(digits), then=Value(0)),
+                    default=Value(1),
+                    output_field=IntegerField(),
+                )
+            ).order_by("_exact", *qs.query.order_by)
+        return qs
 
     @action(detail=False, methods=["get"])
     def stats(self, request):
@@ -266,7 +393,9 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 debt += owed
         # Сдача — долг цеха ПЕРЕД клиентом, зеркальный обычному долгу, поэтому
         # стоит рядом с ним отдельной плиткой, а не прячется внутри чеков.
-        change = active.aggregate(
+        # Возвращённые целиком заказы тоже считаем: деньги по ним лежат в
+        # кассе, а зачёт сдачи в новый заказ их видит (`client_change_available`).
+        change = qs.aggregate(
             v=Coalesce(Sum("change_due"), Decimal("0"), output_field=DecimalField())
         )["v"]
         return Response(
@@ -447,12 +576,15 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         receipt = self.get_object()
         ensure_open(timezone.localtime(receipt.created_at), "Удалить заказ закрытого периода")
         summary = receipt_summary(receipt)
-        delete_receipt(receipt, user=request.user)
+        try:
+            delete_receipt(receipt, user=request.user)
+        except DeleteRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         AuditLog.record(request.user, f"Удалён чек {summary}")
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def _resolve_inline_client(self, client_data):
-        """Resolve the inline `client` payload to a Client.
+        """Resolve the inline `client` payload to `(Client, name_mismatch)`.
 
         The frontend may submit a client dict even when the phone already
         belongs to an existing client (the cashier typed the phone without
@@ -465,24 +597,61 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         точное написание, и `0555 111 222` заводил второго клиента поверх
         `+996555111222`. Один человек превращался в двух, а его заказы и долг
         расходились по двум карточкам.
+
+        Реферера проверяем той же проверкой, что и в карточке клиента
+        (`ClientSerializer.validate_referred_by`): через кассу нельзя замкнуть
+        кольцо «А привёл Б, Б привёл А».
+
+        Телефон совпал, а введённое имя — другое (после выравнивания регистра и
+        пробелов): заказ всё равно уходит на найденного клиента, но кассир
+        должен увидеть, что это, возможно, не тот человек, — второй элемент
+        результата.
         """
         phone = (client_data.get("phone") or "").strip()
         referred_by_id = client_data.get("referred_by")
         existing = find_client_by_phone(phone) if phone else None
         if existing:
-            if (
-                referred_by_id
-                and existing.referred_by_id is None
-                and int(referred_by_id) != existing.id
-                and Client.objects.filter(pk=referred_by_id).exists()
-            ):
-                existing.referred_by_id = referred_by_id
-                existing.save(update_fields=["referred_by"])
-            return existing
+            if referred_by_id and existing.referred_by_id is None:
+                try:
+                    referrer = Client.objects.filter(pk=int(referred_by_id)).first()
+                except (TypeError, ValueError):
+                    referrer = None
+                if referrer is not None and referrer.pk != existing.id:
+                    try:
+                        ClientSerializer(
+                            existing, context={"request": self.request}
+                        ).validate_referred_by(referrer)
+                    except serializers.ValidationError as exc:
+                        raise serializers.ValidationError(
+                            {"client": {"referred_by": exc.detail}}
+                        )
+                    existing.referred_by_id = referrer.pk
+                    existing.save(update_fields=["referred_by"])
+            return existing, _name_differs(existing, client_data)
 
-        client_serializer = ClientSerializer(data=client_data)
+        client_serializer = ClientSerializer(
+            data=client_data, context={"request": self.request}
+        )
         client_serializer.is_valid(raise_exception=True)
-        return client_serializer.save()
+        return client_serializer.save(), False
+
+    def _replay_response(self, record, *, checkout=True):
+        """Повтор запроса с уже занятым ключом: отдаём результат первого раза."""
+        if record.receipt_id is None:
+            return Response(
+                {"detail": "Запрос с этим ключом уже выполнялся, но заказ с тех пор "
+                           "удалён. Повторите операцию с новым ключом."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        fresh = self.get_queryset().get(pk=record.receipt_id)
+        payload = dict(ReceiptSerializer(fresh, context={"request": self.request}).data)
+        if checkout:
+            payload["warnings"] = []
+            payload["client_name_mismatch"] = False
+        payload["idempotent_replay"] = True
+        response = Response(payload, status=record.response_status)
+        response["Idempotent-Replay"] = "true"
+        return response
 
     @action(detail=False, methods=["post"], url_path="checkout")
     def checkout(self, request):
@@ -495,9 +664,20 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         if forbidden:
             return Response({"detail": forbidden}, status=status.HTTP_403_FORBIDDEN)
 
+        try:
+            idem_key = idempotency.key_from(request)
+        except idempotency.InvalidKey as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
         client = data.get("client_id")
+        name_mismatch = False
         if client is None and data.get("client"):
-            client = self._resolve_inline_client(data["client"])
+            client, name_mismatch = self._resolve_inline_client(data["client"])
+
+        pricing, refused = _order_pricing(data, client, request.user)
+        if refused:
+            return Response({"detail": refused[0]}, status=refused[1])
+        is_urgent, urgency_percent, discount_percent = pricing
 
         # Заказ задним числом оформляет только админ: дата заказа — опорная для
         # выручки, прибыли по дням и складского листа, то есть правит деньги уже
@@ -542,18 +722,35 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             )
 
         try:
-            receipt = create_sale(
-                client=client,
-                cashier=request.user,
-                payment_method=data["payment_method"],
-                items_data=data["items"],
-                amount_paid=data.get("amount_paid"),
-                pay_full=bool(data.get("pay_full")),
-                use_change=bool(data.get("use_change")),
-                title=data.get("title", ""),
-                created_at=day_to_moment(order_date),
-                pay_debt_ids=debt_ids,
-            )
+            # Ключ повтора занимается в той же транзакции, что и продажа: упала
+            # продажа — откатился и ключ, повтор пройдёт как первый.
+            with transaction.atomic():
+                record = None
+                if idem_key:
+                    record, replay = idempotency.claim(
+                        request.user, "checkout", idem_key,
+                        response_status=status.HTTP_201_CREATED,
+                    )
+                    if replay:
+                        return self._replay_response(record)
+                receipt = create_sale(
+                    client=client,
+                    cashier=request.user,
+                    payment_method=data["payment_method"],
+                    items_data=data["items"],
+                    amount_paid=data.get("amount_paid"),
+                    pay_full=bool(data.get("pay_full")),
+                    use_change=bool(data.get("use_change")),
+                    title=data.get("title", ""),
+                    created_at=day_to_moment(order_date),
+                    pay_debt_ids=debt_ids,
+                    is_urgent=is_urgent,
+                    urgency_percent=urgency_percent,
+                    discount_percent=discount_percent,
+                )
+                if record is not None:
+                    record.receipt = receipt
+                    record.save(update_fields=["receipt"])
         except InsufficientStock as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -572,6 +769,11 @@ class ReceiptViewSet(viewsets.ModelViewSet):
 
         AuditLog.record(request.user, f"Оформлен чек {receipt.order_number} на {receipt.total_price} сом")
         payload = ReceiptSerializer(receipt, context={"request": request}).data
+        # Предупреждения оформления (сейчас одно: «себестоимость неизвестна») —
+        # продажу они не блокируют, но кассир и владелец должны их видеть.
+        payload["warnings"] = strip_cost(getattr(receipt, "cost_warnings", []), request.user)
+        # Телефон нашёл существующего клиента, а имя в кассе набрали другое.
+        payload["client_name_mismatch"] = name_mismatch
         # Погашение долга — не часть чека, но кассир должен увидеть, что с ним
         # стало: сколько ушло на прошлые заказы и не отказал ли сервер.
         if debt_ids:
@@ -628,14 +830,30 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         ensure_open(paid_on or timezone.localdate(), "Принять оплату этой датой")
         try:
-            amount = apply_payment(
-                receipt,
-                parse_amount(request.data.get("amount")),
-                user=request.user,
-                paid_on=paid_on,
-                method=request.data.get("method") or None,
-                keep_change=True,
-            )
+            idem_key = idempotency.key_from(request)
+        except idempotency.InvalidKey as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                record = None
+                if idem_key:
+                    record, replay = idempotency.claim(
+                        request.user, f"pay:{receipt.pk}", idem_key,
+                        response_status=status.HTTP_200_OK,
+                    )
+                    if replay:
+                        return self._replay_response(record, checkout=False)
+                amount = apply_payment(
+                    receipt,
+                    parse_amount(request.data.get("amount")),
+                    user=request.user,
+                    paid_on=paid_on,
+                    method=request.data.get("method") or None,
+                    keep_change=True,
+                )
+                if record is not None:
+                    record.receipt = receipt
+                    record.save(update_fields=["receipt"])
         except PaymentRejected as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -662,6 +880,15 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         """
         receipt = self.get_object()
         ensure_open(timezone.localtime(receipt.created_at), "Откатить оплату закрытого периода")
+        # Одна транзакция с замком на чек: раньше откат шёл по частям без
+        # `atomic`, и два одновременных запроса писали по встречной записи в
+        # кассу (UNPAY дважды), а упавший посередине оставлял чек наполовину
+        # откатанным.
+        with transaction.atomic():
+            lock_receipt(receipt)
+            return self._unpay_locked(request, receipt)
+
+    def _unpay_locked(self, request, receipt):
         if receipt.status == Receipt.Status.CANCELLED:
             return Response({"detail": "Чек отменён."}, status=status.HTTP_400_BAD_REQUEST)
         if receipt.payment_status in (
@@ -745,7 +972,9 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             f"Правка состава чека {receipt.order_number}: было {before} → стало "
             f"{receipt_summary(receipt)}",
         )
-        return self._fresh_response(receipt)
+        response = self._fresh_response(receipt)
+        response.data["warnings"] = strip_cost(getattr(receipt, "cost_warnings", []), request.user)
+        return response
 
     @action(detail=True, methods=["post"], url_path="give-change", permission_classes=[IsAdmin])
     def give_change_action(self, request, pk=None):
@@ -809,7 +1038,9 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 f"Новый итог: {receipt.total_price} сом.",
             )
         AuditLog.record(request.user, f"Дозаказ по чеку {receipt.order_number}: +{surcharge} сом")
-        return self._fresh_response(receipt)
+        response = self._fresh_response(receipt)
+        response.data["warnings"] = strip_cost(getattr(receipt, "cost_warnings", []), request.user)
+        return response
 
     # --- Статусы выполнения ----------------------------------------------
     #

@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import logging
 import uuid
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.http import HttpResponse
@@ -44,13 +45,50 @@ class PaymentWebhookView(APIView):
         if not result.get("paid"):
             return self._respond(request, ok=False, message="not paid")
         reference = result.get("reference")
-        receipt = Receipt.objects.filter(payment_reference=reference).first()
+        # Пустая ссылка не ищется: у всех наличных чеков `payment_reference`
+        # пустой, и подтверждение без ссылки закрыло бы первый попавшийся.
+        receipt = (
+            Receipt.objects.filter(
+                payment_reference=reference, payment_method=Receipt.PaymentMethod.ONLINE
+            ).first()
+            if reference
+            else None
+        )
         if not receipt:
             return self._respond(request, ok=False, message="unknown receipt")
+        if not self._amount_matches(result, receipt):
+            return self._respond(request, ok=False, message="amount mismatch")
         confirm_payment(receipt)
-        if receipt.client:
+        # Отменённый счёт заказом не становится (`confirm_payment` его не трогает):
+        # чек клиенту о нём слать не за что.
+        if receipt.client and receipt.status != Receipt.Status.CANCELLED:
             send_customer_receipt(receipt.client, receipt, _lines_text(receipt))
         return self._respond(request, ok=True, message="ok")
+
+    @staticmethod
+    def _amount_matches(result: dict, receipt: Receipt) -> bool:
+        """Сумма платежа от шлюза равна итогу чека.
+
+        Подпись защищает от подделки, но не от платежа на другую сумму: счёт на
+        10 000, а подтвердили 100 — и заказ закрывался как оплаченный целиком.
+        Шлюз-заглушка суммы не присылает (там сверять нечего); у настоящего
+        шлюза отсутствие суммы — тоже несовпадение.
+        """
+        amount = result.get("amount")
+        if amount is None and (settings.PAYMENT_GATEWAY or "mock").lower() == "mock":
+            return True
+        try:
+            paid = Decimal(str(amount))
+        except (InvalidOperation, ValueError):
+            logger.warning("Вебхук оплаты: нечитаемая сумма %r по чеку %s", amount, receipt.pk)
+            return False
+        if not paid.is_finite() or paid != receipt.total_price:
+            logger.warning(
+                "Вебхук оплаты: сумма %s не равна итогу чека %s (%s)",
+                paid, receipt.total_price, receipt.pk,
+            )
+            return False
+        return True
 
     def _respond(self, request, *, ok: bool, message: str):
         """FreedomPay expects a signed XML ack; other providers get JSON."""
@@ -80,7 +118,7 @@ class MockPayView(APIView):
     def post(self, request, receipt_id):
         receipt = get_object_or_404(Receipt, pk=receipt_id)
         confirm_payment(receipt)
-        if receipt.client:
+        if receipt.client and receipt.status != Receipt.Status.CANCELLED:
             send_customer_receipt(receipt.client, receipt, _lines_text(receipt))
         return Response({"status": "paid", "receipt": str(receipt.id)})
 

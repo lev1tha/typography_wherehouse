@@ -77,6 +77,15 @@ class PrintingService(models.Model):
     rate_per_piece = models.DecimalField(
         _("ставка за букву"), max_digits=12, decimal_places=2, default=Decimal("0")
     )
+    # Минимальная сумма строки этой услуги (2026-10-10, CALC-01): строка чека,
+    # которая по расчёту дешевле, стоит минимум — как `=МАКС(500; расчёт)` в
+    # Excel владельца. Пусто — действует общий минимум из настроек цен; 0 — у
+    # этой услуги минимума нет, даже если общий задан.
+    min_line_amount = models.DecimalField(
+        _("минимальная сумма строки"), max_digits=12, decimal_places=2,
+        null=True, blank=True,
+        help_text=_("Пусто — общий минимум из настроек; 0 — без минимума"),
+    )
     # Legacy markups (kept for migration safety; unused by the new flow).
     paper_markup = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("5.00"))
     cardboard_markup = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("15.00"))
@@ -187,6 +196,19 @@ class PricingSettings(models.Model):
         decimal_places=2,
         default=Decimal("4"),
         help_text=_("Доля мастера от стоимости работы резки (видна только админу)"),
+    )
+    # Правила прайса (2026-10-10, CALC-01). Оба по умолчанию 0 — правило
+    # выключено, цены считаются как раньше. Применяются построчно при сборке
+    # строки чека (`sales.pricing_rules`).
+    min_line_amount = models.DecimalField(
+        _("минимальная сумма строки услуги"), max_digits=12, decimal_places=2,
+        default=Decimal("0"),
+        help_text=_("Строка услуги дешевле — стоит этот минимум. 0 — выключено"),
+    )
+    urgency_percent = models.DecimalField(
+        _("наценка за срочность, %"), max_digits=5, decimal_places=2,
+        default=Decimal("0"),
+        help_text=_("Переключатель «Срочно» в кассе. 0 — выключено"),
     )
     updated_at = models.DateTimeField(auto_now=True)
 

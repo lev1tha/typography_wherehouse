@@ -4,9 +4,11 @@ import { useTranslation } from "react-i18next";
 import api from "../api/api.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { formatMoney } from "../utils/format.js";
+import Field from "./Field.jsx";
 
 const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, местная дата
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const som = (n) => formatMoney(n);
 
 // Оплата поставщику: по накладной или по партии, взятой в долг. Зеркало
 // «Принять оплату» у клиента — только деньги уходят, а не приходят.
@@ -58,34 +60,32 @@ export default function PaySupplierModal({ row, onClose, onPaid }) {
       <p style={{ marginTop: 0 }}><strong>{row.label}</strong>{row.supplier ? ` · ${row.supplier}` : ""}</p>
       <div className="crow">
         <span className="k">{t("suppliersDebt.owed")}</span>
-        <strong style={{ color: "var(--danger)" }}>{som(debt)}</strong>
+        <strong style={{ color: "var(--danger-ink)" }}>{som(debt)}</strong>
       </div>
       <div className="field" style={{ marginTop: 10 }}>
         <label>{t("receipts.payAmount")}</label>
         <input type="number" min="0" max={debt} value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus />
         {a > debt && (
-          <p style={{ fontSize: 12, marginTop: 4, color: "var(--danger)" }}>{t("suppliersDebt.tooMuch")}</p>
+          <p style={{ fontSize: 12, marginTop: 4, color: "var(--danger-ink)" }}>{t("suppliersDebt.tooMuch")}</p>
         )}
       </div>
       <div className="row">
-        <div className="field grow" style={{ margin: 0 }}>
-          <label>{t("clients.payDate")}</label>
+        <Field className="grow" style={{ margin: 0 }} label={t("clients.payDate")}>
           <input type="date" value={paidOn} max={today()} onChange={(e) => setPaidOn(e.target.value)} />
-        </div>
-        <div className="field grow" style={{ margin: 0 }}>
-          <label>{t("suppliersDebt.account")}</label>
+        </Field>
+        <Field className="grow" style={{ margin: 0 }} label={t("suppliersDebt.account")}>
           <select value={account} onChange={(e) => setAccount(e.target.value)}>
             <option value="" disabled>{t("suppliersDebt.chooseAccount")}</option>
             <option value="CASH">{t("suppliersDebt.cash")}</option>
             <option value="BANK">{t("suppliersDebt.bank")}</option>
           </select>
-        </div>
+        </Field>
       </div>
       {a > 0 && a <= debt && (
         <div className="muted" style={{ fontSize: 13, marginTop: 8 }}>
           {left > 0
-            ? <>{t("suppliersDebt.left")}: <strong style={{ color: "var(--danger)" }}>{som(left)}</strong></>
-            : <span style={{ color: "var(--ok, #067647)" }}>{t("suppliersDebt.closed")}</span>}
+            ? <>{t("suppliersDebt.left")}: <strong style={{ color: "var(--danger-ink)" }}>{som(left)}</strong></>
+            : <span style={{ color: "var(--ok-ink)" }}>{t("suppliersDebt.closed")}</span>}
         </div>
       )}
     </Modal>

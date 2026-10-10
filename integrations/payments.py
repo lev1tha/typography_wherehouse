@@ -10,6 +10,7 @@ provider implements ``create_invoice`` (returns a payment URL/QR reference) and
   PAYMENT_API_SECRET (the merchant secret key) in the environment.
 """
 import hashlib
+import hmac
 import logging
 import uuid
 import xml.etree.ElementTree as ET
@@ -124,11 +125,22 @@ class FreedomPayGateway(BasePaymentGateway):
         data = {k: v for k, v in request.data.items()}
         received_sig = data.pop("pg_sig", None)
         expected_sig = self._sign(self.RESULT_SCRIPT, data)
-        if received_sig != expected_sig:
+        # Сравнение подписей — за постоянное время: обычное `!=` по первому
+        # отличающемуся символу выдаёт подбирающему, сколько знаков он угадал.
+        # Байты, а не строки: `compare_digest` на строках с не-ASCII падает.
+        if not hmac.compare_digest(
+            str(received_sig or "").encode("utf-8"), expected_sig.encode("utf-8")
+        ):
             logger.warning("FreedomPay webhook signature mismatch for %s", data.get("pg_order_id"))
             return {"reference": data.get("pg_payment_id", ""), "paid": False}
         paid = str(data.get("pg_result")) == "1"
-        return {"reference": data.get("pg_payment_id", ""), "paid": paid}
+        # Сумма платежа: её сверяет вызывающий с итогом чека (у шлюза-заглушки
+        # суммы нет вовсе — там `None`).
+        return {
+            "reference": data.get("pg_payment_id", ""),
+            "paid": paid,
+            "amount": data.get("pg_amount"),
+        }
 
 
 def get_gateway() -> BasePaymentGateway:

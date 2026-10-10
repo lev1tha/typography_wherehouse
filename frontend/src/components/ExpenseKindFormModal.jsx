@@ -5,6 +5,7 @@ import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import Field, { focusFirstInvalid } from "./Field.jsx";
 
 // Свой вид расхода можно завести в любом из этих блоков. Роль в отчётах сервер
 // выводит из блока: «Инвестиции» — покупка (от порога — амортизация), остальное —
@@ -28,9 +29,14 @@ export default function ExpenseKindFormModal({ kind, block, onClose, onSaved }) 
     block: kind?.block || block || "FIXED",
   });
   const [busy, setBusy] = useState(false);
+  const [nameErr, setNameErr] = useState("");
 
   function save() {
-    if (!form.name.trim()) return toast(t("kinds.needName"), "error");
+    if (!form.name.trim()) {
+      setNameErr(t("kinds.needName"));
+      return focusFirstInvalid();
+    }
+    setNameErr("");
     setBusy(true);
     const req = isNew
       ? api.post("/finance/expense-kinds/", form)
@@ -68,7 +74,7 @@ export default function ExpenseKindFormModal({ kind, block, onClose, onSaved }) 
       footer={
         <>
           {!isNew && !kind.is_builtin && (
-            <button className="ghost" style={{ color: "var(--danger)" }} onClick={remove} disabled={busy}>
+            <button className="ghost" style={{ color: "var(--danger-ink)" }} onClick={remove} disabled={busy}>
               {t("kinds.delete")}
             </button>
           )}
@@ -77,15 +83,14 @@ export default function ExpenseKindFormModal({ kind, block, onClose, onSaved }) 
         </>
       }
     >
-      <div className="field">
-        <label>{t("kinds.name")}</label>
+      <Field label={t("kinds.name")} required error={nameErr}>
         <input
           autoFocus
           value={form.name}
-          onChange={(e) => setForm({ ...form, name: e.target.value })}
+          onChange={(e) => { setForm({ ...form, name: e.target.value }); setNameErr(""); }}
           placeholder={t("kinds.namePh")}
         />
-      </div>
+      </Field>
 
       <div className="field">
         <label>{t("kinds.block")}</label>

@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 
 import Hint from "./Hint.jsx";
+import { formatNumber } from "../utils/format.js";
 
 // Таблица отчёта «строки — статьи, колонки — месяцы года + итог», как лист
 // Excel заказчика. Общая для ОПиУ и ОДДС: у обоих строки приходят с сервера
@@ -17,7 +18,7 @@ export function money(n) {
   if (n === null || n === undefined) return "";
   const v = Math.round(Number(n) || 0);
   if (v === 0) return "0";
-  return v.toLocaleString("ru-RU");
+  return formatNumber(v);
 }
 
 // Подпись строки: постоянные строки отчётов переведены по ключу
@@ -42,7 +43,7 @@ function warnClass(row) {
 
 function cell(row, value) {
   if (value === null || value === undefined) return "";
-  if (row.kind === "percent") return `${Number(value).toLocaleString("ru-RU")} %`;
+  if (row.kind === "percent") return `${formatNumber(value)} %`;
   return money(value);
 }
 

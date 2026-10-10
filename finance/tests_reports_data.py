@@ -281,10 +281,13 @@ class LockTests(AdminCase):
 
     def test_month_closed_halfway_is_closed_for_accrual(self):
         """Замок «по середину месяца» уже закрыл часть его прибыли."""
-        if self.today.day == 1:
-            self.skipTest("нужен день после первого числа")
-        self.close_through(self.today - timedelta(days=1))
-        self.post_entry(self.rent, 25000, self.today, expect=400)
+        # Середина ПРОШЛОГО месяца, а не «сегодня минус день»: в первое число
+        # «вчера» — это уже конец прошлого месяца целиком (замок не «по
+        # середину»), и тест приходилось пропускать. Пятнадцатое есть в любом
+        # месяце, поэтому результат не зависит от того, какое сегодня число.
+        half = self.prev_end.replace(day=15)
+        self.close_through(half)
+        self.post_entry(self.rent, 25000, half + timedelta(days=5), expect=400)
 
     def test_period_cannot_be_moved_out_of_a_closed_month(self):
         data = self.post_entry(self.rent, 25000, self.today, period=ym(self.prev_end))

@@ -2,9 +2,12 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { formatMoney, formatNumber } from "../utils/format.js";
+import { isCanceled, useLatest } from "../utils/latest.js";
+import LoadError from "./LoadError.jsx";
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
-const num = (n) => Math.round(Number(n) || 0).toLocaleString("ru-RU");
+const som = (n) => formatMoney(n);
+const num = (n) => formatNumber(n);
 
 // Прибыль по дням месяца — чтобы владелец видел, какие дни ушли в минус, а не
 // только итог за месяц.
@@ -35,10 +38,22 @@ export default function DailyProfitChart({ year: propYear, month: propMonth, rel
 
   // reloadKey растёт, когда со страницы поменяли траты, — иначе график остался
   // бы на старых цифрах и спорил бы со сводкой над ним.
-  useEffect(() => {
+  const next = useLatest();
+  const [failed, setFailed] = useState(false);
+  function loadDaily() {
     setData(null);
-    api.get("/finance/daily/", { params: { year, month } }).then((r) => setData(r.data));
-  }, [year, month, reloadKey]);
+    setFailed(false);
+    // Стрелками месяца щёлкают быстро: ответ на старый месяц не должен
+    // перетереть график выбранного позже.
+    api
+      .get("/finance/daily/", { params: { year, month }, signal: next() })
+      .then((r) => setData(r.data))
+      .catch((e) => {
+        if (!isCanceled(e)) setFailed(true);
+      });
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(loadDaily, [year, month, reloadKey]);
 
   function shift(delta) {
     let m = month + delta;
@@ -65,6 +80,20 @@ export default function DailyProfitChart({ year: propYear, month: propMonth, rel
   const hovered = hoverDay != null ? rows.find((r) => r.day === hoverDay) : null;
   // В дате месяц идёт в родительном падеже: «15 июля», а не «15 Июль».
   const monthOf = t("monthsOf", { returnObjects: true })[month - 1] || t(`finance.m${month}`);
+  // Текстовое описание графика для читалки экрана: итог и крайние дни. Сами
+  // столбики (div'ы) диктору ничего не говорят.
+  const pastWithProfit = rows.filter((r) => r.profit != null);
+  const best = pastWithProfit.reduce((a, r) => (a == null || Number(r.profit) > Number(a.profit) ? r : a), null);
+  const worst = pastWithProfit.reduce((a, r) => (a == null || Number(r.profit) < Number(a.profit) ? r : a), null);
+  const chartLabel = data
+    ? t("finance.dailyAria", {
+        month: t(`finance.m${month}`),
+        year,
+        profit: som(data.totals.profit),
+        best: best ? `${best.day} ${monthOf}: ${som(best.profit)}` : "—",
+        worst: worst ? `${worst.day} ${monthOf}: ${som(worst.profit)}` : "—",
+      })
+    : undefined;
 
   return (
     <div className="card" style={{ marginTop: 16 }}>
@@ -93,11 +122,13 @@ export default function DailyProfitChart({ year: propYear, month: propMonth, rel
         {t("finance.dailySubtitle")}
       </p>
 
-      {!data ? (
+      {failed ? (
+        <LoadError onRetry={loadDaily} />
+      ) : !data ? (
         <p className="muted">{t("common.loading")}</p>
       ) : (
         <>
-          <div className="dc">
+          <div className="dc" role="img" aria-label={chartLabel}>
             {/* Шкала: сколько стоит самый высокий столбик. Без неё непонятно,
                 пять там тысяч или пятьсот. */}
             <div className="dc-axis">
@@ -151,11 +182,24 @@ export default function DailyProfitChart({ year: propYear, month: propMonth, rel
             </div>
           </div>
 
-          <p className="muted" style={{ textAlign: "center", minHeight: 20, marginTop: 6 }}>
+          {/* Те же числа таблицей — для читалки экрана и поиска по странице. */}
+          <table className="visually-hidden">
+            <caption>{t("finance.dailyTitle")}</caption>
+            <thead>
+              <tr><th scope="col">{t("receipts.date")}</th><th scope="col">{t("finance.profit")}</th></tr>
+            </thead>
+            <tbody>
+              {pastWithProfit.map((r) => (
+                <tr key={r.date}><td>{r.day} {monthOf}</td><td>{som(r.profit)}</td></tr>
+              ))}
+            </tbody>
+          </table>
+
+          <p className="muted" style={{ textAlign: "center", minHeight: 20, marginTop: 6 }} aria-live="polite">
             {hovered && hovered.profit != null ? (
               <>
                 {hovered.day} {monthOf}:{" "}
-                <strong style={{ color: Number(hovered.profit) >= 0 ? "var(--ok)" : "var(--danger)" }}>
+                <strong style={{ color: Number(hovered.profit) >= 0 ? "var(--ok-ink)" : "var(--danger-ink)" }}>
                   {Number(hovered.profit) >= 0 ? "+" : ""}
                   {som(hovered.profit)}
                 </strong>
@@ -195,7 +239,7 @@ export default function DailyProfitChart({ year: propYear, month: propMonth, rel
             )}
             <span>
               <span className="k">{t("finance.profit")}</span>
-              <strong style={{ color: Number(data.totals.profit) >= 0 ? "var(--ok)" : "var(--danger)" }}>
+              <strong style={{ color: Number(data.totals.profit) >= 0 ? "var(--ok-ink)" : "var(--danger-ink)" }}>
                 {som(data.totals.profit)}
               </strong>
             </span>

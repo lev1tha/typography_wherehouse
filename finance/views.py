@@ -245,6 +245,8 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
     # закрытом месяце (станок купили в январе, сломался в октябре), — со своим
     # замком по месяцам графика, а не по дню покупки.
     ASSET_FIELDS = {"useful_life_months", "depreciate_until"}
+    # Поля, от которых зависят цифры отчётов (имя и примечание — нет).
+    ACCOUNTING_FIELDS = {"amount", "spent_at", "period", "kind", "account"}
 
     def perform_update(self, serializer):
         entry = serializer.instance
@@ -255,9 +257,15 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
         if changed - self.ASSET_FIELDS:
             ensure_open(entry.spent_at, "Править трату закрытого периода")
             ensure_open(data.get("spent_at"), "Перенести трату этой датой")
-            if "period" in changed:
-                ensure_month_open(entry.period, "Переносить расход из закрытого месяца")
-                ensure_month_open(data["period"], "Отнести расход к закрытому месяцу")
+            if changed & self.ACCOUNTING_FIELDS:
+                # Расход «за сентябрь», оплаченный в октябре, лежит в ОПиУ
+                # сентября. Поменяли сумму (или вид, счёт) — цифра закрытого
+                # сентября поехала, хотя дата оплаты в открытом октябре. Месяц
+                # начисления проверяем ВСЕГДА, а не только при смене «за какой
+                # месяц»: и прежний (откуда уходит), и новый (куда приходит).
+                ensure_month_open(entry.period, "Править расход закрытого месяца")
+                if "period" in changed:
+                    ensure_month_open(data["period"], "Отнести расход к закрытому месяцу")
         if (
             "useful_life_months" in changed
             and entry.is_capitalized
@@ -946,6 +954,15 @@ class CashEntryViewSet(viewsets.ModelViewSet):
         blocked = self._guard_auto(self.get_object())
         return blocked or super().update(request, *args, **kwargs)
 
+    def perform_update(self, serializer):
+        # Правка записи закрытого периода двигает принятый отчёт так же, как
+        # удаление; перенос в закрытый период — так же, как создание. Раньше
+        # проверялись только создание и удаление: ручной приход 5 000 от 10.09
+        # при закрытом сентябре менялся на 9 000 или уезжал в октябрь.
+        ensure_open(serializer.instance.happened_on, "Править кассовую запись закрытого периода")
+        ensure_open(serializer.validated_data.get("happened_on"), "Перенести запись этой датой")
+        serializer.save()
+
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         blocked = self._guard_auto(instance)
@@ -992,9 +1009,9 @@ class CashEntryViewSet(viewsets.ModelViewSet):
         # руки, либо в зачёт следующего заказа. Без этой строки касса спорила с
         # финотчётом: на проде 19.09 в книге 245 453, а «получено по заказам»
         # 245 396 — ровно на 57 сом сдачи по чеку №21, которую не выдали.
-        change_held = Receipt.objects.exclude(
-            status=Receipt.Status.CANCELLED
-        ).aggregate(v=_SUM("change_due"))["v"]
+        # Возвращённые целиком заказы тоже считаем: сдача по ним лежит в той же
+        # кассе (единое правило с `client_change_available`).
+        change_held = Receipt.objects.aggregate(v=_SUM("change_due"))["v"]
         return Response({
             "accounts": accounts,
             "total": CashEntry.balance(upto=d_to),

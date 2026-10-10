@@ -59,20 +59,16 @@ class Command(BaseCommand):
                 f"По партии №{roll.id} есть акт промера — сначала разберитесь с ним."
             )
 
-        logs = list(InventoryLog.objects.filter(
-            material=material, type=InventoryLog.Type.SUPPLY,
-            quantity_changed=roll.initial_area,
-        ))
-        if len(logs) > 1:
-            same_moment = [l for l in logs if l.happened_at == roll.received_at]
-            if same_moment:
-                logs = same_moment
-        if len(logs) != 1:
+        # Запись прихода — та же, что находит «Исправить приход»: по ссылке на
+        # партию, а у старых записей — по материалу, площади и дате.
+        from warehouse.lot_correction import supply_log_for_roll
+
+        log = supply_log_for_roll(roll)
+        if log is None:
             raise CommandError(
-                f"У партии №{roll.id} нашлось {len(logs)} подходящих записей журнала "
-                "вместо одной — уберите вручную, иначе закуп разойдётся со складом."
+                f"У партии №{roll.id} не нашлось однозначной записи журнала "
+                "— уберите вручную, иначе закуп разойдётся со складом."
             )
-        log = logs[0]
         purchase = log.quantity_changed * (log.actual_price or Decimal("0"))
         gone = roll.initial_area - roll.remaining_area
         sold_items = roll.sold_items.count()
@@ -111,6 +107,8 @@ class Command(BaseCommand):
             material.quantity = (material.quantity or Decimal("0")) - roll.remaining_area
             material.save(update_fields=["quantity", "updated_at"])
             log.delete()
+            # Исправления этой партии («Исправление прихода») — тоже: прихода нет.
+            InventoryLog.objects.filter(roll=roll, type=InventoryLog.Type.CORRECTION).delete()
             # Оплату партии не стираем: встречная запись сегодняшним днём,
             # исходная остаётся в книге (аудит Б-13).
             from finance import cash

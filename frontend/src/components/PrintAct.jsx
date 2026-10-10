@@ -1,9 +1,12 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { useDialog } from "../hooks/useDialog.js";
+import Field from "./Field.jsx";
 import Icon from "./Icon.jsx";
 import PrintHost from "./PrintHost.jsx";
 import amountInWords from "../utils/amountInWords.js";
+import { formatDate, formatNumber } from "../utils/format.js";
 
 // Акт сверки взаиморасчётов с клиентом.
 //
@@ -16,12 +19,13 @@ import amountInWords from "../utils/amountInWords.js";
 // по клиентам, и придумывать их нельзя. Поэтому за период по умолчанию берём
 // всю историю — тогда сальдо на конец совпадает с настоящим долгом клиента.
 
-const money = (n) => Number(n || 0).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const day = (iso) => (iso ? new Date(iso).toLocaleDateString("ru-RU") : "");
+const money = (n) => formatNumber(n, { min: 2, max: 2 });
+const day = (iso) => (iso ? formatDate(iso) : "");
 
 export default function PrintAct({ client, onClose }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.resolvedLanguage;
+  const { dialogProps, titleId } = useDialog({ onClose, guardInput: false });
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
 
@@ -50,6 +54,12 @@ export default function PrintAct({ client, onClose }) {
     }
     const orders = [];
     for (const o of client.orders || []) {
+      // Неоплаченный ОНЛАЙН-счёт — не продажа и не долг (решение D-7: выручка
+      // признаётся при подтверждении оплаты). В акт он не попадает: иначе
+      // долг в акте был больше, чем в карточке клиента и в его кабинете
+      // (7 823 против 4 823). Если сервер поля не прислал (старая версия API),
+      // заказ считаем признанным — как было.
+      if ("revenue_recognized_at" in o && !o.revenue_recognized_at) continue;
       const date = String(o.created_at).slice(0, 10);
       const n = o.order_number;
       const paid = Number(o.amount_paid || 0);
@@ -100,23 +110,21 @@ export default function PrintAct({ client, onClose }) {
 
   return (
     <PrintHost>
-      <div className="modal wide print-modal">
+      <div className="modal wide print-modal" {...dialogProps}>
         <div className="modal-head no-print">
-          <h2>{t("print.actTitle")}</h2>
+          <h2 id={titleId}>{t("print.actTitle")}</h2>
           <button className="ghost" onClick={onClose} aria-label={t("common.close")}>
             <Icon name="x" size={18} />
           </button>
         </div>
 
         <div className="row no-print" style={{ alignItems: "flex-end", gap: 10, marginBottom: 14 }}>
-          <div className="field" style={{ margin: 0 }}>
-            <label>{t("dashboard.from")}</label>
+          <Field style={{ margin: 0 }} label={t("dashboard.from")}>
             <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-          </div>
-          <div className="field" style={{ margin: 0 }}>
-            <label>{t("dashboard.to")}</label>
+          </Field>
+          <Field style={{ margin: 0 }} label={t("dashboard.to")}>
             <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-          </div>
+          </Field>
           {(from || to) && (
             <button className="ghost" onClick={() => { setFrom(""); setTo(""); }}>
               {t("common.reset")}

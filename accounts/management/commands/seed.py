@@ -1,17 +1,42 @@
-"""Seed the Cloude system with the two default staff accounts and a small
-baseline catalogue so the system is usable immediately after migration.
+"""Наполняет пустую систему: учётные записи и базовый каталог.
 
-Usage:
-    python manage.py seed
+Команда ИДЕМПОТЕНТНА и безопасна к повторному запуску на живой базе:
+
+* Учётные записи создаются, только если таблица пользователей ПУСТА (или явно
+  указан ``--create-users``), и только те логины, которых ещё нет. Существующих
+  пользователей команда не трогает — ни пароль, ни роль. Пароль обязателен и
+  берётся из ``--password`` либо переменной окружения ``SEED_PASSWORD``;
+  паролей по умолчанию в коде нет. Удалённая учётка сама не воскреснет.
+* Каталог (материалы, услуги, переводы) только ДОПОЛНЯЕТСЯ: недостающие позиции
+  создаются, а у существующих ни ставки, ни цены, ни техкарты не меняются и
+  ничего не удаляется. Если позицию намеренно удалили, а потом снова запустили
+  seed — она вернётся: каталог ищется по названию.
+
+Использование:
+    SEED_PASSWORD='…' python manage.py seed          # чистая база: учётки + каталог
+    python manage.py seed --no-users                 # только каталог
+    SEED_PASSWORD='…' python manage.py seed --create-users   # добавить недостающие учётки
+
+На боевой базе (там данные настоящие) запускать не нужно.
 """
+import os
 from decimal import Decimal
 
-from django.core.management.base import BaseCommand
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from accounts.models import User
-from services.models import PricingSettings, PrintingService, ServiceRecipe
+from services.models import PricingSettings, PrintingService
 from warehouse.models import Material, MaterialType
+
+# (логин, роль, суперпользователь, подпись для вывода)
+DEFAULT_USERS = [
+    ("admin", User.Role.ADMIN, True, "администратор"),
+    ("storekeeper", User.Role.STOREKEEPER, False, "складовщик"),
+    ("accountant", User.Role.ACCOUNTANT, False, "бухгалтер"),
+]
 
 
 def _type(key):
@@ -24,46 +49,77 @@ def _type(key):
 
 
 class Command(BaseCommand):
-    help = "Создаёт аккаунты по умолчанию и базовый каталог."
+    help = (
+        "Создаёт учётные записи (только на пустой базе или с --create-users) "
+        "и дополняет базовый каталог, ничего не перезаписывая."
+    )
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--password",
+            help="Пароль для создаваемых учёток. Лучше переменной SEED_PASSWORD: "
+            "аргумент виден в списке процессов.",
+        )
+        parser.add_argument(
+            "--create-users",
+            action="store_true",
+            help="Создать недостающие учётки, даже если пользователи уже есть "
+            "(существующие не меняются).",
+        )
+        parser.add_argument(
+            "--no-users",
+            action="store_true",
+            help="Учётки не создавать вообще — только каталог.",
+        )
+
+    def _users_to_create(self, options):
+        """Список логинов, которые надо создать, и пароль. Проверка ДО записи в
+        базу: ошибка пароля не должна оставить после себя полусозданный seed."""
+        if options["no_users"]:
+            return None
+        if options["create_users"]:
+            wanted = list(DEFAULT_USERS)
+            missing = [u for u in wanted if not User.objects.filter(username=u[0]).exists()]
+        elif User.objects.exists():
+            self.stdout.write(
+                "Пользователи уже есть — учётки не создаю "
+                "(нужны недостающие — запустите с --create-users)."
+            )
+            return None
+        else:
+            missing = list(DEFAULT_USERS)
+        if not missing:
+            self.stdout.write("Все стандартные учётки уже существуют — пропускаю.")
+            return None
+        password = options.get("password") or os.environ.get("SEED_PASSWORD", "")
+        if not password:
+            raise CommandError(
+                "Для создания учёток нужен пароль: переменная окружения "
+                "SEED_PASSWORD или --password. Стандартных паролей в коде нет. "
+                "Только каталог, без учёток — флаг --no-users."
+            )
+        try:
+            validate_password(password)
+        except ValidationError as exc:
+            raise CommandError("Пароль не подходит: " + " ".join(exc.messages))
+        return missing, password
 
     @transaction.atomic
     def handle(self, *args, **options):
-        admin, created = User.objects.get_or_create(
-            username="admin",
-            defaults={"role": User.Role.ADMIN, "is_staff": True, "is_superuser": True},
-        )
-        if created:
-            admin.set_password("admin12345")
-            admin.save()
-            self.stdout.write(self.style.SUCCESS("Создан администратор: admin / admin12345"))
-        else:
-            self.stdout.write("Администратор уже существует — пропускаю.")
-
-        keeper, created = User.objects.get_or_create(
-            username="storekeeper",
-            defaults={"role": User.Role.STOREKEEPER, "is_staff": True},
-        )
-        if created:
-            keeper.set_password("store12345")
-            keeper.save()
-            self.stdout.write(
-                self.style.SUCCESS("Создан складовщик: storekeeper / store12345")
-            )
-        else:
-            self.stdout.write("Складовщик уже существует — пропускаю.")
-
-        accountant, created = User.objects.get_or_create(
-            username="accountant",
-            defaults={"role": User.Role.ACCOUNTANT, "is_staff": True},
-        )
-        if created:
-            accountant.set_password("acc12345")
-            accountant.save()
-            self.stdout.write(
-                self.style.SUCCESS("Создан бухгалтер: accountant / acc12345")
-            )
-        else:
-            self.stdout.write("Бухгалтер уже существует — пропускаю.")
+        plan = self._users_to_create(options)
+        if plan:
+            missing, password = plan
+            for username, role, is_super, label in missing:
+                user, created = User.objects.get_or_create(
+                    username=username,
+                    defaults={"role": role, "is_staff": True, "is_superuser": is_super},
+                )
+                if created:
+                    user.set_password(password)
+                    user.save()
+                    self.stdout.write(self.style.SUCCESS(f"Создан {label}: {username}"))
+                else:
+                    self.stdout.write(f"{label.capitalize()} уже существует — пропускаю.")
 
         # Baseline catalogue
         paper, _ = Material.objects.get_or_create(
@@ -113,15 +169,19 @@ class Command(BaseCommand):
 
         # CUTTING / «работа мастера»: master's labour priced per кв.м. The cut
         # material is billed as a separate line at sale time (see sale_service).
-        cutting, _ = PrintingService.objects.get_or_create(
-            name="Резка букв",
-            defaults={"kind": PrintingService.Kind.CUTTING},
-        )
-        cutting.kind = PrintingService.Kind.CUTTING
-        cutting.machine = PrintingService.Machine.CNC
-        cutting.rate_flat = Decimal("200")  # работа мастера, сом/кв.м
-        cutting.base_price = Decimal("0")
-        cutting.save()
+        # Ищем по (вид, станок), а не по названию: владелец мог переименовать
+        # услугу, и тогда по имени seed завёл бы вторую. Существующую услугу
+        # НЕ ТРОГАЕМ — ставку владелец задаёт сам («Цены и услуги»).
+        if not PrintingService.objects.filter(
+            kind=PrintingService.Kind.CUTTING, machine=PrintingService.Machine.CNC
+        ).exists():
+            PrintingService.objects.create(
+                name="Резка букв",
+                kind=PrintingService.Kind.CUTTING,
+                machine=PrintingService.Machine.CNC,
+                rate_flat=Decimal("200"),  # работа мастера, сом/кв.м
+                base_price=Decimal("0"),
+            )
         # Второй станок — лазер. Резка считается по станкам (ЧПУ / лазер), и на
         # чистой базе второй должен быть сразу: иначе отчёт покажет одну строку
         # и разделение выглядит несделанным. Ставка 0 — берётся у материала.
@@ -130,9 +190,6 @@ class Command(BaseCommand):
             kind=PrintingService.Kind.CUTTING,
             defaults={"name": "Резка лазером", "base_price": Decimal("0")},
         )
-        # Cutting no longer auto-consumes recipe materials — the cut material is a
-        # separate sale line; drop legacy paper/glue recipes.
-        cutting.recipes.all().delete()
         # Гравировка — цена за кв.м, материал отдельной строкой не идёт. Ставку
         # владелец задаёт сам («Цены и услуги»), в кассе её правят по заказу.
         PrintingService.objects.get_or_create(
@@ -146,27 +203,13 @@ class Command(BaseCommand):
             defaults={"name": "Отходы", "rate_flat": Decimal("0")},
         )
 
-        # Установка (наружная/внутренняя) убрана из системы по решению заказчика.
-        # Существующие услуги установки деактивируем, чтобы они пропали из кассы,
-        # «Цен и услуг» и заявок, но НЕ удаляем — иначе порвём историю чеков
-        # (TransactionItem.service защищён PROTECT).
-        PrintingService.objects.filter(
-            kind__in=[
-                PrintingService.Kind.INSTALL_EXTERIOR,
-                PrintingService.Kind.INSTALL_INTERIOR,
-                PrintingService.Kind.INSTALLATION,
-            ]
-        ).update(is_active=False)
-
         # A self-adhesive roll material (was used for interior mounting demos).
-        film, _ = Material.objects.get_or_create(
+        Material.objects.get_or_create(
             name="Самоклейка",
             defaults={"type": _type("FILM"), "unit": Material.Unit.SQM,
-                      "is_roll_material": True, "critical_balance": Decimal("5")},
+                      "is_roll_material": True, "critical_balance": Decimal("5"),
+                      "price_per_sqm": Decimal("600")},
         )
-        if not film.price_per_sqm:
-            film.price_per_sqm = Decimal("600")
-            film.save(update_fields=["price_per_sqm"])
 
         # Real ЧПУ catalogue (prices from the dealer report, median per кв.м and
         # cutting rate per погонный метр). Area materials: sold by кв.м (вырезка)
@@ -202,7 +245,9 @@ class Command(BaseCommand):
             ("Пластик", "Золото пластик", "1000", "15", "0", SHEET_AREA),
         ]
         for cat, name, sqm, cut, piece, area in catalogue:
-            m, created = Material.objects.get_or_create(
+            # Только создание: у существующего материала цены и размеры
+            # принадлежат владельцу, seed их не «дописывает» и не «чинит».
+            Material.objects.get_or_create(
                 name=name,
                 defaults={
                     "type": _type(cat), "unit": Material.Unit.SQM,
@@ -213,19 +258,6 @@ class Command(BaseCommand):
                     "sheet_width": SHEET_W, "sheet_height": SHEET_H,
                 },
             )
-            if not created and not m.price_per_sqm:
-                m.type = _type(cat)
-                m.price_per_sqm = D(sqm)
-                m.cut_rate_per_pm = D(cut)
-                m.piece_price = D(piece)
-                m.piece_area = area
-                m.save(update_fields=["type", "price_per_sqm", "cut_rate_per_pm", "piece_price", "piece_area"])
-            # Размер листа дописываем и существующим записям, если его нет:
-            # старый seed знал только площадь.
-            if not created and not (m.sheet_width and m.sheet_height):
-                m.sheet_width, m.sheet_height = SHEET_W, SHEET_H
-                # save() пересчитывает площадь из размера — сохраняем и её.
-                m.save(update_fields=["sheet_width", "sheet_height", "piece_area"])
 
         # Shop-wide pricing settings (master's wage % of cutting work).
         PricingSettings.objects.get_or_create(pk=1, defaults={"master_commission_percent": Decimal("4")})
@@ -235,28 +267,37 @@ class Command(BaseCommand):
 
     def _fill_translations(self):
         """Populate KY / EN translations for the baseline catalogue so the
-        language switcher translates dynamic content, not just the chrome."""
+        language switcher translates dynamic content, not just the chrome.
+        Заполняются только ПУСТЫЕ поля: правки владельца не затираются."""
         materials = {
             "Бумага офсетная": {
-                "name_ky": "Офсеттик кагаз", "name_en": "Offset paper", "category_en": "Paper",
+                "name_ky": "Офсеттик кагаз", "name_en": "Offset paper",
             },
             "Картон матовый": {
-                "name_ky": "Күңүрт картон", "name_en": "Matte cardboard", "category_en": "Cardboard",
+                "name_ky": "Күңүрт картон", "name_en": "Matte cardboard",
             },
             "Краска чёрная": {
-                "name_ky": "Кара боёк", "name_en": "Black ink", "category_en": "Ink",
+                "name_ky": "Кара боёк", "name_en": "Black ink",
             },
         }
         for name_ru, tr in materials.items():
             m = Material.objects.filter(name_ru=name_ru).first()
             if m:
-                for field, value in tr.items():
-                    setattr(m, field, value)
-                m.save()
+                changed = [f for f, v in tr.items() if not getattr(m, f, None)]
+                for field in changed:
+                    setattr(m, field, tr[field])
+                if changed:
+                    m.save(update_fields=changed)
 
         svc = PrintingService.objects.filter(name_ru="Резка букв").first()
         if svc:
-            svc.name_ky = "Тамгаларды кесүү"
-            svc.name_en = "Letter cutting"
-            svc.save()
-        self.stdout.write("Переводы каталога (KY/EN) обновлены.")
+            changed = []
+            if not svc.name_ky:
+                svc.name_ky = "Тамгаларды кесүү"
+                changed.append("name_ky")
+            if not svc.name_en:
+                svc.name_en = "Letter cutting"
+                changed.append("name_en")
+            if changed:
+                svc.save(update_fields=changed)
+        self.stdout.write("Переводы каталога (KY/EN) дополнены.")

@@ -1,9 +1,10 @@
 import { useTranslation } from "react-i18next";
 
 import Modal from "./Modal.jsx";
+import { formatDate, formatMoney } from "../utils/format.js";
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
-const ru = (iso) => (iso ? String(iso).split("-").reverse().join(".") : "");
+const som = (n) => formatMoney(n);
+const ru = (iso) => formatDate(iso);
 
 // Долг поставщикам — ДОКУМЕНТАМИ, а не одной цифрой. Владелец спросил «за что
 // должны?»: строка «Накладная НК-1 · 22 550» без содержимого ничего не
@@ -32,7 +33,7 @@ export default function SupplierDebtModal({ debts, readOnly, onClose, onPay }) {
               </div>
             </div>
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <strong style={{ color: "var(--danger)" }}>{som(r.debt)}</strong>
+              <strong style={{ color: "var(--danger-ink)" }}>{som(r.debt)}</strong>
               {!readOnly && (
                 <button className="secondary" onClick={() => onPay(r)}>{t("suppliersDebt.pay")}</button>
               )}
@@ -58,7 +59,7 @@ export default function SupplierDebtModal({ debts, readOnly, onClose, onPay }) {
       ))}
       <div className="crow" style={{ marginTop: 6 }}>
         <strong>{t("suppliersDebt.total")}</strong>
-        <strong style={{ color: "var(--danger)" }}>{som(debts?.total || 0)}</strong>
+        <strong style={{ color: "var(--danger-ink)" }}>{som(debts?.total || 0)}</strong>
       </div>
     </Modal>
   );

@@ -7,8 +7,11 @@ import DataTable from "./DataTable.jsx";
 import Icon from "./Icon.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { formatMoney } from "../utils/format.js";
+import Field, { focusFirstInvalid } from "./Field.jsx";
+import { apiError } from "../api/errors.js";
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const som = (n) => formatMoney(n);
 
 function Stat({ label, value }) {
   return (
@@ -44,6 +47,7 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, rel
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [editing, setEditing] = useState(null);
+  const [editErr, setEditErr] = useState("");
 
   const kindById = Object.fromEntries(kinds.map((k) => [k.id, k]));
   const isSalary = (kindId) => kindById[kindId]?.code === "SALARY";
@@ -61,7 +65,11 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, rel
   useEffect(load, [period?.date_from, period?.date_to, reloadKey]);
 
   function saveEdit() {
-    if (!editing.amount) return toast(t("expenses.needAmount"), "error");
+    if (!editing.amount) {
+      setEditErr(t("expenses.needAmount"));
+      return focusFirstInvalid();
+    }
+    setEditErr("");
     api
       .patch(`/finance/expense-entries/${editing.id}/`, {
         kind: editing.kind,
@@ -76,7 +84,8 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, rel
         onChanged?.();
         toast(t("common.saved"));
       })
-      .catch(() => toast(t("common.error"), "error"));
+      // Текст сервера (замок периода и т.п.), а не безликое «ошибка».
+      .catch((e) => toast(apiError(e, t("common.error")), "error"));
   }
 
   async function del(id) {
@@ -171,22 +180,18 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, rel
             <label>{t("expenses.category")}</label>
             {kindSelect(editing.kind, (v) => setEditing({ ...editing, kind: v }))}
           </div>
-          <div className="field">
-            <label>{isSalary(editing.kind) ? t("salary.employee") : t("fixed.forWhat")}</label>
+          <Field label={isSalary(editing.kind) ? t("salary.employee") : t("fixed.forWhat")}>
             <input value={editing.name || ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
-          </div>
-          <div className="field">
-            <label>{t("expenses.date")}</label>
+          </Field>
+          <Field label={t("expenses.date")}>
             <input type="date" value={editing.spent_at} onChange={(e) => setEditing({ ...editing, spent_at: e.target.value })} />
-          </div>
-          <div className="field">
-            <label>{t("expenses.amount")}</label>
-            <input type="number" value={editing.amount} onChange={(e) => setEditing({ ...editing, amount: e.target.value })} />
-          </div>
-          <div className="field">
-            <label>{t("expenses.note")}</label>
+          </Field>
+          <Field label={t("expenses.amount")} required error={editErr}>
+            <input type="number" inputMode="decimal" value={editing.amount} onChange={(e) => { setEditing({ ...editing, amount: e.target.value }); setEditErr(""); }} />
+          </Field>
+          <Field label={t("expenses.note")}>
             <textarea value={editing.note || ""} onChange={(e) => setEditing({ ...editing, note: e.target.value })} rows={2} />
-          </div>
+          </Field>
         </Modal>
       )}
     </>

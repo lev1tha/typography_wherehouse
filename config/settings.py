@@ -38,6 +38,12 @@ env = environ.Env(
     SITE_BASE_URL=(str, "http://localhost:8710"),
     # Separate password gating the admin Finance & analytics screens.
     FINANCE_PASSWORD=(str, "finance123"),
+    # Сколько прокси стоит между клиентом и Django (nginx = 1). Пусто — не
+    # задано: поведение прежнее (X-Forwarded-For берётся целиком, подделывается).
+    # Задавать ТОЛЬКО в паре с nginx, который перезаписывает X-Forwarded-For
+    # (`proxy_set_header X-Forwarded-For $remote_addr`) и подставляет настоящий
+    # адрес из Cloudflare (real_ip). См. accounts/throttling.py.
+    TRUSTED_PROXY_COUNT=(str, ""),
 )
 
 # Load .env if present (keeps real secrets out of source control).
@@ -62,6 +68,8 @@ INSTALLED_APPS = [
     # Third-party
     "rest_framework",
     "rest_framework_simplejwt",
+    # Чёрный список refresh-токенов: ротация гасит использованный токен.
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "django_filters",
     # Local apps
@@ -82,6 +90,8 @@ MIDDLEWARE = [
     "django.middleware.locale.LocaleMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
+    # Предел неудачных попыток на форме входа Django-админки (API лимитирует DRF).
+    "accounts.middleware.AdminLoginThrottleMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
@@ -160,10 +170,18 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
+# Количество доверенных прокси для определения адреса клиента (лимит входа).
+# None = как раньше; число = брать адрес, добавленный N-м с конца прокси.
+TRUSTED_PROXY_COUNT = (
+    int(env("TRUSTED_PROXY_COUNT")) if env("TRUSTED_PROXY_COUNT").strip() else None
+)
+
+
 # Django REST Framework + JWT
 REST_FRAMEWORK = {
+    "NUM_PROXIES": TRUSTED_PROXY_COUNT,
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "accounts.authentication.CloudeJWTAuthentication",
     ),
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
@@ -205,6 +223,10 @@ SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(hours=12),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "AUTH_HEADER_TYPES": ("Bearer",),
+    # Каждое обновление выдаёт новый refresh и гасит старый: украденный refresh
+    # живёт до первого использования настоящим владельцем.
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
 }
 
 
@@ -250,6 +272,37 @@ if not DEBUG:
     SECURE_HSTS_SECONDS = env.int("SECURE_HSTS_SECONDS", default=0)
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
+
+# --- Логи ---
+# Без этого блока при DEBUG=False трассировка 500-й ошибки не попадала никуда:
+# стандартная настройка Django отправляет django.request на почту админам
+# (ADMINS пуст) и в консоль только при DEBUG. В `docker logs` было пусто.
+# Всё от WARNING и выше (500-ки с трассировкой, 4xx, наши предупреждения)
+# уходит в stderr контейнера. Уровень — LOG_LEVEL в окружении.
+LOG_LEVEL = env.str("LOG_LEVEL", default="WARNING").upper()
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "plain": {"format": "%(asctime)s %(levelname)s %(name)s: %(message)s"},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "plain"},
+    },
+    # Все логгеры приложений (accounts, finance, integrations…) наследуют корень.
+    "root": {"handlers": ["console"], "level": LOG_LEVEL},
+    "loggers": {
+        # Перекрывает стандартный `django` (консоль только при DEBUG + почта).
+        # django.server (runserver) свой обработчик сохраняет.
+        "django": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
+    },
+}
+
+# Под `manage.py test` консоль молчит: сотни ожидаемых 400/401 в прогоне — шум.
+# Тесты, которым нужен лог, ловят его сами (`assertLogs`).
+if len(sys.argv) > 1 and sys.argv[1] == "test":
+    LOGGING["root"]["level"] = "CRITICAL"
+    LOGGING["loggers"]["django"]["level"] = "CRITICAL"
 
 # --- Тесты: быстрый хешер паролей ---
 # Боевой PBKDF2 (1,2 млн итераций, ~0,3 с на пароль) в setUp каждого теста

@@ -12,6 +12,10 @@
   --primary-soft: rgba(255, 197, 146, 0.28);
   --on-primary: #4a3526;
   --accent-strong: #b9692a;
+  /* Для ТЕКСТА акцентом служит --accent-ink (5.2:1 и выше на белом, бумажном
+     фоне и на --primary-soft); --accent-strong остался для заливок, значков
+     и уголков — 4.1:1 на белом для мелкого текста не хватало. */
+  --accent-ink: #9a5218;
   --secondary: #7a4a1e;
 
   /* Surfaces */
@@ -23,23 +27,37 @@
   --ink: rgba(0, 0, 0, 0.95);
   --ink-secondary: #31302e;
   --ink-muted: #615d59;
-  --ink-faint: #a39e98;
+  /* --ink-faint — для ТЕКСТА (подписи плиток, шкалы, плейсхолдеры): 4.9:1 на
+     бумажном фоне. Для значков и декоративных линий, где контраст текста не
+     нужен, есть --ink-icon — прежний светлый оттенок. */
+  --ink-faint: #6f6a63;
+  --ink-icon: #a39e98;
 
   /* Attention (low stock / destructive) — used sparingly */
   --warn-bg: #ff6b6b1f;
-  --warn-ink: #c2410c;
+  --warn-ink: #a8350a;
   --danger: #d93535;
+  /* Красный ТЕКСТ (ошибки, долги, бейдж «Возвращено»): --danger на бледно-
+     красной подложке бейджа давал 3.9:1. Заливки кнопок остаются --danger. */
+  --danger-ink: #b42020;
   --danger-soft: rgba(217, 53, 53, 0.12);
   --danger-line: rgba(217, 53, 53, 0.45);
   --danger-tint: rgba(217, 53, 53, 0.05);
   --ok: #1aae39;
+  /* Зелёный ТЕКСТ («Оплачено», прибыль): --ok как цвет текста давал 2.6–2.9:1.
+     --ok остался для столбиков, точек и заливок. */
+  --ok-ink: #0b7524;
   --ok-bg: rgba(26, 174, 57, 0.12);
   --amber-bg: rgba(221, 130, 0, 0.14);
-  --amber-ink: #b06a00;
+  --amber-ink: #8a5200;
   --amber-line: rgba(221, 130, 0, 0.4);
   --amber-tint: rgba(221, 130, 0, 0.05);
   --on-danger: #fff;
   --toast-ink: #fff;
+  /* Кольцо фокуса: почти чёрное на светлой теме (15:1 к фону) и почти белое на
+     тёмной. Светлый персиковый --primary как контур давал 1.6:1 — клавиатурный
+     фокус терялся. */
+  --focus-ring: #1f1d1b;
 
   /* Наведение, затемнение и полоса прокрутки — на светлом это лёгкая ЧЕРНОТА,
      на тёмном обязана стать лёгкой БЕЛИЗНОЙ, иначе ховер в тёмной теме
@@ -95,6 +113,7 @@
     --primary-soft: rgba(240, 168, 104, 0.22);
     --on-primary: #2a1c12;
     --accent-strong: #f0a868;
+    --accent-ink: #f0a868;
     --secondary: #d99b5f;
 
     --canvas: #171615;
@@ -103,16 +122,19 @@
 
     --ink: rgba(255, 255, 255, 0.92);
     --ink-secondary: #e8e5e0;
-    --ink-muted: #a8a29a;
-    --ink-faint: #7a746c;
+    --ink-muted: #b5afa7;
+    --ink-faint: #a39c92;
+    --ink-icon: #7a746c;
 
     --warn-bg: rgba(255, 107, 107, 0.16);
     --warn-ink: #ff9a6b;
     --danger: #ff6b6b;
+    --danger-ink: #ff8a8a;
     --danger-soft: rgba(255, 107, 107, 0.18);
     --danger-line: rgba(255, 107, 107, 0.5);
     --danger-tint: rgba(255, 107, 107, 0.08);
     --ok: #4ade80;
+    --ok-ink: #4ade80;
     --ok-bg: rgba(74, 222, 128, 0.16);
     --amber-bg: rgba(251, 191, 36, 0.18);
     --amber-ink: #fbbf24;
@@ -120,6 +142,7 @@
     --amber-tint: rgba(251, 191, 36, 0.08);
     --on-danger: #2a1010;
     --toast-ink: #171615;
+    --focus-ring: #f4f1ea;
 
     --hover: rgba(255, 255, 255, 0.07);
     --hover-soft: rgba(255, 255, 255, 0.05);
@@ -144,6 +167,7 @@
   --primary-soft: rgba(240, 168, 104, 0.22);
   --on-primary: #2a1c12;
   --accent-strong: #f0a868;
+  --accent-ink: #f0a868;
   --secondary: #d99b5f;
 
   --canvas: #171615;
@@ -152,16 +176,19 @@
 
   --ink: rgba(255, 255, 255, 0.92);
   --ink-secondary: #e8e5e0;
-  --ink-muted: #a8a29a;
-  --ink-faint: #7a746c;
+  --ink-muted: #b5afa7;
+  --ink-faint: #a39c92;
+  --ink-icon: #7a746c;
 
   --warn-bg: rgba(255, 107, 107, 0.16);
   --warn-ink: #ff9a6b;
   --danger: #ff6b6b;
+  --danger-ink: #ff8a8a;
   --danger-soft: rgba(255, 107, 107, 0.18);
   --danger-line: rgba(255, 107, 107, 0.5);
   --danger-tint: rgba(255, 107, 107, 0.08);
   --ok: #4ade80;
+  --ok-ink: #4ade80;
   --ok-bg: rgba(74, 222, 128, 0.16);
   --amber-bg: rgba(251, 191, 36, 0.18);
   --amber-ink: #fbbf24;
@@ -169,6 +196,7 @@
   --amber-tint: rgba(251, 191, 36, 0.08);
   --on-danger: #2a1010;
   --toast-ink: #171615;
+  --focus-ring: #f4f1ea;
 
   --hover: rgba(255, 255, 255, 0.07);
   --hover-soft: rgba(255, 255, 255, 0.05);
@@ -223,7 +251,7 @@ body {
 }
 
 a {
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   text-decoration: none;
 }
 
@@ -269,7 +297,6 @@ textarea {
   padding: 0 12px;
   background: var(--surface);
   color: var(--ink);
-  outline: none;
 }
 
 input,
@@ -297,11 +324,56 @@ input[type="number"]::-webkit-inner-spin-button {
   margin: 0;
 }
 
+/* Фокус с клавиатуры виден ВЕЗДЕ: у кнопок, плиток, ссылок и полей. Раньше на
+   всех элементах стояло `outline: none`, а замены не было — табом по кассе
+   нельзя было понять, где ты. Поля сохраняют своё мягкое кольцо, но контур и
+   рамка теперь контрастные (--focus-ring, ≥3:1 к фону в обеих темах). */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 input:focus,
 select:focus,
 textarea:focus {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px var(--primary-soft);
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 4px var(--primary-soft);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 0;
+}
+
+/* Мышью в поле щёлкнули — контур не нужен, остаётся кольцо; с клавиатуры
+   (Tab) :focus-visible возвращает полный контур. */
+input:focus:not(:focus-visible),
+select:focus:not(:focus-visible),
+textarea:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Поле с ошибкой подчёркнуто красным, а не только текстом под ним. */
+input[aria-invalid="true"],
+select[aria-invalid="true"],
+textarea[aria-invalid="true"] {
+  border-color: var(--danger-ink);
+  box-shadow: 0 0 0 1px var(--danger);
+}
+
+.field label .req {
+  color: var(--danger-ink);
+  font-weight: 700;
+}
+
+.field-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.field-error {
+  margin: 4px 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--danger-ink);
 }
 
 textarea {
@@ -367,7 +439,7 @@ button.ghost:hover {
   padding: 8px 14px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-md);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   font-weight: 600;
   text-decoration: none;
 }
@@ -399,7 +471,7 @@ button.ghost:hover {
 .sheet-table th.sheet-group {
   text-align: center;
   background: var(--primary-soft);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .sheet-table th.sheet-group-alt {
@@ -455,7 +527,7 @@ button.ghost:hover {
 .sheet-table tfoot .sheet-total td {
   background: var(--primary-soft);
   font-weight: 700;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 /* Строка блока финотчёта: выглядит как строка таблицы, а работает как кнопка —
@@ -586,7 +658,7 @@ label {
 
 .badge.ok {
   background: var(--ok-bg);
-  color: var(--ok);
+  color: var(--ok-ink);
   border-color: transparent;
 }
 
@@ -598,13 +670,13 @@ label {
 
 .badge.red {
   background: var(--danger-soft);
-  color: var(--danger);
+  color: var(--danger-ink);
   border-color: transparent;
 }
 
 .badge.blue {
   background: var(--primary-soft);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   border-color: transparent;
 }
 
@@ -642,7 +714,7 @@ label {
   font-weight: 700;
   font-size: 20px;
   letter-spacing: -0.3px;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   padding: 10px 12px 18px;
 }
 
@@ -661,6 +733,16 @@ label {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.sidebar nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.content:focus {
+  outline: none; /* программный фокус от «К содержимому» — контур не нужен */
 }
 
 .nav-group + .nav-group {
@@ -682,7 +764,7 @@ label {
 
 .sidebar a.active {
   background: var(--primary-soft);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   font-weight: 600;
 }
 
@@ -927,14 +1009,14 @@ label {
   gap: 4px;
 }
 .table th .th-sort:hover {
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 .table th .th-arrow {
   font-size: 9px;
   color: var(--ink-faint);
 }
 .table th .th-arrow.active {
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 .table tbody tr:last-child td {
@@ -986,13 +1068,13 @@ label {
    на строке таблицы такая кнопка кричит громче самой строки. Здесь нужен
    красный ТЕКСТ на прозрачном фоне. */
 .row-btn.row-danger {
-  color: var(--danger);
+  color: var(--danger-ink);
   background: transparent;
 }
 
 .row-btn.row-danger:hover {
   background: color-mix(in srgb, var(--danger) 10%, transparent);
-  color: var(--danger);
+  color: var(--danger-ink);
 }
 
 /* Дата в панели фильтров: подпись «С» / «По» стоит внутри поля, иначе два
@@ -1002,8 +1084,8 @@ label {
   align-items: center;
   gap: 8px;
   padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
   background: var(--surface);
   height: 40px;
 }
@@ -1044,6 +1126,15 @@ label {
 .filter-date input:focus {
   outline: none;
   box-shadow: none;
+  border: 0;
+}
+
+/* Рамка поля у пары «С / По» нарисована на обёртке, поэтому и кольцо фокуса
+   рисуем на ней — иначе внутри поля фокус не был виден вообще. */
+.filter-date:focus-within {
+  border-color: var(--focus-ring);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 0;
 }
 
 /* Modal */
@@ -1161,7 +1252,7 @@ label {
 .grid-table thead tr.grid-groups th.sheet-group {
   text-align: center;
   background: var(--primary-soft);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   border-left: 3px solid var(--surface);
   border-right: 3px solid var(--surface);
 }
@@ -1359,7 +1450,7 @@ label {
 }
 
 .error {
-  color: var(--danger);
+  color: var(--danger-ink);
   font-weight: 500;
   font-size: 14px;
   margin: 8px 0;
@@ -1510,6 +1601,25 @@ label {
   flex-shrink: 0;
   position: sticky;
   top: 78px;
+  /* Панель чека не длиннее экрана: с клиентом, оплатой и подсказками она
+     вырастала выше окна, и «Оформить» оказывалась за нижним краем, куда
+     липкая панель не пускает прокрутку. Теперь панель прокручивается сама, а
+     итоговая кнопка закреплена внизу (.pos-submit). */
+  max-height: calc(100vh - 90px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.pos-submit {
+  position: sticky;
+  /* Отрицательный нижний margin (-20px, компенсация padding карточки) входит в
+     расчёт «прилипания», поэтому отступ от края панели — те же 20px. */
+  bottom: 20px;
+  margin: 14px -20px -20px;
+  padding: 12px 20px 16px;
+  background: var(--surface);
+  border-top: 1px solid var(--hairline);
+  z-index: 3;
 }
 
 .pos-grid {
@@ -1584,7 +1694,7 @@ label {
   max-width: 100%;
   font-size: 11px;
   font-weight: 700;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   background: var(--primary-soft);
   border-radius: var(--r-full);
   padding: 2px 8px;
@@ -1602,7 +1712,7 @@ label {
 .pos-product .p-incart {
   font-size: 12px;
   font-weight: 700;
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 
 /* Low / out-of-stock material cards stand out at a glance. */
@@ -1621,7 +1731,7 @@ label {
   color: var(--ink-faint);
 }
 .pos-product.is-out .p-stock {
-  color: var(--danger);
+  color: var(--danger-ink);
 }
 .pos-product.is-low .p-stock {
   color: var(--amber-ink);
@@ -1676,9 +1786,9 @@ label {
 }
 
 .stepper button {
-  width: 34px;
-  height: 34px;
-  min-height: 34px;
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
   padding: 0;
   font-size: 18px;
   background: var(--surface);
@@ -1717,7 +1827,7 @@ label {
   margin: 0;
 }
 .stepper .qty:focus {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
   border-radius: var(--r-sm);
 }
@@ -1738,7 +1848,50 @@ label {
   padding: 28px 0;
 }
 
-@media (max-width: 880px) {
+/* Правила прайса в кассе (2026-10-10): «Срочно», скидка клиента и строка
+   «по каталогу» над итогом. Зачёркнутая сумма строки — то, что было бы без
+   правил. */
+.cart-line .cl-was {
+  display: block;
+  font-weight: 400;
+  font-size: 12px;
+}
+.pos-rules {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+}
+.pos-urgent {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+  font-weight: 600;
+  min-height: 32px;
+}
+.pos-urgent input {
+  width: 18px;
+  height: 18px;
+}
+.pos-urgent.disabled {
+  cursor: not-allowed;
+  color: var(--ink-faint);
+}
+.pos-discount {
+  margin: 6px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.pos-catalog {
+  margin-top: 10px;
+  font-size: 13px;
+}
+.pos-catalog .crow {
+  display: flex;
+  justify-content: space-between;
+}
+
+@media (max-width: 900px) {
   .pos {
     flex-direction: column;
   }
@@ -1749,6 +1902,14 @@ label {
     width: 100%;
     position: static;
     order: -1;
+    max-height: none;
+    overflow: visible;
+  }
+  .pos-submit {
+    position: static;
+    margin: 14px 0 0;
+    padding: 0;
+    border: 0;
   }
 }
 
@@ -1762,6 +1923,9 @@ label {
 }
 
 /* --- Toasts --- */
+/* Две «живые области»: обычные сообщения (role=status, вежливо) и ошибки
+   (role=alert, сразу). Обе стоят в разметке всегда — экранный диктор озвучивает
+   только то, что появилось в уже существующей области. */
 .toasts {
   position: fixed;
   bottom: 20px;
@@ -1770,26 +1934,69 @@ label {
   flex-direction: column;
   gap: 10px;
   z-index: 200;
+  align-items: flex-end;
+}
+
+.toast-region {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-end;
 }
 
 .toast {
   background: var(--ink-secondary);
   color: var(--toast-ink);
-  padding: 12px 16px;
+  padding: 12px 8px 12px 16px;
   border-radius: var(--r-md);
   box-shadow: var(--shadow-2);
   font-weight: 600;
   font-size: 14px;
-  max-width: 320px;
+  max-width: 360px;
   animation: toast-in 0.18s ease;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
 }
 
+.toast .toast-text {
+  flex: 1;
+  min-width: 0;
+  padding-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+/* Белый текст на --ok (#1aae39) давал 2.9:1; на --ok-ink — 5.9:1. */
 .toast.success {
-  background: var(--ok);
+  background: var(--ok-ink);
 }
 
 .toast.error {
   background: var(--danger);
+}
+
+.toast.warning {
+  background: var(--amber-ink);
+}
+
+.toast .toast-close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  border-radius: var(--r-sm);
+}
+
+.toast .toast-close:hover {
+  background: color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.toast .toast-close:focus-visible {
+  outline-color: currentColor;
+  outline-offset: -2px;
 }
 
 @keyframes toast-in {
@@ -1838,6 +2045,24 @@ label {
    темы приложения. Документ печатают и подшивают, он не должен зависеть от
    того, включена ли у кассира тёмная тема. */
 .print-sheet {
+  /* Лист — «бумага»: ВСЕ цвета внутри задаём заново, а не наследуем от темы.
+     Заголовки (`h1–h3`, `.doc-title`) берут цвет из --ink, и в тёмной теме это
+     светлый текст: белый заголовок на белом листе давал контраст 1.1:1 — и на
+     экране, и на бумаге. Переопределённые токены действуют на всё, что внутри
+     (подписи `.muted`, ссылки, границы). */
+  --ink: #111111;
+  --ink-secondary: #222222;
+  --ink-muted: #444444;
+  --ink-faint: #555555;
+  --ink-icon: #777777;
+  --hairline: #bdbdbd;
+  --canvas: #f2f2f2;
+  --surface: #ffffff;
+  --accent-ink: #111111;
+  --accent-strong: #111111;
+  --danger-ink: #111111;
+  --ok-ink: #111111;
+  color-scheme: light;
   width: 210mm;
   max-width: 100%;
   min-height: 260mm;
@@ -1850,6 +2075,16 @@ label {
   font-family: "Times New Roman", Georgia, "Liberation Serif", serif;
   font-size: 13px;
   line-height: 1.45;
+}
+
+/* Явно тёмный текст на листе — на случай, если заголовок получит цвет из
+   правила для h1–h3 раньше, чем сработают локальные токены. */
+.print-sheet,
+.print-sheet h1,
+.print-sheet h2,
+.print-sheet h3,
+.print-sheet .doc-title {
+  color: #111111;
 }
 
 .print-modal {
@@ -1889,6 +2124,19 @@ label {
 .doc-note {
   margin: 12px 0 0;
   font-style: italic;
+}
+
+/* «Сводка» Финансов: сколько за период дали скидками и взяли за срочность. */
+.pricing-rules-block {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+
+/* Цена до правил прайса — над итоговой, зачёркнутой (D-62). */
+.doc-was {
+  display: block;
+  font-size: 0.85em;
 }
 
 .doc-bank {
@@ -2023,6 +2271,17 @@ label {
     border: 0;
     border-radius: 0;
     margin: 0;
+    background: #ffffff !important;
+    color: #111111 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .print-sheet h1,
+  .print-sheet h2,
+  .print-sheet h3,
+  .print-sheet .doc-title {
+    color: #111111 !important;
   }
 }
 
@@ -2043,21 +2302,20 @@ label {
   position: relative;
   width: 74px;
   flex: none;
-  margin-bottom: 18px;
+  margin-bottom: 20px;
 }
 
 .dc-tick {
   position: absolute;
   right: 0;
   transform: translateY(-50%);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-faint);
   white-space: nowrap;
 }
 
 .dc-tick-neg {
-  color: var(--danger);
-  opacity: 0.7;
+  color: var(--danger-ink);
 }
 
 .dc-chart {
@@ -2088,7 +2346,9 @@ label {
   left: 0;
   right: 0;
   top: var(--zero);
-  border-top: 1px solid var(--hairline);
+  /* Нулевая линия — --ink-faint (≥4.5:1), а не --hairline (1.2:1 к фону):
+     по ней читаются и плюс, и минус. */
+  border-top: 1px solid var(--ink-faint);
 }
 
 .dc-bar {
@@ -2118,16 +2378,16 @@ label {
 }
 
 .dc-day {
-  height: 18px;
-  line-height: 18px;
+  height: 20px;
+  line-height: 20px;
   text-align: center;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--ink-faint);
   overflow: hidden;
 }
 
 .dc-day.today {
-  color: var(--accent-strong);
+  color: var(--accent-ink);
   font-weight: 700;
 }
 
@@ -2259,22 +2519,38 @@ label {
   background: var(--primary);
 }
 
-@media (max-width: 600px) {
+/* Мобильная раскладка включается с 900px, а не с 600: на планшете (768px)
+   боковое меню занимало треть экрана, таблицы не влезали и тащили вбок всю
+   страницу вместе с шапкой («Выйти» обрезалось). Теперь до 900px — бургер,
+   карточки вместо таблиц и крупные цели нажатия; ниже 600px добавляется только
+   сжатие шапки и фильтров во всю ширину. */
+@media (max-width: 900px) {
   .sidebar {
     position: fixed;
     z-index: 60;
     transform: translateX(-100%);
-    transition: transform 0.2s ease;
+    /* Закрытое меню уезжает за экран, но остаётся в порядке Tab: прячем его и
+       от клавиатуры, и от экранного диктора. visibility включается после
+       анимации, чтобы выезд оставался плавным. */
+    visibility: hidden;
+    transition: transform 0.2s ease, visibility 0s linear 0.2s;
     box-shadow: var(--shadow-2);
   }
   .sidebar.open {
     transform: translateX(0);
+    visibility: visible;
+    transition: transform 0.2s ease, visibility 0s;
   }
   .burger {
     display: inline-flex;
   }
   .table {
     display: none;
+  }
+  /* Складской лист и сетка ввода — широкие таблицы без карточного двойника:
+     остаются таблицами внутри собственной прокручиваемой обёртки. */
+  .sheet-table {
+    display: table;
   }
   /* Кроме сетки ввода каталога: у неё нет карточного двойника, и правило выше
      оставляло на телефоне пустое окно с одной кнопкой. Таблица остаётся
@@ -2327,21 +2603,52 @@ label {
   .sidebar a {
     height: 48px;
   }
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--scrim);
+    z-index: 55;
+  }
+  /* Кнопки действий в строках карточек и таблиц — не меньше 44px по высоте:
+     мелкие «Печать/Изменить/Возврат» на планшете и телефоне давали промахи
+     соседними кнопками (в том числе «Удалить» рядом с «Возврат»). */
+  .row-btn,
+  button.ghost,
+  button.secondary {
+    min-height: 44px;
+    height: auto;
+  }
+  .row-btn {
+    padding: 8px 14px;
+    font-size: 14px;
+  }
+  .row-actions {
+    min-width: 0;
+    max-width: none;
+    gap: 8px;
+  }
+  .stepper button {
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+  .hint-btn {
+    min-width: 24px;
+    min-height: 24px;
+  }
+}
+
+@media (max-width: 600px) {
   .toolbar .search,
   .toolbar select,
-  .toolbar .filter-date {
+  .toolbar .filter-date,
+  .toolbar .picker {
     width: 100%;
     flex: 1 1 100%;
     max-width: none;
   }
   .filter-date input {
     width: 100%;
-  }
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: var(--scrim);
-    z-index: 55;
   }
 }
 
@@ -2377,7 +2684,7 @@ label {
   color: var(--ink-faint);
 }
 .stmt-table td.stmt-neg {
-  color: var(--danger);
+  color: var(--danger-ink);
 }
 .stmt-table tr.stmt-total td,
 .stmt-table tr.stmt-subtotal td,
@@ -2395,7 +2702,7 @@ label {
 .stmt-table tr.stmt-grand td {
   font-weight: 700;
   background: var(--primary-soft);
-  color: var(--accent-strong);
+  color: var(--accent-ink);
 }
 /* Прилипшая клетка должна быть непрозрачной, иначе под ней просвечивают
    уехавшие колонки: полупрозрачный оттенок кладём поверх фона карточки. */
@@ -2454,16 +2761,24 @@ button.ghost.kind-row > span:last-child {
 .hint-btn {
   all: unset;
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Область нажатия ≥24px (WCAG 2.5.8): значок 14px сам по себе — слишком
+     мелкая цель, особенно пальцем. Увеличиваем кнопку, а не значок, и
+     компенсируем поля, чтобы подпись рядом не раздвигалась. */
+  min-width: 24px;
+  min-height: 24px;
+  margin: -5px -3px;
   cursor: help;
   color: var(--ink-muted);
   border-radius: 50%;
   line-height: 0;
 }
 .hint-btn:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
-.hint-warn .hint-btn { color: var(--danger); }
+.hint-warn .hint-btn { color: var(--danger-ink); }
 .hint-pop {
   position: fixed;
   z-index: 1000;
@@ -2482,7 +2797,7 @@ button.ghost.kind-row > span:last-child {
 }
 
 /* Строка-предупреждение в таблице отчёта (несведённые переводы, «Не объяснено»). */
-.stmt-table tr.stmt-warn td { color: var(--danger); }
+.stmt-table tr.stmt-warn td { color: var(--danger-ink); }
 .stmt-table tr.stmt-warn-zero td { color: var(--ink-muted); }
 
 /* Главные плитки «Обзора» и «почему прибыль ≠ деньгам». */
@@ -2501,7 +2816,312 @@ button.ghost.kind-row > span:last-child {
 .head-tile .label { display: flex; align-items: center; gap: 2px; }
 .head-tile .period { font-size: 12px; color: var(--ink-muted); margin-top: 2px; }
 .head-tile .change { font-size: 13px; margin-top: 6px; }
-.head-tile .change.up { color: var(--ok); }
-.head-tile .change.down { color: var(--danger); }
+.head-tile .change.up { color: var(--ok-ink); }
+.head-tile .change.down { color: var(--danger-ink); }
 .why-card .why-row { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; }
 .why-card .why-row span:first-child { min-width: 0; }
+
+/* --- Доступность и общие компоненты (аудит 2026-10-10) -------------------- */
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* «К содержимому»: первая ссылка страницы, видна только при фокусе с
+   клавиатуры — иначе с каждой страницы приходилось бы проходить Tab'ом всё
+   боковое меню. */
+.skip-link {
+  position: absolute;
+  left: 12px;
+  top: -64px;
+  z-index: 300;
+  padding: 10px 16px;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--ink);
+  border: 2px solid var(--focus-ring);
+  font-weight: 600;
+  transition: top 0.12s ease;
+}
+.skip-link:focus {
+  top: 12px;
+}
+
+.route-loading,
+.boundary {
+  max-width: 560px;
+  margin: 64px auto;
+  padding: 0 16px;
+}
+
+.boundary h1 {
+  margin-bottom: 8px;
+}
+
+.boundary .row {
+  margin-top: 16px;
+}
+
+/* Одно пункт меню (кабинет клиента): боковая панель и бургер не нужны, а
+   название системы переезжает в шапку. */
+.shell.no-sidebar .sidebar,
+.shell.no-sidebar .burger,
+.shell.no-sidebar .overlay {
+  display: none;
+}
+.topbar .topbar-brand {
+  display: none;
+  font-weight: 700;
+  color: var(--accent-ink);
+}
+.shell.no-sidebar .topbar .topbar-brand {
+  display: inline;
+  white-space: nowrap;
+}
+/* На телефоне в кабинете клиента название роли («Клиент») лишнее и выдавливает
+   название системы в две строки — оставляем только название. */
+@media (max-width: 600px) {
+  .shell.no-sidebar .topbar strong {
+    display: none;
+  }
+  /* Название + тема + язык + выход в 375px впритык: мельче шрифт названия. */
+  .topbar .topbar-brand {
+    font-size: 13px;
+  }
+}
+
+/* Выход: подпись на широком экране, на узком — только значок (английское
+   «Sign out» распирало шапку на 375px). */
+.logout-btn .logout-icon {
+  display: none;
+}
+@media (max-width: 600px) {
+  .logout-btn .logout-text {
+    display: none;
+  }
+  .logout-btn .logout-icon {
+    display: inline-block;
+  }
+  .logout-btn {
+    padding: 0 10px;
+  }
+}
+
+/* Пагинатор под списками. */
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin: 14px 0 4px;
+  font-size: 13px;
+  color: var(--ink-muted);
+}
+.pager-ctl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.pager-ctl button {
+  min-width: 36px;
+  height: 36px;
+  padding: 0 10px;
+  font-size: 14px;
+}
+.pager-gap {
+  padding: 0 2px;
+  color: var(--ink-faint);
+}
+@media (max-width: 900px) {
+  .pager-ctl button {
+    min-width: 44px;
+    height: 44px;
+  }
+}
+
+/* Выбор клиента с поиском. */
+.picker {
+  position: relative;
+  min-width: 220px;
+}
+.picker input {
+  width: 100%;
+}
+.picker-list {
+  position: absolute;
+  z-index: 30;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  max-height: 280px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+}
+.picker-opt {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  min-height: 38px;
+}
+.picker-opt.active {
+  background: var(--primary-soft);
+}
+.picker-opt[aria-selected="true"] .picker-name {
+  font-weight: 700;
+}
+.picker-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picker-phone {
+  font-size: 12px;
+  white-space: nowrap;
+}
+.picker-note {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+@media (max-width: 900px) {
+  .picker-opt {
+    min-height: 44px;
+  }
+}
+
+/* Пустое состояние с действием («Сбросить фильтры»). */
+.empty-state .empty-action {
+  margin-top: 14px;
+}
+
+/* Строка таблицы, открывающая карточку по клику. */
+.table tbody tr.clickable {
+  cursor: pointer;
+}
+.data-card.clickable {
+  cursor: pointer;
+}
+.table tbody tr.clickable:focus-visible {
+  outline-offset: -2px;
+}
+
+/* ОПиУ/ОДДС: колонка «Итого за год» закреплена справа, а у прилипших краёв —
+   тень: по ней видно, что за краем есть ещё колонки и таблицу можно листать. */
+.stmt-table .stmt-label {
+  box-shadow: 1px 0 0 var(--hairline), 8px 0 10px -8px rgba(0, 0, 0, 0.35);
+}
+.stmt-table th.stmt-total-col,
+.stmt-table td.stmt-total-col {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background: linear-gradient(var(--primary-soft), var(--primary-soft)), var(--surface);
+  box-shadow: -1px 0 0 var(--hairline), -8px 0 10px -8px rgba(0, 0, 0, 0.35);
+}
+.stmt-table thead th.stmt-total-col {
+  z-index: 2;
+  background: linear-gradient(var(--primary-soft), var(--primary-soft)), var(--canvas);
+}
+.stmt-table tr.stmt-grand td.stmt-total-col {
+  background: linear-gradient(var(--primary-soft), var(--primary-soft)), var(--surface);
+}
+
+/* Карточки склада кладовщика: не уже 260px (раньше — 176px от .stat-grid, и
+   название материала переносилось по три слова в строке). */
+.mat-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+  gap: 14px;
+}
+
+/* Значения плиток не переносятся: «131 211 сом» не должно ломаться на «131 211»
+   и «сом». Размер подбирается по ширине самой плитки (container query): в
+   широкой — крупно, в узкой — мельче, но в одну строку. */
+.stat,
+.head-tile {
+  container-type: inline-size;
+}
+.stat .value,
+.head-tile .value {
+  white-space: nowrap;
+  font-size: clamp(18px, 14.5cqw, 26px);
+}
+
+/* Склейка «Нет данных» и «Настроить расход» в таблицах отчёта (Pricing). */
+.recipe-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: baseline;
+  padding: 5px 0;
+}
+.recipe-row .recipe-qty {
+  white-space: nowrap;
+}
+.recipe-edit {
+  margin-top: 6px;
+}
+
+/* «Удалить» в строке чека отделён от «Возврат» зазором и чертой: два красных по
+   смыслу, но разных по последствиям действия (возврат сохраняет запись в
+   отчётах, удаление стирает заказ) стояли вплотную. */
+.row-actions .row-btn.row-danger {
+  margin-left: 14px;
+  position: relative;
+}
+.row-actions .row-btn.row-danger::before {
+  content: "";
+  position: absolute;
+  left: -9px;
+  top: 4px;
+  bottom: 4px;
+  border-left: 1px solid var(--hairline);
+}
+
+.pay-guide {
+  margin: 8px 0;
+  padding-left: 18px;
+  line-height: 1.8;
+}
+
+/* Подсказка у кнопки, неактивной по причине (модалка реза). */
+.disabled-reason {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+/* Предупреждение о несовпадении имени клиента после оформления чека. */
+.callout {
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--amber-line);
+  background: var(--amber-bg);
+  color: var(--ink);
+  font-size: 14px;
+  margin: 10px 0;
+}
+.callout strong {
+  color: var(--amber-ink);
+}

@@ -3,26 +3,34 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 
 import api from "../../api/api.js";
+import { apiError } from "../../api/errors.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import AddToOrderModal from "../../components/AddToOrderModal.jsx";
 import RefundModal from "../../components/RefundModal.jsx";
 import { itemTitle } from "../../utils/itemLabel.js";
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const som = (n) => formatMoney(n);
 const trimQty = (n) => String(+Number(n || 0).toFixed(3));
 import DataTable from "../../components/DataTable.jsx";
 import Icon from "../../components/Icon.jsx";
+import LoadError from "../../components/LoadError.jsx";
 import Modal from "../../components/Modal.jsx";
+import Pager, { usePage } from "../../components/Pager.jsx";
 import PayDebtModal from "../../components/PayDebtModal.jsx";
 import PrintDocs from "../../components/PrintDocs.jsx";
 import { FulfillmentBadge, PaymentBadge } from "../../components/StatusBadge.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
+import { isCanceled, useLatest } from "../../utils/latest.js";
+import { formatDateTime, formatMoney } from "../../utils/format.js";
+import { lineRuled, receiptRuled, rulesLabel } from "../../utils/pricingRules.js";
 
 export default function StoreReceipts() {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
   const navigate = useNavigate();
   const [rows, setRows] = useState([]);
+  const [count, setCount] = useState(0);
+  const [listError, setListError] = useState(false);
   const [stats, setStats] = useState(null);
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(null);
@@ -33,6 +41,10 @@ export default function StoreReceipts() {
   const { isAdmin } = useAuth();
   const [paying, setPaying] = useState(null);
   const [sort, setSort] = useState({ key: "_debt", dir: "desc" });
+  const nextList = useLatest();
+  const nextStats = useLatest();
+  const filterKey = JSON.stringify([search, sort]);
+  const [page, setPage] = usePage(filterKey);
 
   function orderingParam() {
     const tail = sort.key !== "created_at" ? ",-created_at" : "";
@@ -85,14 +97,35 @@ export default function StoreReceipts() {
 
   function load() {
     const params = search ? { search } : {};
-    api.get("/sales/receipts/", { params: { ...params, ordering: orderingParam() } }).then((r) => setRows(r.data.results));
-    api.get("/sales/receipts/stats/", { params }).then((r) => setStats(r.data));
+    api
+      .get("/sales/receipts/", {
+        params: { ...params, ordering: orderingParam(), ...(page > 1 ? { page } : {}) },
+        signal: nextList(),
+      })
+      .then((r) => {
+        setRows(r.data.results);
+        setCount(r.data.count ?? r.data.results.length);
+        setListError(false);
+      })
+      .catch((e) => {
+        if (isCanceled(e)) return;
+        if (e.response?.status === 404 && page > 1) return setPage(1);
+        setListError(true);
+        toast(apiError(e, t("common.loadFailed")), "error");
+      });
+    // Плитки — по тем же фильтрам, но не зависят от страницы.
+    api
+      .get("/sales/receipts/stats/", { params, signal: nextStats() })
+      .then((r) => setStats(r.data))
+      .catch((e) => {
+        if (!isCanceled(e)) setStats(null);
+      });
   }
   useEffect(() => {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, sort]);
+  }, [filterKey, page]);
 
   // Возврат — в отдельном окне с выбором позиций (целиком по умолчанию);
   // раньше здесь был только возврат всего чека одним подтверждением.
@@ -186,7 +219,7 @@ export default function StoreReceipts() {
         if (!hasDebt && !canUndo) return <span className="muted">0</span>;
         return (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
-            {hasDebt && <span style={{ color: "var(--danger)", fontWeight: 600 }}>{som(r.debt)}</span>}
+            {hasDebt && <span style={{ color: "var(--danger-ink)", fontWeight: 600 }}>{som(r.debt)}</span>}
             {hasDebt && isAdmin && (
               <button
                 className="secondary"
@@ -214,13 +247,13 @@ export default function StoreReceipts() {
       key: "created_at",
       label: t("receipts.date"),
       sortKey: "created_at",
-      render: (r) => new Date(r.created_at).toLocaleString("ru-RU"),
+      render: (r) => formatDateTime(r.created_at),
     },
     {
       key: "actions",
       label: t("common.actions"),
       render: (r) => (
-        <div className="row" style={{ gap: 6, alignItems: "center", margin: 0, flexWrap: "nowrap" }}>
+        <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
           {/* Повторный заказ складовщик оформляет чаще админа — он и стоит за
               кассой. Состав переносится, цены берутся сегодняшние. */}
           <button
@@ -239,7 +272,7 @@ export default function StoreReceipts() {
           >
             <Icon name="printer" size={14} /> {t("print.print")}
           </button>
-          <button className="ghost" onClick={() => setOpen(r)} aria-label={t("common.edit")}>
+          <button className="ghost" onClick={(e) => { e.stopPropagation(); setOpen(r); }} aria-label={`${t("common.edit")} №${r.order_number}`}>
             <Icon name="arrow-right" size={18} />
           </button>
         </div>
@@ -264,8 +297,8 @@ export default function StoreReceipts() {
           <div className="stat"><div className="label">{t("receipts.statReady")}</div><div className="value">{stats.ready}</div></div>
           <div className="stat">
             <div className="label">{t("receipts.debt")}</div>
-            <div className="value" style={Number(stats.debt) > 0 ? { color: "var(--danger)" } : undefined}>
-              {Math.round(Number(stats.debt)).toLocaleString("ru-RU")} сом
+            <div className="value" style={Number(stats.debt) > 0 ? { color: "var(--danger-ink)" } : undefined}>
+              {formatMoney(stats.debt)}
             </div>
           </div>
         </div>
@@ -273,12 +306,27 @@ export default function StoreReceipts() {
       <div className="toolbar">
         <input
           className="search"
+          type="search"
+          aria-label={t("common.search")}
           placeholder={`${t("common.search")} (${t("receipts.number")})`}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
       </div>
-      <DataTable columns={columns} rows={rows} sort={sort} onSort={onSort} />
+      {listError && !rows.length ? (
+        <LoadError onRetry={load} />
+      ) : (
+        <DataTable
+          columns={columns}
+          rows={rows}
+          sort={sort}
+          onSort={onSort}
+          onRowClick={setOpen}
+          filtered={!!search}
+          onReset={() => setSearch("")}
+        />
+      )}
+      <Pager page={page} count={count} onPage={setPage} />
 
       {open && (
         <Modal
@@ -352,10 +400,22 @@ export default function StoreReceipts() {
                     </span>
                   )}
                 </span>
-                <span>{som(it.line_total)}</span>
+                <span>
+                  {lineRuled(it) && <s className="muted">{som(it.catalog_total)}</s>}{" "}
+                  {som(it.line_total)}
+                </span>
               </div>
             );
           })}
+          {receiptRuled(open) && (
+            <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 8 }}>
+              <span className="k">
+                {t("checkout.catalogTotal")}
+                <span className="muted" style={{ display: "block", fontSize: 12 }}>{rulesLabel(open, t)}</span>
+              </span>
+              <s className="muted">{som(open.catalog_total)}</s>
+            </div>
+          )}
           <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 8 }}>
             <strong>{t("common.total")}</strong>
             <strong>{som(open.total_price)}</strong>
@@ -378,13 +438,13 @@ export default function StoreReceipts() {
           {Number(open.change_due) > 0 && (
             <div className="crow">
               <span className="k">{t("receipts.change")}</span>
-              <strong style={{ color: "var(--accent-strong)" }}>{som(open.change_due)}</strong>
+              <strong style={{ color: "var(--accent-ink)" }}>{som(open.change_due)}</strong>
             </div>
           )}
           {Number(open.debt) > 0 && (
             <div className="crow">
               <span className="k">{t("receipts.debt")}</span>
-              <strong style={{ color: "var(--danger)" }}>{som(open.debt)}</strong>
+              <strong style={{ color: "var(--danger-ink)" }}>{som(open.debt)}</strong>
             </div>
           )}
           <div className="crow">
@@ -416,6 +476,7 @@ export default function StoreReceipts() {
       {adding && open && (
         <AddToOrderModal
           receiptId={open.id}
+          receipt={open}
           onClose={() => setAdding(false)}
           onAdded={(data) => {
             setOpen(data);

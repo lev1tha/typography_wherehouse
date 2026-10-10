@@ -28,6 +28,7 @@ from .. import chart
 from ..models import CashEntry, ExpenseKind
 from ..periods import month_end
 from .money import ZERO, total
+from .scope import once, report_scope
 
 ACCOUNTS = CashEntry.Account.values
 
@@ -69,10 +70,21 @@ def entries(d_from=None, d_to=None):
 
 
 def _balances(day) -> dict:
-    """Остаток по счетам на конец дня (`None` — на сейчас), до начала — 0."""
-    return {acc: CashEntry.balance(acc, upto=day) for acc in ACCOUNTS}
+    """Остаток по счетам на конец дня (`None` — на сейчас), до начала — 0.
+
+    Тот же расчёт, что `CashEntry.balance`, но книга читается один раз на отчёт:
+    годовая таблица спрашивала остатки по четыре запроса на каждый месяц."""
+    ledger = once("cash_ledger", lambda: list(
+        CashEntry.objects.values_list("account", "kind", "amount", "happened_on")
+    ))
+    out = {acc: ZERO for acc in ACCOUNTS}
+    for account, kind, amount, happened_on in ledger:
+        if account in out and (day is None or happened_on <= day):
+            out[account] += amount if kind == CashEntry.Kind.IN else -amount
+    return out
 
 
+@report_scope
 def cash_flow(d_from=None, d_to=None) -> dict:
     """ОДДС за период: разделы со строками, поток, вне потока, остатки."""
     lines = OrderedDict()
@@ -137,6 +149,7 @@ def cash_flow(d_from=None, d_to=None) -> dict:
     }
 
 
+@report_scope
 def cash_flow_year(year: int) -> dict:
     """Таблица ОДДС: строки × 12 месяцев + итог года."""
     today = timezone.localdate()

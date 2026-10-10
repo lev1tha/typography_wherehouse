@@ -19,6 +19,8 @@ class AuditLog(models.Model):
         verbose_name = _("запись аудита")
         verbose_name_plural = _("аудит-лог")
         ordering = ["-created_at"]
+        # Журнал листается от новых к старым и растёт с каждым действием.
+        indexes = [models.Index(fields=["-created_at"], name="auditlog_created_idx")]
 
     def __str__(self) -> str:
         who = self.user.username if self.user else "—"

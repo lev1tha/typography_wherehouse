@@ -3,19 +3,27 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 
 import api from "../../api/api.js";
+import { apiError } from "../../api/errors.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import AddToOrderModal from "../../components/AddToOrderModal.jsx";
+import ClientPicker from "../../components/ClientPicker.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import EditReceiptModal from "../../components/EditReceiptModal.jsx";
 import RefundModal from "../../components/RefundModal.jsx";
 import GiveChangeModal from "../../components/GiveChangeModal.jsx";
 import Icon from "../../components/Icon.jsx";
+import LoadError from "../../components/LoadError.jsx";
+import Pager, { usePage } from "../../components/Pager.jsx";
 import PayDebtModal from "../../components/PayDebtModal.jsx";
 import PrintDocs from "../../components/PrintDocs.jsx";
 import { FulfillmentBadge, PaymentBadge } from "../../components/StatusBadge.jsx";
+import Tabs, { tabPanel } from "../../components/Tabs.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
+import { isCanceled, useLatest } from "../../utils/latest.js";
+import { receiptRuled, rulesLabel } from "../../utils/pricingRules.js";
+import { formatDate, formatDateTime, formatMoney, formatTime } from "../../utils/format.js";
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const som = (n) => formatMoney(n);
 
 function ReceiptsTab() {
   const { t } = useTranslation();
@@ -26,6 +34,8 @@ function ReceiptsTab() {
   // которые гарантированно ответят 403, — это обещать то, чего нет.
   const readOnly = isAccountant;
   const [rows, setRows] = useState([]);
+  const [count, setCount] = useState(0);
+  const [listError, setListError] = useState(false);
   const [stats, setStats] = useState(null);
   const [method, setMethod] = useState("");
   const [pstatus, setPstatus] = useState("");
@@ -37,7 +47,6 @@ function ReceiptsTab() {
   const [dateTo, setDateTo] = useState("");
   // «Кому мы должны отдать сдачу» — рабочий список кассира.
   const [onlyChange, setOnlyChange] = useState(false);
-  const [clientsList, setClientsList] = useState([]);
   const [advancingId, setAdvancingId] = useState(null);
   const [paying, setPaying] = useState(null);
   const [givingChange, setGivingChange] = useState(null);
@@ -49,6 +58,12 @@ function ReceiptsTab() {
   const [sort, setSort] = useState({ key: "_debt", dir: "desc" });
 
   const filtered = method || pstatus || search || client || dateFrom || dateTo || onlyChange;
+  // Поиск и фильтры шлют запрос на каждое нажатие — побеждает последний; смена
+  // фильтра или сортировки возвращает на первую страницу.
+  const nextList = useLatest();
+  const nextStats = useLatest();
+  const filterKey = JSON.stringify([method, pstatus, search, client, dateFrom, dateTo, onlyChange, sort]);
+  const [page, setPage] = usePage(filterKey);
 
   function resetFilters() {
     setMethod(""); setPstatus(""); setSearch("");
@@ -74,10 +89,31 @@ function ReceiptsTab() {
     if (dateFrom) params.date_from = dateFrom;
     if (dateTo) params.date_to = dateTo;
     if (onlyChange) params.has_change = "1";
-    api.get("/sales/receipts/", { params: { ...params, ordering: orderingParam() } }).then((r) => setRows(r.data.results));
-    // Плитки сверху считаются по ТЕМ ЖЕ фильтрам: иначе «Долг» показывал бы
-    // общий долг цеха под отфильтрованным списком одного клиента.
-    api.get("/sales/receipts/stats/", { params }).then((r) => setStats(r.data));
+    api
+      .get("/sales/receipts/", {
+        params: { ...params, ordering: orderingParam(), ...(page > 1 ? { page } : {}) },
+        signal: nextList(),
+      })
+      .then((r) => {
+        setRows(r.data.results);
+        setCount(r.data.count ?? r.data.results.length);
+        setListError(false);
+      })
+      .catch((e) => {
+        if (isCanceled(e)) return;
+        if (e.response?.status === 404 && page > 1) return setPage(1);
+        setListError(true);
+        toast(apiError(e, t("common.loadFailed")), "error");
+      });
+    // Плитки сверху считаются по ТЕМ ЖЕ фильтрам (и не зависят от страницы):
+    // иначе «Долг» показывал бы общий долг цеха под отфильтрованным списком
+    // одного клиента, а «Всего» — число строк на странице.
+    api
+      .get("/sales/receipts/stats/", { params, signal: nextStats() })
+      .then((r) => setStats(r.data))
+      .catch((e) => {
+        if (!isCanceled(e)) setStats(null);
+      });
   }
 
   const nextShort = (s) => (s === "PROCESSING" ? t("receipts.toReady") : t("receipts.toIssued"));
@@ -151,11 +187,7 @@ function ReceiptsTab() {
     const id = setTimeout(load, 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [method, pstatus, search, client, dateFrom, dateTo, onlyChange, sort]);
-
-  useEffect(() => {
-    api.get("/clients/clients/").then((r) => setClientsList(r.data.results)).catch(() => {});
-  }, []);
+  }, [filterKey, page]);
 
   // Таблица уложена в десять колонок, чтобы влезать в обычный монитор:
   // раньше их было четырнадцать (1650px при 1440 у заказчика), и действия по
@@ -235,7 +267,22 @@ function ReceiptsTab() {
         ),
     },
     // Итог — тем же форматом, что остальные суммы («1 879 сом», не «1879.00»).
-    { key: "total_price", label: t("common.total"), sortKey: "total_price", render: (r) => <strong>{som(r.total_price)}</strong> },
+    {
+      key: "total_price",
+      label: t("common.total"),
+      sortKey: "total_price",
+      render: (r) => (
+        <>
+          <strong>{som(r.total_price)}</strong>
+          {/* Правила прайса: «по каталогу» и что сработало — срочность, скидка. */}
+          {receiptRuled(r) && (
+            <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+              <s>{som(r.catalog_total)}</s> · {rulesLabel(r, t)}
+            </div>
+          )}
+        </>
+      ),
+    },
     // Маржа и под ней себестоимость проданного по заказу. Снимок закупки на
     // момент продажи — переоценка склада прошлые заказы не двигает. Видят
     // владелец и бухгалтер: складовщик оформляет и выдаёт, но закупочных цен
@@ -250,7 +297,7 @@ function ReceiptsTab() {
                 {r.margin == null ? (
                   <span className="muted">—</span>
                 ) : (
-                  <strong style={{ color: Number(r.margin) < 0 ? "var(--danger)" : undefined }}>
+                  <strong style={{ color: Number(r.margin) < 0 ? "var(--danger-ink)" : undefined }}>
                     {som(r.margin)}
                   </strong>
                 )}
@@ -283,7 +330,7 @@ function ReceiptsTab() {
         if (!hasDebt && due <= 0 && !canUndo) return <span className="muted">{som(0)}</span>;
         return (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
-            {hasDebt && <span style={{ color: "var(--danger)", fontWeight: 600, whiteSpace: "nowrap" }}>{som(r.debt)}</span>}
+            {hasDebt && <span style={{ color: "var(--danger-ink)", fontWeight: 600, whiteSpace: "nowrap" }}>{som(r.debt)}</span>}
             {hasDebt && !readOnly && (
               <button
                 className="secondary row-btn"
@@ -293,7 +340,7 @@ function ReceiptsTab() {
               </button>
             )}
             {due > 0 && (
-              <span style={{ color: "var(--accent-strong)", fontWeight: 600, whiteSpace: "nowrap" }}>
+              <span style={{ color: "var(--accent-ink)", fontWeight: 600, whiteSpace: "nowrap" }}>
                 {t("receipts.change")}: {som(due)}
               </span>
             )}
@@ -327,9 +374,9 @@ function ReceiptsTab() {
         const d = new Date(r.created_at);
         return (
           <span style={{ whiteSpace: "nowrap" }}>
-            {d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" })}
+            {formatDate(d)}
             <div className="muted" style={{ fontSize: 12 }}>
-              {d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
+              {formatTime(d)}
             </div>
           </span>
         );
@@ -415,7 +462,7 @@ function ReceiptsTab() {
           <div className="stat"><div className="label">{t("receipts.statReady")}</div><div className="value">{stats.ready}</div></div>
           <div className="stat">
             <div className="label">{t("receipts.debt")}</div>
-            <div className="value" style={Number(stats.debt) > 0 ? { color: "var(--danger)" } : undefined}>
+            <div className="value" style={Number(stats.debt) > 0 ? { color: "var(--danger-ink)" } : undefined}>
               {som(stats.debt)}
             </div>
           </div>
@@ -425,7 +472,7 @@ function ReceiptsTab() {
             <div className="label">{t("receipts.statChange")}</div>
             <div
               className="value"
-              style={Number(stats.change_due) > 0 ? { color: "var(--accent-strong)" } : undefined}
+              style={Number(stats.change_due) > 0 ? { color: "var(--accent-ink)" } : undefined}
             >
               {som(stats.change_due)}
             </div>
@@ -435,18 +482,20 @@ function ReceiptsTab() {
       <div className="toolbar">
         <input
           className="search"
+          type="search"
+          aria-label={t("common.search")}
           placeholder={t("common.search")}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <select value={method} onChange={(e) => setMethod(e.target.value)}>
+        <select aria-label={t("receipts.method")} value={method} onChange={(e) => setMethod(e.target.value)}>
           <option value="">{t("receipts.method")}: {t("common.all")}</option>
           <option value="CASH">{t("checkout.cash")}</option>
           <option value="MBANK">{t("checkout.mbank")}</option>
           <option value="DEMIRBANK">{t("checkout.demirbank")}</option>
           <option value="ONLINE">{t("checkout.online")}</option>
         </select>
-        <select value={pstatus} onChange={(e) => setPstatus(e.target.value)}>
+        <select aria-label={t("receipts.status")} value={pstatus} onChange={(e) => setPstatus(e.target.value)}>
           <option value="">{t("receipts.status")}: {t("common.all")}</option>
           {["PENDING", "PAID", "REFUNDED", "PARTIALLY_REFUNDED"].map((s) => (
             <option key={s} value={s}>
@@ -454,14 +503,14 @@ function ReceiptsTab() {
             </option>
           ))}
         </select>
-        <select value={client} onChange={(e) => setClient(e.target.value)}>
-          <option value="">{t("checkout.client")}: {t("common.all")}</option>
-          {clientsList.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.display_name}
-            </option>
-          ))}
-        </select>
+        {/* Клиент — поиском по серверу: раньше это был <select> с первыми 25
+            клиентами, и остальных в фильтре просто не было. */}
+        <ClientPicker
+          value={client}
+          noneLabel={`${t("checkout.client")}: ${t("common.all")}`}
+          onChange={(id) => setClient(id === "" ? "" : String(id))}
+          aria-label={t("checkout.client")}
+        />
         {/* Даты подписаны прямо в поле: без подписи два одинаковых календаря
             рядом не читаются — непонятно, где «с», а где «по». */}
         {/* Оба календаря — одной неразрывной парой: поодиночке «С» оставалось в
@@ -478,6 +527,7 @@ function ReceiptsTab() {
         </div>
         <button
           className={onlyChange ? "" : "secondary"}
+          aria-pressed={onlyChange}
           onClick={() => setOnlyChange((v) => !v)}
         >
           {t("receipts.onlyChange")}
@@ -491,8 +541,20 @@ function ReceiptsTab() {
       {/* С себестоимостью и маржой колонок стало одиннадцать — таблица
           прокручивается вбок сама, а не тянет за собой всю страницу. */}
       <div className="table-wrap dense">
-        <DataTable columns={columns} rows={rows} sort={sort} onSort={onSort} />
+        {listError && !rows.length ? (
+          <LoadError onRetry={load} />
+        ) : (
+          <DataTable
+            columns={columns}
+            rows={rows}
+            sort={sort}
+            onSort={onSort}
+            filtered={!!filtered}
+            onReset={resetFilters}
+          />
+        )}
       </div>
+      <Pager page={page} count={count} onPage={setPage} />
 
       {paying && (
         <PayDebtModal
@@ -523,6 +585,7 @@ function ReceiptsTab() {
       {adding && (
         <AddToOrderModal
           receiptId={adding.id}
+          receipt={adding}
           onClose={() => setAdding(null)}
           onAdded={() => { setAdding(null); load(); }}
         />
@@ -556,10 +619,32 @@ function auditIcon(action = "") {
 
 function AuditTab() {
   const { t } = useTranslation();
+  const { toast } = useUI();
   const [rows, setRows] = useState([]);
-  useEffect(() => {
-    api.get("/audit/logs/").then((r) => setRows(r.data.results));
-  }, []);
+  const [count, setCount] = useState(0);
+  const [failed, setFailed] = useState(false);
+  const [page, setPage] = usePage("audit");
+  const next = useLatest();
+
+  function load() {
+    api
+      .get("/audit/logs/", { params: page > 1 ? { page } : {}, signal: next() })
+      .then((r) => {
+        setRows(r.data.results);
+        setCount(r.data.count ?? r.data.results.length);
+        setFailed(false);
+      })
+      .catch((e) => {
+        if (isCanceled(e)) return;
+        if (e.response?.status === 404 && page > 1) return setPage(1);
+        setFailed(true);
+        toast(apiError(e, t("common.loadFailed")), "error");
+      });
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(load, [page]);
+
+  if (failed && !rows.length) return <LoadError onRetry={load} />;
 
   if (!rows.length) {
     return (
@@ -571,19 +656,22 @@ function AuditTab() {
   }
 
   return (
-    <div className="feed">
-      {rows.map((r) => (
-        <div className="feed-item" key={r.id}>
-          <div className="feed-icon"><Icon name={auditIcon(r.action)} size={17} /></div>
-          <div className="feed-body">
-            <div className="feed-action">{r.action}</div>
-            <div className="feed-meta">
-              {r.username || "—"} · {new Date(r.created_at).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+    <>
+      <div className="feed">
+        {rows.map((r) => (
+          <div className="feed-item" key={r.id}>
+            <div className="feed-icon"><Icon name={auditIcon(r.action)} size={17} /></div>
+            <div className="feed-body">
+              <div className="feed-action">{r.action}</div>
+              <div className="feed-meta">
+                {r.username || "—"} · {formatDateTime(r.created_at)}
+              </div>
             </div>
           </div>
-        </div>
-      ))}
-    </div>
+        ))}
+      </div>
+      <Pager page={page} count={count} onPage={setPage} />
+    </>
   );
 }
 
@@ -594,18 +682,19 @@ export default function Receipts() {
   return (
     <>
       <h1>{t("receipts.title")}</h1>
-      <div className="tabs">
-        <button
-          className={tab === "receipts" ? "active" : ""}
-          onClick={() => setTab("receipts")}
-        >
-          {t("receipts.title")}
-        </button>
-        <button className={tab === "audit" ? "active" : ""} onClick={() => setTab("audit")}>
-          {t("nav.audit")}
-        </button>
+      <Tabs
+        id="receipts"
+        label={t("receipts.title")}
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { key: "receipts", label: t("receipts.title") },
+          { key: "audit", label: t("nav.audit") },
+        ]}
+      />
+      <div {...tabPanel("receipts", tab)}>
+        {tab === "receipts" ? <ReceiptsTab /> : <AuditTab />}
       </div>
-      {tab === "receipts" ? <ReceiptsTab /> : <AuditTab />}
     </>
   );
 }

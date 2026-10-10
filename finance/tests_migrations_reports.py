@@ -8,6 +8,7 @@ finance/0013–0015 и sales/0013–0014 обязаны: заполнить но
 from datetime import date, datetime, time
 from decimal import Decimal
 
+from django.contrib.contenttypes.models import ContentType
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
@@ -31,6 +32,19 @@ class ReportsV2MigrationTests(TransactionTestCase):
     # Данные миграций (встроенные виды расхода) нужны остальным тестам —
     # вернуть их после усечения таблиц.
     serialized_rollback = True
+
+    @classmethod
+    def _fixture_setup(cls):
+        # Другой TransactionTestCase, прошедший раньше (например, из
+        # warehouse), при очистке базы заново создаёт content types и права
+        # сигналом post_migrate — с НОВЫМИ id. Откат сериализованного снимка
+        # (serialized_rollback) потом кладёт те же (app_label, model) со
+        # СТАРЫМИ id и падает на уникальности django_content_type. Освобождаем
+        # место заранее: снимок вернёт эти же строки (права уйдут каскадом и
+        # вернутся вместе с ними), так что результат не зависит от порядка
+        # тестов (--shuffle) и от соседей.
+        ContentType.objects.all().delete()
+        super()._fixture_setup()
 
     def tearDown(self):
         migrate(MigrationExecutor(connection).loader.graph.leaf_nodes())

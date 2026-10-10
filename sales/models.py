@@ -1,7 +1,7 @@
 import uuid
 from decimal import ROUND_CEILING, Decimal
 
-from django.db import models
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -138,20 +138,35 @@ class Receipt(models.Model):
     revenue_recognized_at = models.DateTimeField(
         _("дата признания выручки"), null=True, blank=True,
     )
+    # Правила прайса заказа (2026-10-10, CALC-01/CLI-02). Записаны на чеке,
+    # чтобы дозаказ и правка состава считались по тем же правилам, что и сам
+    # заказ: срочный остаётся срочным с той наценкой, что была; скидка — та,
+    # что дали при оформлении, а не сегодняшняя из карточки клиента.
+    is_urgent = models.BooleanField(_("срочно"), default=False)
+    urgency_percent = models.DecimalField(
+        _("наценка за срочность, %"), max_digits=5, decimal_places=2, default=Decimal("0"),
+    )
+    discount_percent = models.DecimalField(
+        _("скидка, %"), max_digits=5, decimal_places=2, default=Decimal("0"),
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = _("чек")
         verbose_name_plural = _("чеки")
         ordering = ["-created_at"]
+        # Отчёты и списки режут чеки по дате заказа, дате признания выручки и
+        # статусу оплаты — без индексов это полный проход по таблице.
+        indexes = [
+            models.Index(fields=["created_at"], name="receipt_created_idx"),
+            models.Index(fields=["revenue_recognized_at"], name="receipt_recognized_idx"),
+            models.Index(fields=["payment_status"], name="receipt_paystatus_idx"),
+        ]
+
+    # Сколько раз пробуем взять следующий номер, прежде чем сдаться.
+    ORDER_NUMBER_ATTEMPTS = 5
 
     def save(self, *args, **kwargs):
-        # Проставляем человеческий сквозной номер при первом сохранении.
-        # Домен маленький (1–2 кассира) — Max+1 достаточно; при равной гонке
-        # unique-ограничение не даст двум чекам получить один номер.
-        if self.order_number is None:
-            last = Receipt.objects.aggregate(m=models.Max("order_number"))["m"] or 0
-            self.order_number = last + 1
         # Обычный заказ — продажа в день заказа, и перенос даты заказа двигает
         # её следом. Онлайн-заказ признаётся только подтверждением оплаты.
         if self.payment_method != self.PaymentMethod.ONLINE:
@@ -159,7 +174,29 @@ class Receipt(models.Model):
             update_fields = kwargs.get("update_fields")
             if update_fields is not None and "created_at" in update_fields:
                 kwargs["update_fields"] = {*update_fields, "revenue_recognized_at"}
-        super().save(*args, **kwargs)
+        if self.order_number is not None:
+            return super().save(*args, **kwargs)
+
+        # Человеческий сквозной номер при первом сохранении: Max+1. Два кассира
+        # оформляют одновременно — оба берут один и тот же Max, unique не даёт
+        # записать второго, и раньше он получал 500 (из четырёх параллельных
+        # оформлений падали три). Теперь проигравший берёт следующий номер и
+        # пробует снова; вставка идёт в точке сохранения, иначе на Postgres
+        # упавший INSERT отравил бы всю транзакцию оформления. Номер после
+        # удаления последнего чека по-прежнему берётся заново — это прежнее
+        # правило нумерации, его не меняем.
+        for attempt in range(1, self.ORDER_NUMBER_ATTEMPTS + 1):
+            last = Receipt.objects.aggregate(m=models.Max("order_number"))["m"] or 0
+            self.order_number = last + 1
+            try:
+                with transaction.atomic():
+                    return super().save(*args, **kwargs)
+            except IntegrityError:
+                taken = Receipt.objects.filter(order_number=self.order_number).exists()
+                self.order_number = None
+                # Упали не из-за номера (или попытки кончились) — это уже не гонка.
+                if not taken or attempt == self.ORDER_NUMBER_ATTEMPTS:
+                    raise
 
     def recalculate_total(self) -> Decimal:
         # Итог чека — стоимость ВСЕХ строк, включая возвращённые: возврат
@@ -180,6 +217,11 @@ class Receipt(models.Model):
 
     @property
     def has_service(self) -> bool:
+        # Список чеков считает признак одним запросом на всю страницу
+        # (аннотация `_has_service`); без неё — запрос на каждый чек.
+        annotated = self.__dict__.get("_has_service")
+        if annotated is not None:
+            return bool(annotated)
         return self.items.filter(type=TransactionItem.Type.SERVICE).exists()
 
     @property
@@ -336,10 +378,33 @@ class TransactionItem(models.Model):
     # месяц заказа — принятый отчёт менялся задним числом, а закрытый месяц не
     # давал оформить возврат вовсе, пока период не откроешь.
     returned_at = models.DateTimeField(_("дата возврата"), null=True, blank=True)
+    # ПРАВИЛА ПРАЙСА (2026-10-10). `price_per_item` — цена ПОСЛЕ правил, по ней
+    # строка стоит в чеке и во всех отчётах, как и раньше. Здесь — из чего она
+    # вышла: цена за единицу до правил (каталожная или вписанная вручную),
+    # минимум строки, который действовал, и проценты срочности и скидки.
+    # Порядок: расчёт → минимум → ×(1+срочность) → ×(1−скидка) → вверх до
+    # сома (`sales.pricing_rules`). Пусто — строка продана до правил.
+    catalog_price = models.DecimalField(
+        _("цена до правил"), max_digits=12, decimal_places=2, null=True, blank=True,
+    )
+    min_amount = models.DecimalField(
+        _("минимум строки"), max_digits=12, decimal_places=2, null=True, blank=True,
+    )
+    min_applied = models.BooleanField(_("применён минимум"), default=False)
+    urgency_percent = models.DecimalField(
+        _("срочность, %"), max_digits=5, decimal_places=2, null=True, blank=True,
+    )
+    discount_percent = models.DecimalField(
+        _("скидка, %"), max_digits=5, decimal_places=2, null=True, blank=True,
+    )
 
     class Meta:
         verbose_name = _("позиция чека")
         verbose_name_plural = _("позиции чека")
+        indexes = [
+            models.Index(fields=["returned_at"], name="item_returned_at_idx"),
+            models.Index(fields=["receipt", "is_returned"], name="item_receipt_ret_idx"),
+        ]
 
     @property
     def roll_width(self) -> Decimal:
@@ -400,6 +465,19 @@ class TransactionItem(models.Model):
         return (self.quantity * self.price_per_item).quantize(Decimal("1"), rounding=ROUND_CEILING)
 
     @property
+    def catalog_total(self) -> Decimal:
+        """Сколько строка стоила бы БЕЗ правил прайса (до минимума, срочности и
+        скидки), тем же округлением вверх. У строки, проданной до правил, —
+        её собственная стоимость."""
+        if self.catalog_price is None:
+            return self.sold_total
+        return (self.quantity * self.catalog_price).quantize(Decimal("1"), rounding=ROUND_CEILING)
+
+    @property
+    def rules_applied(self) -> bool:
+        return self.catalog_price is not None and self.price_per_item != self.catalog_price
+
+    @property
     def line_total(self) -> Decimal:
         """То, что клиент должен за строку СЕЙЧАС: возвращённая — ноль."""
         if self.is_returned:
@@ -452,3 +530,64 @@ class Payment(models.Model):
 
     def __str__(self) -> str:
         return f"Оплата {self.amount} сом по чеку №{self.receipt.order_number}"
+
+
+class TransactionItemLot(models.Model):
+    """Сколько и из какой партии списано на строку чека.
+
+    Строка может брать материал из нескольких партий (лист кончился посреди
+    заказа, рулон — тоже). `TransactionItem.roll` помнит только первую; из-за
+    этого возврат такой строки ложился целиком в первую партию — и остаток
+    дорогой партии растворялся в дешёвой. Эта запись нужна ровно возврату и
+    правке состава: каждая партия получает обратно свою долю. У строк, проданных
+    до её появления, записей нет — для них возврат работает как раньше.
+    """
+
+    item = models.ForeignKey(
+        TransactionItem, on_delete=models.CASCADE, related_name="lot_uses"
+    )
+    roll = models.ForeignKey(
+        "warehouse.Roll", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="item_uses", verbose_name=_("партия"),
+    )
+    area = models.DecimalField(_("взято, кв.м (шт)"), max_digits=16, decimal_places=6)
+    # Метры — только у рулона, проданного погонными метрами.
+    metres = models.DecimalField(
+        _("взято, пог.м"), max_digits=16, decimal_places=6, null=True, blank=True
+    )
+
+    class Meta:
+        verbose_name = _("партия строки чека")
+        verbose_name_plural = _("партии строк чека")
+
+
+class IdempotencyRecord(models.Model):
+    """Ключ повтора (`Idempotency-Key`) оформления чека и приёма оплаты.
+
+    Касса на плохой сети повторяет запрос, не дождавшись ответа, — и без ключа
+    получается второй чек (или вторая оплата). Запись создаётся В ТОЙ ЖЕ
+    транзакции, что и операция: упала операция — откатился и ключ. Повтор с тем
+    же ключом отдаёт результат первого раза и ничего не создаёт. Записи старше
+    недели вычищаются при очередном использовании.
+    """
+
+    key = models.CharField(max_length=100)
+    user = models.ForeignKey(
+        "accounts.User", on_delete=models.CASCADE, related_name="idempotency_keys"
+    )
+    # «checkout» или «pay:<id чека>» — один и тот же ключ у разных операций не
+    # должен путаться.
+    endpoint = models.CharField(max_length=100)
+    receipt = models.ForeignKey(
+        Receipt, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="idempotency_records",
+    )
+    response_status = models.PositiveSmallIntegerField(default=200)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "endpoint", "key"], name="idempotency_unique_key"
+            )
+        ]

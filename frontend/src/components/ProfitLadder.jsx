@@ -1,9 +1,10 @@
 import { useTranslation } from "react-i18next";
 
 import Hint from "./Hint.jsx";
+import { formatMoney, formatNumber } from "../utils/format.js";
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
-const pctFmt = (v) => (v === null || v === undefined ? "—" : `${Number(v).toLocaleString("ru-RU")} %`);
+const som = (n) => formatMoney(n);
+const pctFmt = (v) => (v === null || v === undefined ? "—" : `${formatNumber(v)} %`);
 
 // «Как сложилась прибыль» — ОПиУ выбранного периода лесенкой (2026-10-07):
 // выручка → себестоимость и потери → валовая прибыль → расходы → EBITDA →
@@ -53,11 +54,11 @@ export default function ProfitLadder({ pnl }) {
                 <span className="muted" style={{ fontSize: 12 }}>{t("ladder.margin", { pct: pctFmt(margin) })}</span>
               )}
               {isTotal ? (
-                <strong style={{ color: key === "revenue" ? undefined : v >= 0 ? "var(--ok)" : "var(--danger)" }}>
+                <strong style={{ color: key === "revenue" ? undefined : v >= 0 ? "var(--ok-ink)" : "var(--danger-ink)" }}>
                   {som(v)}
                 </strong>
               ) : (
-                <span style={v < 0 ? { color: "var(--danger)" } : undefined}>
+                <span style={v < 0 ? { color: "var(--danger-ink)" } : undefined}>
                   {Math.round(v) === 0 ? som(0) : v < 0 ? `− ${som(-v)}` : `+ ${som(v)}`}
                 </span>
               )}

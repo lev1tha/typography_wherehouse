@@ -4,6 +4,7 @@ staff tokens and customer tokens can never cross into each other's endpoints.
 """
 import re
 
+from django.contrib.auth.hashers import check_password, make_password
 from rest_framework import exceptions, serializers, status
 from rest_framework.permissions import AllowAny, BasePermission
 from rest_framework.response import Response
@@ -11,7 +12,13 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.tokens import AccessToken
 
-from accounts.throttling import CustomerLoginThrottle, LoginAccountThrottle
+from accounts.authentication import token_version
+from accounts.throttling import (
+    CustomerLoginThrottle,
+    LoginAccountThrottle,
+    login_not_an_attempt,
+    login_succeeded,
+)
 from accounts.views import throttled_response
 from sales.models import Receipt
 
@@ -19,8 +26,26 @@ from .models import Client
 from .phones import find_client_by_phone
 
 
-def _digits(value: str) -> str:
-    return re.sub(r"\D", "", value or "")
+def _digits(value) -> str:
+    return re.sub(r"\D", "", value if isinstance(value, str) else "")
+
+
+_DUMMY_HASH = None
+
+
+def _burn_password_check(raw: str) -> None:
+    """Проверка пароля «в холостую» — чтобы ответ не выдавал, есть ли пароль.
+
+    PBKDF2 занимает ~0,3 с, и если проверять его только у клиентов с выданным
+    паролем, время ответа (0,3 против 0,002 с) подсказывает: номер известен и
+    пароль ему выдан. Для неизвестного номера и для клиента без пароля сверяем
+    с постоянным хешем — те же затраты, результат отбрасываем. Хеш считаем один
+    раз при первом обращении, текущим хешером настроек.
+    """
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = make_password("холостой-хеш-портала")
+    check_password(raw, _DUMMY_HASH)
 
 
 class CustomerIdentity:
@@ -48,6 +73,12 @@ class CustomerJWTAuthentication(JWTAuthentication):
             client = Client.objects.get(pk=validated_token.get("client_id"))
         except Client.DoesNotExist:
             raise exceptions.AuthenticationFailed("Клиент не найден")
+        # Новый пароль или смена телефона отзывают выданные раньше токены.
+        # Токен без клейма — версия 0 (выдан до введения версий).
+        if token_version(validated_token) != client.credentials_version:
+            raise exceptions.AuthenticationFailed(
+                "Пароль изменён — войдите заново.", code="credentials_changed"
+            )
         return CustomerIdentity(client)
 
 
@@ -60,29 +91,48 @@ def mint_customer_token(client: Client) -> str:
     token = AccessToken()
     token["scope"] = "customer"
     token["client_id"] = client.id
+    token["cv"] = client.credentials_version
     token["name"] = client.display_name
     return str(token)
 
 
 class CustomerItemSerializer(serializers.Serializer):
+    """Строка заказа для клиента: название с описанием работы, количество с
+    единицей. «Гравировка × 0.48» без описания и единицы ничего не говорила —
+    теперь «Гравировка — логотип на двери», 0.48 кв.м (единицу и её код считает
+    та же логика, что у сотрудника: `TransactionItemSerializer`)."""
+
     title = serializers.SerializerMethodField()
+    note = serializers.CharField(read_only=True)
+    own_material = serializers.BooleanField(read_only=True)
     quantity = serializers.DecimalField(max_digits=12, decimal_places=2)
     line_total = serializers.DecimalField(max_digits=14, decimal_places=2)
+    # Код единицы (SQM / METER / PIECE / KG / LITER) — для перевода на фронте.
     unit = serializers.SerializerMethodField()
+    # Готовая русская подпись («кв.м», «пог.м», «шт»).
+    unit_label = serializers.SerializerMethodField()
     is_returned = serializers.BooleanField(read_only=True)
 
+    def _staff(self):
+        from sales.serializers import TransactionItemSerializer
+
+        return TransactionItemSerializer()
+
     def get_unit(self, obj):
-        """Единица рядом с количеством: клиенту «× 0.99» ни о чём не говорит."""
-        if obj.material_id:
-            return obj.material.unit
-        return "METER" if getattr(obj.service, "uses_running_meter", False) else ""
+        return self._staff().get_unit_code(obj)
+
+    def get_unit_label(self, obj):
+        return self._staff().get_unit_label(obj)
 
     def get_title(self, obj):
         if obj.material_id:
-            return obj.material.name
-        if obj.service_id:
-            return obj.service.name
-        return "—"
+            base = obj.material.name
+        elif obj.service_id:
+            base = obj.service.name
+        else:
+            base = "—"
+        # Описание работы — как у сотрудника (`itemTitle`): «Резка — акрил 3 мм».
+        return f"{base} — {obj.note}" if obj.note else base
 
 
 class CustomerOrderSerializer(serializers.ModelSerializer):
@@ -104,6 +154,9 @@ class CustomerOrderSerializer(serializers.ModelSerializer):
             "fulfillment_status",
             "total_price",
             "amount_paid",
+            # Сколько вернули клиенту деньгами/товаром: вместе с `amount_paid`
+            # показывает «оплачено» без пересчёта на фронте.
+            "refunded_amount",
             "debt",
             # Сдача, которую цех клиенту ещё не отдал. В кабинете её не было
             # вовсе: он видел, сколько должен ОН, но не видел, сколько должны
@@ -150,17 +203,21 @@ class CustomerLoginView(APIView):
     throttle_classes = [CustomerLoginThrottle, LoginAccountThrottle]
 
     def throttled(self, request, wait):
+        login_not_an_attempt(request)
         raise throttled_response(wait)
 
     def post(self, request):
         phone = _digits(request.data.get("phone"))
-        password = (request.data.get("password") or "").strip()
+        raw_password = request.data.get("password")
+        password = raw_password.strip() if isinstance(raw_password, str) else ""
         if not phone:
+            login_not_an_attempt(request)
             return Response({"detail": "Введите номер телефона"}, status=status.HTTP_400_BAD_REQUEST)
         # Тот же поиск, что и в кассе: клиент набирает свой номер как привык, а
         # в базе он лежит в том написании, в каком его записал кассир. Пароль
         # по-прежнему обязателен — послаблений тут нет, только формат номера.
-        client = find_client_by_phone(request.data.get("phone"))
+        raw_phone = request.data.get("phone")
+        client = find_client_by_phone(raw_phone if isinstance(raw_phone, str) else "")
 
         # ОТВЕТ ОДИНАКОВЫЙ для любого номера — и для чужого, и для нашего, и для
         # того, кому пароль ещё не выдали. Раньше портал отвечал по-разному:
@@ -169,12 +226,22 @@ class CustomerLoginView(APIView):
         # публичном домене, и перебором номеров с него собиралась клиентская
         # база цеха вместе с именами. Имя показываем только ПОСЛЕ пароля.
         if not password:
+            # Первый шаг («только телефон») — не попытка угадать пароль: клиент
+            # делает два запроса подряд, и под лимитом в 10 в минуту ему
+            # доставалось бы пять входов вместо десяти.
+            login_not_an_attempt(request)
             return Response({"status": "need_password"})
-        if client is None or not client.check_password(password):
+        if client is None or not client.has_password:
+            _burn_password_check(password)
+            ok = False
+        else:
+            ok = client.check_password(password)
+        if not ok:
             return Response(
                 {"detail": "Неверный номер или пароль."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        login_succeeded(request)
         return self._token_response(client)
 
     @staticmethod

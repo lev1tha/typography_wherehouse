@@ -1,10 +1,15 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { apiError } from "../api/errors.js";
+import ClientPicker from "./ClientPicker.jsx";
+import Field from "./Field.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 import { itemTitle } from "../utils/itemLabel.js";
+import { formatMoney, formatNumber } from "../utils/format.js";
+import { applyRules, itemRules } from "../utils/pricingRules.js";
 
 const dayOf = (iso) => (iso ? new Date(iso).toLocaleDateString("sv-SE") : "");
 const today = () => new Date().toLocaleDateString("sv-SE");
@@ -16,10 +21,10 @@ const today = () => new Date().toLocaleDateString("sv-SE");
 // вводом. Это же и написано в подсказке внизу, чтобы не искать в документации.
 const num = (v) => Number(v) || 0;
 const trim = (v) => String(+Number(v).toFixed(4));
-// Строка — вверх до сома, как на сервере (line_total). Эпсилон гасит шум
-// double: 0.554 × 1500 в JS = 831.0000000000001, и без него окно показывало
-// «979 → 980» ещё до того, как что-то поправили.
-const ceilSom = (v) => Math.max(0, Math.ceil((Number(v) || 0) - 1e-6));
+// Цена в окне — цена ДО правил прайса (`catalog_price`): минимум, срочность
+// и скидка строки пересчитываются от неё сервером по правилам заказа. У строк,
+// проданных до правил, `catalog_price` пуст — их цена и есть цена.
+const basePrice = (i) => i.catalog_price ?? i.price_per_item;
 
 export default function EditReceiptModal({ receipt, onClose, onSaved }) {
   const { t } = useTranslation();
@@ -28,7 +33,6 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
   const [title, setTitle] = useState(receipt.title || "");
   const [clientId, setClientId] = useState(receipt.client || "");
   const [orderDate, setOrderDate] = useState(dayOf(receipt.created_at));
-  const [clients, setClients] = useState([]);
   const [busy, setBusy] = useState(false);
 
   // Состав чека. Возвращённые строки не показываем: их материал уже вернулся на
@@ -41,20 +45,18 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
         id: i.id,
         name: itemTitle(i),
         quantity: String(+Number(i.quantity).toFixed(4)),
-        price: String(+Number(i.price_per_item).toFixed(2)),
+        price: String(+Number(basePrice(i)).toFixed(2)),
+        rules: i.catalog_price != null ? itemRules(i) : null,
         remove: false,
       })),
   );
-
-  useEffect(() => {
-    api.get("/clients/clients/").then((r) => setClients(r.data.results)).catch(() => {});
-  }, []);
 
   const setLine = (id, patch) =>
     setLines((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
 
   const newTotal = lines.reduce(
-    (s, l) => (l.remove ? s : s + ceilSom(num(l.quantity) * num(l.price))),
+    // Строка — вверх до сома, как на сервере (line_total), по своим правилам.
+    (s, l) => (l.remove ? s : s + applyRules(num(l.quantity) * num(l.price), l.rules || {})),
     0,
   );
   // Сравниваем с тем, что клиенту осталось платить: итог чека держит и
@@ -69,7 +71,7 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
     const orig = new Map(
       (receipt.items || []).map((i) => [
         i.id,
-        { q: String(+Number(i.quantity).toFixed(4)), p: String(+Number(i.price_per_item).toFixed(2)) },
+        { q: String(+Number(i.quantity).toFixed(4)), p: String(+Number(basePrice(i)).toFixed(2)) },
       ]),
     );
     return lines
@@ -106,7 +108,7 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
       toast(t("receipts.editSaved"));
       onSaved?.(data);
     } catch (e) {
-      toast(e.response?.data?.detail || t("common.error"), "error");
+      toast(apiError(e, t("common.error")), "error");
     } finally {
       setBusy(false);
     }
@@ -123,33 +125,30 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
         </>
       }
     >
-      <div className="field">
-        <label>{t("checkout.orderTitle")}</label>
+      <Field label={t("checkout.orderTitle")}>
         <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
-      </div>
+      </Field>
 
-      <div className="field">
-        <label>{t("checkout.client")}</label>
-        <select value={clientId ?? ""} onChange={(e) => setClientId(e.target.value)}>
-          <option value="">{t("receipts.noClient")}</option>
-          {clients.map((c) => (
-            <option key={c.id} value={c.id}>{c.display_name}</option>
-          ))}
-        </select>
-      </div>
+      {/* Клиент — поиском по серверу: прежний <select> знал только первых 25
+          клиентов, и чек нельзя было переписать на остальных. Показываем
+          текущего клиента заказа, даже если его нет в выдаче поиска. */}
+      <Field label={t("checkout.client")}>
+        <ClientPicker
+          value={clientId ?? ""}
+          valueLabel={receipt.client && String(clientId) === String(receipt.client) ? receipt.client_name : undefined}
+          noneLabel={t("receipts.noClient")}
+          onChange={(id) => setClientId(id)}
+        />
+      </Field>
 
-      <div className="field">
-        <label>{t("checkout.orderDate")}</label>
+      <Field label={t("checkout.orderDate")} hint={t("receipts.editDateHint")}>
         <input
           type="date"
           value={orderDate}
           max={today()}
           onChange={(e) => setOrderDate(e.target.value)}
         />
-        <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-          {t("receipts.editDateHint")}
-        </p>
-      </div>
+      </Field>
 
       {/* Состав заказа: количество и цена строки. Ошибаются не только в
           названии — лишний лист, лишний квадратный метр, цена не та. Склад,
@@ -163,28 +162,28 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
               className="row"
               style={{ margin: "0 0 6px", gap: 6, alignItems: "flex-end", opacity: l.remove ? 0.45 : 1 }}
             >
-              <div className="field grow" style={{ margin: 0 }}>
-                <label style={{ fontSize: 12 }}>{l.name}</label>
+              <Field className="grow" style={{ margin: 0 }} label={l.name}>
                 <input
                   type="number"
                   step="any"
                   min="0"
+                  inputMode="decimal"
                   value={l.quantity}
                   disabled={l.remove}
                   onChange={(e) => setLine(l.id, { quantity: e.target.value })}
                 />
-              </div>
-              <div className="field" style={{ margin: 0, width: 110 }}>
-                <label style={{ fontSize: 12 }}>{t("receipts.editItemPrice")}</label>
+              </Field>
+              <Field style={{ margin: 0, width: 110 }} label={t("receipts.editItemPrice")}>
                 <input
                   type="number"
                   step="any"
                   min="0"
+                  inputMode="decimal"
                   value={l.price}
                   disabled={l.remove}
                   onChange={(e) => setLine(l.id, { price: e.target.value })}
                 />
-              </div>
+              </Field>
               <button
                 className={l.remove ? "secondary row-btn" : "ghost row-btn row-danger"}
                 style={{ marginBottom: 8 }}
@@ -200,16 +199,16 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
             <span>
               {newTotal !== oldTotal && (
                 <span className="muted" style={{ textDecoration: "line-through", marginRight: 8 }}>
-                  {oldTotal.toLocaleString("ru-RU")}
+                  {formatNumber(oldTotal)}
                 </span>
               )}
-              <strong>{newTotal.toLocaleString("ru-RU")} сом</strong>
+              <strong>{formatMoney(newTotal)}</strong>
             </span>
           </div>
           {newTotal < Math.round(Number(receipt.amount_paid) || 0) && (
             <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
               {t("receipts.editItemsChangeHint", {
-                amount: (Math.round(Number(receipt.amount_paid) || 0) - newTotal).toLocaleString("ru-RU"),
+                amount: formatNumber(Math.round(Number(receipt.amount_paid) || 0) - newTotal),
               })}
             </p>
           )}

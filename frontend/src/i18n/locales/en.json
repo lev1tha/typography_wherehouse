@@ -34,7 +34,14 @@
     "reset": "Reset",
     "month": "Month",
     "allMonths": "All months",
-    "optional": "optional"
+    "optional": "optional",
+    "menu": "Menu",
+    "skipToContent": "Skip to content",
+    "retry": "Retry",
+    "resetFilters": "Reset filters",
+    "emptyFiltered": "Nothing found. Change or reset the filters.",
+    "loadFailed": "Could not load the data",
+    "needValue": "Fill in this field"
   },
   "nav": {
     "dashboard": "Overview",
@@ -52,7 +59,8 @@
     "home": "Home",
     "sectionDaily": "Every day",
     "sectionRare": "Less often",
-    "cash": "Cash"
+    "cash": "Cash",
+    "main": "Main menu"
   },
   "roles": {
     "admin": "Administrator",
@@ -62,7 +70,7 @@
   },
   "login": {
     "title": "Sign in",
-    "subtitle": "Typography warehouse & sales",
+    "subtitle": "Warehouse and sales of the CNC workshop",
     "error": "Invalid username or password",
     "staffTab": "I'm staff",
     "clientTab": "I'm a customer",
@@ -76,7 +84,8 @@
     "needCredentials": "Enter your username and password",
     "needPhone": "Enter your phone number",
     "needPassword": "Enter your password",
-    "enterPassTitle": "Sign in to your account"
+    "enterPassTitle": "Sign in to your account",
+    "needUsername": "Enter your username"
   },
   "dashboard": {
     "title": "Overview",
@@ -248,7 +257,7 @@
     "masterCommission": "Master wage, % of work",
     "masterCommissionHint": "The master's share of the cutting work value. Admin only; the calculated amount is shown in Finance under “Cutting by machine” (for reference, not part of profit).",
     "cutRatePm": "Cut rate, som/running m",
-    "servicesOnlyHint": "Work rates and master %. Material prices live in the “Склад” (Warehouse) section.",
+    "servicesOnlyHint": "Work rates and master %. Material prices live in the “Warehouse” section.",
     "ratePerPm": "Cutting rate, som per running m",
     "ratePerPmHint": "This machine's rate. 0 — the material's rate is used, as before the CNC/laser split.",
     "newService": "New service",
@@ -266,7 +275,19 @@
     "wasteRateSqm": "Waste, som/sq.m",
     "wasteRatePm": "Waste, som/running m",
     "wasteRatePiece": "Waste, som/piece",
-    "wasteRateHint": "Base waste price, one per measure. At the till it can be changed for the individual sale — by the admin and the storekeeper alike."
+    "wasteRateHint": "Base waste price, one per measure. At the till it can be changed for the individual sale — by the admin and the storekeeper alike.",
+    "perSqm": "sq m",
+    "perOrder": "order",
+    "rulesTitle": "Pricing rules",
+    "minLine": "Minimum service line amount, som",
+    "minLineHint": "A service line that comes out cheaper costs this minimum (like =MAX(500; calc) in Excel). Materials are exempt. 0 — off.",
+    "urgency": "Rush surcharge, %",
+    "urgencyHint": "Applied with the “Rush” toggle at checkout. 0 — the toggle is disabled.",
+    "rulesOrder": "Order for each receipt line: catalogue price → minimum → + rush → − client discount → round up to a som. The receipt total is the sum of lines.",
+    "minLineService": "Line minimum, som",
+    "minLineServiceHint": "Empty — the shared minimum from “Pricing rules”; 0 — no minimum for this service.",
+    "minLineServicePh": "shared",
+    "minLineBad": "Minimum must be a number ≥ 0 or empty."
   },
   "serviceKind": {
     "CUTTING": "Cutting",
@@ -360,7 +381,10 @@
     "inn": "Tax ID",
     "innPh": "for the invoice",
     "orderRefunded": "refunded {{sum}} som",
-    "ordersCancelled": "fully returned: {{n}}"
+    "ordersCancelled": "fully returned: {{n}}",
+    "discount": "Discount, %",
+    "discountHint": "Applied automatically at checkout. Only an administrator can set it.",
+    "discountBad": "Discount must be between 0 and 100 %."
   },
   "checkout": {
     "outOfStock": "Out of stock",
@@ -513,7 +537,42 @@
     "wasteNeedRate": "Enter a price — waste is always negotiated",
     "wasteNote": "What the waste is (note)",
     "wasteNotePh": "e.g. acrylic 3 mm offcuts, vinyl remnant",
-    "wasteAmount": "Waste"
+    "wasteAmount": "Waste",
+    "clear": "Clear",
+    "clearConfirm": "Clear the receipt? Items and customer details will be reset.",
+    "draftRestored": "Unsaved cart restored: {{n}} items",
+    "warnCostUnknown": "The cost of some items is unknown — the profit on this receipt is incomplete.",
+    "nameMismatch": "This phone belongs to “{{name}}”; the name you entered did not match. The order was recorded for that customer.",
+    "qtyMinus": "Decrease",
+    "qtyPlus": "Increase",
+    "saleMode": "Sale method",
+    "block": {
+      "needRunM": "To add, enter the cutting length.",
+      "needRate": "To add, enter the work rate.",
+      "needMachine": "To add, choose a machine.",
+      "needAmount": "To add, enter the quantity.",
+      "needSize": "To add, enter the width and length.",
+      "noCutService": "No cutting service is set up — the item cannot be added.",
+      "needRollLen": "To add, enter the length to cut off.",
+      "needRollPrice": "The roll has no price per metre.",
+      "rollShort": "The roll has fewer metres than needed.",
+      "rollTooWide": "The item is wider than the roll.",
+      "needPiecePrice": "The material has no price per piece.",
+      "needMaterial": "To add, choose a material.",
+      "needMatPrice": "The material has no price per sq m."
+    },
+    "urgent": "Rush",
+    "urgentOff": "No rush surcharge is set — an admin sets it in “Prices & services”.",
+    "discount": "Order discount, %",
+    "discountFromClient": "From the client card: {{n}} %. Empty — use it; 0 — remove it.",
+    "discountAdminHint": "A discount for this order only. Empty — none.",
+    "clientDiscount": "Client discount {{n}} % — applied",
+    "catalogTotal": "At catalogue prices",
+    "rulesUrgency": "Rush +{{n}} %",
+    "rulesDiscount": "Discount {{n}} %",
+    "rulesMinimum": "Line minimum",
+    "warnBelowCost": "“{{name}}”: the line sold for {{sum}} — below cost.",
+    "addRulesNote": "Catalogue amount; the order's rules will apply: {{rules}}."
   },
   "receipts": {
     "title": "Receipts",
@@ -604,6 +663,7 @@
     "ISSUED": "Issued"
   },
   "supply": {
+    "sheetSizeMismatch": "Sheet size {{got}} does not match the card ({{card}}). Sheets are sold by the card's area — check the size, otherwise part of a sheet that is not on the shelf will remain in stock.",
     "title": "Supply & inventory",
     "receive": "Receive goods",
     "inventory": "Inventory",
@@ -683,12 +743,54 @@
     "empty": "No movements yet",
     "pageOf": "Page {{page}} of {{pages}} · {{count}} total"
   },
+  "lotFix": {
+    "title": "Correct intake",
+    "button": "Correct intake",
+    "lots": "Lots",
+    "lotsTitle": "Lots: {{name}}",
+    "noLots": "No lots — this material was received without lots.",
+    "hint": "A typo in the quantity, size or price of a received lot — even if it has already been sold from. Check what will change first, then confirm.",
+    "width": "Width, m",
+    "widthFixed": "Roll width cannot be changed after cutting",
+    "length": "Length, m",
+    "height": "Height, m",
+    "sheets": "Sheets",
+    "unitPrice": "Price per {{unit}}, som",
+    "total": "Lot total, som",
+    "was": "Was",
+    "preview": "Show what will change",
+    "apply": "Correct",
+    "done": "Intake corrected",
+    "whatChanges": "What will change",
+    "closed": "The month is closed — the correction will not go through:",
+    "quantity": "Quantity",
+    "lotCost": "Lot total",
+    "stockValue": "Stock value",
+    "supplyTotal": "Delivery note {{n}}",
+    "supplierDebt": "Owed to supplier",
+    "paid": "paid",
+    "overpaid": "Overpaid to supplier",
+    "cogs": "Cost of sales",
+    "noChange": "no change",
+    "months": "P&L months",
+    "order": "Order",
+    "date": "Date",
+    "costCol": "Cost",
+    "marginCol": "Margin",
+    "inferred": "Older sales ({{n}}) were recalculated from the line cost: it exactly matches this lot's price.",
+    "legacy": "Older sales without lot records were not recalculated: {{n}}.",
+    "notALoss": "A correction is not a write-off: no loss or surplus appears in the P&L, cash does not change.",
+    "lot": "Lot",
+    "left": "Left / received",
+    "supply": "Delivery note"
+  },
   "logType": {
     "SUPPLY": "Intake",
     "SALE": "Sale",
     "RETURN": "Return",
     "WRITE_OFF": "Write-off",
-    "ADJUSTMENT": "Stock-take"
+    "ADJUSTMENT": "Stock-take",
+    "CORRECTION": "Intake correction"
   },
   "grid": {
     "open": "Bulk entry",
@@ -881,7 +983,14 @@
     "investDepreciation": "Depreciation for the period",
     "taxAccrued": "{{label}}, accrued",
     "dailyCost": "Cost and losses",
-    "dailyBelow": "Depreciation, interest, tax"
+    "dailyBelow": "Depreciation, interest, tax",
+    "dailyAria": "Profit by day, {{month}} {{year}}: month total {{profit}}. Best day — {{best}}, worst day — {{worst}}.",
+    "rulesTitle": "Pricing rules",
+    "rulesHint": "Already part of revenue: how much rush and line minimums added and how much discounts gave away from catalogue prices in the period.",
+    "rules_urgency": "Earned from rush",
+    "rules_minimum": "Earned from line minimums",
+    "rules_discount": "Given as discounts",
+    "rulesOrders": "orders: {{n}}"
   },
   "expenses": {
     "amount": "Amount",
@@ -926,7 +1035,10 @@
     "payStep2": "Pick up your order at the shop and pay the rest in cash.",
     "payNote": "Online payment isn't available yet — we settle on pickup.",
     "changeDue": "Your change is with us",
-    "changeHint": "Pick it up next time, or we'll put it towards your next order."
+    "changeHint": "Pick it up next time, or we'll put it towards your next order.",
+    "paid": "Paid",
+    "refunded": "Refunded",
+    "payStepNow": "The order has already been handed over or needs no production: pay the rest in cash at the shop — no need to wait."
   },
   "home": {
     "title": "Home",
@@ -1092,7 +1204,9 @@
     "accepted": "Accepted",
     "currency": "som",
     "inn": "TIN",
-    "tel": "tel."
+    "tel": "tel.",
+    "roundedNote": "Line amounts are rounded up to a whole som.",
+    "rulesNote": "Prices include the order's rules: {{rules}}. At catalogue prices — {{sum}} som."
   },
   "supplies": {
     "newDoc": "New delivery note",
@@ -1127,7 +1241,7 @@
     "needLines": "Fill in at least one line: material and amount",
     "cancelConfirm": "Cancel note {{n}}? The material will be removed from stock. If some of it was already cut, the system will refuse.",
     "cancelled": "Note cancelled, stock restored",
-    "editHint": "A note's lines cannot be edited: some of the material may already have gone into orders. Made a mistake in the lines — cancel the note and enter it again.",
+    "editHint": "An administrator fixes a typo in a line's quantity or price with “Correct intake” — cost of sales, stock and the supplier debt are recalculated. Wrong material — cancel the note and enter it again.",
     "statDocs": "Notes",
     "statSum": "Received for",
     "statDebt": "Owed to suppliers",
@@ -1511,5 +1625,35 @@
     "whyNone": "Profit and cash matched for the period.",
     "whyMore": "Details — “Finance” → “Reconciliation”",
     "unexplained": "Unexplained: {{value}} — the data contradicts itself, please check."
+  },
+  "pager": {
+    "label": "Pagination",
+    "shown": "Showing {{from}}–{{to}} of {{total}}",
+    "prev": "Previous page",
+    "next": "Next page",
+    "page": "Page {{n}}"
+  },
+  "picker": {
+    "search": "Type a name or phone",
+    "nothing": "No one found",
+    "more": "Showing the first {{shown}} of {{total}} — refine the search"
+  },
+  "boundary": {
+    "title": "Something went wrong",
+    "text": "This screen could not be displayed. Refresh the page; if it keeps happening, tell the administrator.",
+    "reload": "Refresh",
+    "home": "Go home"
+  },
+  "errors": {
+    "timeout": "No response from the server. Check “Receipts” — the receipt may already have been created.",
+    "network": "No connection to the server. Check the internet and try again.",
+    "server": "Server unavailable, please try again later",
+    "forbidden": "You don't have permission for this action",
+    "rateLimit": "Too many attempts. Wait a minute and try again."
+  },
+  "modal": {
+    "discardAsk": "Close the window? What you entered will not be saved.",
+    "keepEditing": "Keep editing",
+    "discard": "Close without saving"
   }
 }

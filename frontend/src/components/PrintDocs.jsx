@@ -2,10 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { useDialog } from "../hooks/useDialog.js";
 import Icon from "./Icon.jsx";
 import PrintHost from "./PrintHost.jsx";
 import amountInWords, { plural } from "../utils/amountInWords.js";
 import { itemTitle } from "../utils/itemLabel.js";
+import { formatDate, formatNumber } from "../utils/format.js";
+import { lineRuled, receiptRuled, rulesLabel } from "../utils/pricingRules.js";
 
 // Печатные формы заказа: товарный чек и накладная.
 //
@@ -23,9 +26,9 @@ import { itemTitle } from "../utils/itemLabel.js";
 // вторая вёрстка тех же таблиц. То, что видно в предпросмотре, и уходит на
 // бумагу — предпросмотр свёрстан листом А4.
 
-const money = (n) => Number(n || 0).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const qty = (n) => Number(n || 0).toLocaleString("ru-RU", { maximumFractionDigits: 3 });
-const day = (iso) => (iso ? new Date(iso).toLocaleDateString("ru-RU") : "");
+const money = (n) => formatNumber(n, { min: 2, max: 2 });
+const qty = (n) => formatNumber(n, { max: 3 });
+const day = (iso) => (iso ? formatDate(iso) : "");
 
 const DOCS = ["CHECK", "WAYBILL"];
 
@@ -38,8 +41,15 @@ function buyerLine(client, t) {
   return parts.filter(Boolean).join(", ");
 }
 
-function ItemsTable({ items, t }) {
+function ItemsTable({ items, t, receipt }) {
+  // «1 шт × 3 572,16 = 3 573,00»: цена за единицу с копейками, а сумма строки
+  // округлена вверх до целого сома (правило цеха) — без пояснения это выглядит
+  // как арифметическая ошибка на бумаге, которую подписывают.
+  const rounded = items.some(
+    (it) => Math.abs(Number(it.quantity) * Number(it.price_per_item) - Number(it.line_total)) > 0.005
+  );
   return (
+    <>
     <table className="doc-table">
       <thead>
         <tr>
@@ -58,12 +68,26 @@ function ItemsTable({ items, t }) {
             <td>{itemTitle(it, t)}</td>
             <td className="r">{qty(it.quantity)}</td>
             <td className="c">{it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label}</td>
-            <td className="r">{money(it.price_per_item)}</td>
+            <td className="r">
+              {/* Правила прайса: цена до них — зачёркнутой над итоговой, чтобы
+                  на бумаге было видно, откуда цена (D-62). */}
+              {lineRuled(it) && it.catalog_price != null && (
+                <s className="doc-was">{money(it.catalog_price)}</s>
+              )}
+              {money(it.price_per_item)}
+            </td>
             <td className="r">{money(it.line_total)}</td>
           </tr>
         ))}
       </tbody>
     </table>
+    {rounded && <p className="doc-note">{t("print.roundedNote")}</p>}
+    {receiptRuled(receipt) && (
+      <p className="doc-note">
+        {t("print.rulesNote", { rules: rulesLabel(receipt, t), sum: money(receipt.catalog_total) })}
+      </p>
+    )}
+    </>
   );
 }
 
@@ -105,6 +129,7 @@ export default function PrintDocs({ receipt, onClose }) {
   // Язык документа = язык интерфейса: заголовок, шапка таблицы и сумма
   // прописью на одном языке, а не «SALES RECEIPT № 2 ОТ 16.08.2026».
   const lang = i18n.resolvedLanguage;
+  const { dialogProps, titleId } = useDialog({ onClose, guardInput: false });
   const [kind, setKind] = useState("CHECK");
   const [client, setClient] = useState(null);
 
@@ -138,9 +163,9 @@ export default function PrintDocs({ receipt, onClose }) {
 
   return (
     <PrintHost>
-      <div className="modal wide print-modal">
+      <div className="modal wide print-modal" {...dialogProps}>
         <div className="modal-head no-print">
-          <h2>{t("print.title")} № {number}</h2>
+          <h2 id={titleId}>{t("print.title")} № {number}</h2>
           <button className="ghost" onClick={onClose} aria-label={t("common.close")}>
             <Icon name="x" size={18} />
           </button>
@@ -152,6 +177,7 @@ export default function PrintDocs({ receipt, onClose }) {
               <button
                 key={d}
                 className={kind === d ? "active" : ""}
+                aria-pressed={kind === d}
                 onClick={() => setKind(d)}
               >
                 {t(`print.doc${d[0]}${d.slice(1).toLowerCase()}`)}
@@ -165,7 +191,7 @@ export default function PrintDocs({ receipt, onClose }) {
           {kind === "CHECK" && (
             <>
               {head(t("print.docCheck"))}
-              <ItemsTable items={items} t={t} />
+              <ItemsTable items={items} t={t} receipt={receipt} />
               <div className="doc-total">
                 <span>{t("print.total")}</span>
                 <strong>{money(total)} {t("print.currency")}</strong>
@@ -192,7 +218,7 @@ export default function PrintDocs({ receipt, onClose }) {
               {head(t("print.docWaybill"))}
               <p className="doc-line"><b>{t("print.receiver")}:</b> {buyerLine(client, t)}</p>
               {receipt.title && <p className="doc-line"><b>{t("print.basis")}:</b> {receipt.title}</p>}
-              <ItemsTable items={items} t={t} />
+              <ItemsTable items={items} t={t} receipt={receipt} />
               <TotalBlock
                 total={total}
                 t={t}

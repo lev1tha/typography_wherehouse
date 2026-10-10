@@ -2,13 +2,14 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 
 import Hint from "./Hint.jsx";
+import { formatDate, formatMoney, formatNumber } from "../utils/format.js";
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const som = (n) => formatMoney(n);
 const signed = (n) => {
   const v = Math.round(Number(n) || 0);
-  return `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toLocaleString("ru-RU")} сом`;
+  return `${v > 0 ? "+" : v < 0 ? "−" : ""}${formatMoney(Math.abs(v))}`;
 };
-const ru = (iso) => (iso ? String(iso).split("-").reverse().join(".") : "");
+const ru = (iso) => formatDate(iso);
 
 // Подпись периода: «октябрь 2026», «с 10.10.2026 по 19.10.2026», «весь период».
 function periodLabel(period, t, lang) {
@@ -34,7 +35,7 @@ function Change({ change, t }) {
   const cls = d > 0 ? "up" : d < 0 ? "down" : "";
   const p = Number(change.delta_pct);
   const pct = change.delta_pct !== null && change.delta_pct !== undefined
-    ? ` (${p > 0 ? "+" : p < 0 ? "−" : ""}${Math.abs(p).toLocaleString("ru-RU")} %)`
+    ? ` (${p > 0 ? "+" : p < 0 ? "−" : ""}${formatNumber(Math.abs(p), { max: 1 })} %)`
     : "";
   return (
     <div className={`change ${cls}`}>
@@ -48,7 +49,7 @@ function Tile({ label, hint, value, color, period, change, sub, t }) {
   return (
     <div className="stat head-tile">
       <div className="label">{label}<Hint text={hint} /></div>
-      <div className="value" style={color ? { color: `var(--${color})` } : undefined}>{value}</div>
+      <div className="value" style={color ? { color: `var(--${color}-ink)` } : undefined}>{value}</div>
       <div className="period">{period}</div>
       {sub ? <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{sub}</div> : null}
       <Change change={change} t={t} />
@@ -107,7 +108,7 @@ export default function HeadlineTiles({ headline }) {
           change={h.net_profit.change}
           sub={
             h.net_profit.margin !== null && h.net_profit.margin !== undefined
-              ? t("overview.margin", { pct: Number(h.net_profit.margin).toLocaleString("ru-RU") })
+              ? t("overview.margin", { pct: formatNumber(h.net_profit.margin) })
               : t("overview.noMargin")
           }
         />
@@ -148,14 +149,14 @@ export default function HeadlineTiles({ headline }) {
                 {t(`stmtRows.bridge.${r.key}`, { defaultValue: r.label })}
                 <Hint text={t(`terms.bridge_${r.key}`, { defaultValue: "" })} />
               </span>
-              <strong style={{ color: Number(r.amount) >= 0 ? "var(--ok)" : "var(--danger)" }}>
+              <strong style={{ color: Number(r.amount) >= 0 ? "var(--ok-ink)" : "var(--danger-ink)" }}>
                 {signed(r.amount)}
               </strong>
             </div>
           ))
         )}
         {Math.round(Number(h.why.unexplained) || 0) !== 0 && (
-          <p style={{ color: "var(--danger)", fontSize: 13, margin: "8px 0 0" }}>
+          <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "8px 0 0" }}>
             {t("overview.unexplained", { value: signed(h.why.unexplained) })}
           </p>
         )}

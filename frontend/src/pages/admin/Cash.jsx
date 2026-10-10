@@ -5,10 +5,15 @@ import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import DataTable from "../../components/DataTable.jsx";
+import Field, { focusFirstInvalid } from "../../components/Field.jsx";
 import Icon from "../../components/Icon.jsx";
+import LoadError from "../../components/LoadError.jsx";
 import Modal from "../../components/Modal.jsx";
 import MonthPicker from "../../components/MonthPicker.jsx";
+import Pager, { usePage } from "../../components/Pager.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
+import { isCanceled, useLatest } from "../../utils/latest.js";
+import { formatDate, formatMoney } from "../../utils/format.js";
 
 // Касса и банк: сколько денег есть сейчас и что с ними происходило.
 //
@@ -20,7 +25,7 @@ import { useUI } from "../../components/UIProvider.jsx";
 // руками вносят то, чего она знать не может: деньги владельца, займы,
 // переводы между кассой и банком.
 
-const som = (n) => `${Math.round(Number(n) || 0).toLocaleString("ru-RU")} сом`;
+const som = (n) => formatMoney(n);
 const today = () => new Date().toLocaleDateString("sv-SE");
 
 // Статьи, которые можно вносить руками. Оплаты и сдача сюда не входят: их
@@ -52,25 +57,48 @@ export default function Cash() {
   const [period, setPeriod] = useState({ year: now.getFullYear(), month: now.getMonth() + 1 });
   const [balance, setBalance] = useState(null);
   const [rows, setRows] = useState([]);
+  const [count, setCount] = useState(0);
+  const [rowsFailed, setRowsFailed] = useState(false);
   const [account, setAccount] = useState("");
+  const [entryErr, setEntryErr] = useState({});
+  const [countErr, setCountErr] = useState({});
   const [entry, setEntry] = useState(null);   // форма прихода/расхода
   const [counting, setCounting] = useState(null); // пересчёт кассы
   const [busy, setBusy] = useState(false);
 
   const params = periodParams(period);
+  const nextRows = useLatest();
+  const nextBalance = useLatest();
+  // Книга постраничная (100 записей): раньше брали первые 200 и молча
+  // обрезали остальные — у активного месяца записей больше.
+  const PAGE = 100;
+  const [page, setPage] = usePage(JSON.stringify([period.year, period.month, account]));
 
   function load() {
-    api.get("/finance/cash/balance/", { params })
+    api.get("/finance/cash/balance/", { params, signal: nextBalance() })
       .then((r) => setBalance(r.data))
-      .catch(() => toast(t("common.error"), "error"));
-    api.get("/finance/cash/", { params: { ...params, ...(account ? { account } : {}), page_size: 200 } })
-      .then((r) => setRows(r.data.results || r.data))
-      .catch(() => toast(t("common.error"), "error"));
+      .catch((e) => { if (!isCanceled(e)) toast(apiError(e, t("common.error")), "error"); });
+    api.get("/finance/cash/", {
+      params: { ...params, ...(account ? { account } : {}), page_size: PAGE, ...(page > 1 ? { page } : {}) },
+      signal: nextRows(),
+    })
+      .then((r) => {
+        setRows(r.data.results || r.data);
+        setCount(r.data.count ?? (r.data.results || r.data).length);
+        setRowsFailed(false);
+      })
+      .catch((e) => {
+        if (isCanceled(e)) return;
+        if (e.response?.status === 404 && page > 1) return setPage(1);
+        setRowsFailed(true);
+        toast(apiError(e, t("common.error")), "error");
+      });
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(load, [period.year, period.month, account]);
+  useEffect(load, [period.year, period.month, account, page]);
 
   function startEntry(kind) {
+    setEntryErr({});
     setEntry({
       kind,
       account: "CASH",
@@ -82,7 +110,11 @@ export default function Cash() {
   }
 
   async function saveEntry(confirmNegative = false) {
-    if (!(Number(entry.amount) > 0)) return toast(t("cash.needAmount"), "error");
+    if (!(Number(entry.amount) > 0)) {
+      setEntryErr({ amount: t("cash.needAmount") });
+      return focusFirstInvalid();
+    }
+    setEntryErr({});
     setBusy(true);
     try {
       await api.post("/finance/cash/", {
@@ -111,7 +143,11 @@ export default function Cash() {
   }
 
   async function saveCount() {
-    if (counting.counted === "") return toast(t("cash.needCounted"), "error");
+    if (counting.counted === "") {
+      setCountErr({ counted: t("cash.needCounted") });
+      return focusFirstInvalid();
+    }
+    setCountErr({});
     setBusy(true);
     try {
       const { data } = await api.post("/finance/cash/count/", {
@@ -141,7 +177,7 @@ export default function Cash() {
   }
 
   const columns = [
-    { key: "happened_on", label: t("cash.date"), render: (r) => new Date(r.happened_on).toLocaleDateString("ru-RU") },
+    { key: "happened_on", label: t("cash.date"), render: (r) => formatDate(r.happened_on) },
     { key: "account_display", label: t("cash.account") },
     {
       key: "article_display",
@@ -157,12 +193,12 @@ export default function Cash() {
     {
       key: "in",
       label: t("cash.in"),
-      render: (r) => (r.kind === "IN" ? <strong style={{ color: "var(--ok)" }}>{som(r.amount)}</strong> : <span className="muted">—</span>),
+      render: (r) => (r.kind === "IN" ? <strong style={{ color: "var(--ok-ink)" }}>{som(r.amount)}</strong> : <span className="muted">—</span>),
     },
     {
       key: "out",
       label: t("cash.out"),
-      render: (r) => (r.kind === "OUT" ? <strong style={{ color: "var(--danger)" }}>{som(r.amount)}</strong> : <span className="muted">—</span>),
+      render: (r) => (r.kind === "OUT" ? <strong style={{ color: "var(--danger-ink)" }}>{som(r.amount)}</strong> : <span className="muted">—</span>),
     },
     {
       key: "who",
@@ -209,7 +245,7 @@ export default function Cash() {
         {balance.accounts.map((a) => (
           <div className="stat" key={a.account}>
             <div className="label">{a.label}</div>
-            <div className="value" style={{ color: Number(a.balance) < 0 ? "var(--danger)" : undefined }}>
+            <div className="value" style={{ color: Number(a.balance) < 0 ? "var(--danger-ink)" : undefined }}>
               {som(a.balance)}
             </div>
             <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
@@ -219,7 +255,7 @@ export default function Cash() {
         ))}
         <div className="stat">
           <div className="label">{t("cash.total")}</div>
-          <div className="value" style={{ color: "var(--accent-strong)" }}>{som(balance.total)}</div>
+          <div className="value" style={{ color: "var(--accent-ink)" }}>{som(balance.total)}</div>
           <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("cash.totalHint")}</div>
           {/* Сдача, которую ещё не вернули, лежит здесь же, но выручкой не
               стала: она уйдёт на руки или в зачёт следующего заказа. Без этой
@@ -238,7 +274,7 @@ export default function Cash() {
           <button className="secondary" onClick={() => startEntry("OUT")}>− {t("cash.addOut")}</button>
           <button
             className="secondary"
-            onClick={() => setCounting({ account: "CASH", counted: "", note: "" })}
+            onClick={() => { setCountErr({}); setCounting({ account: "CASH", counted: "", note: "" }); }}
           >
             {t("cash.count")}
           </button>
@@ -246,7 +282,7 @@ export default function Cash() {
       )}
 
       <div className="toolbar" style={{ marginTop: 14 }}>
-        <select value={account} onChange={(e) => setAccount(e.target.value)}>
+        <select aria-label={t("cash.account")} value={account} onChange={(e) => setAccount(e.target.value)}>
           <option value="">{t("cash.allAccounts")}</option>
           {balance.accounts.map((a) => (
             <option key={a.account} value={a.account}>{a.label}</option>
@@ -254,7 +290,17 @@ export default function Cash() {
         </select>
       </div>
 
-      <DataTable columns={columns} rows={rows} />
+      {rowsFailed && !rows.length ? (
+        <LoadError onRetry={load} />
+      ) : (
+        <DataTable
+          columns={columns}
+          rows={rows}
+          filtered={!!account}
+          onReset={() => setAccount("")}
+        />
+      )}
+      <Pager page={page} count={count} pageSize={PAGE} onPage={setPage} />
 
       {/* --- Приход / расход руками --- */}
       {entry && (
@@ -269,22 +315,20 @@ export default function Cash() {
           }
         >
           <div className="row">
-            <div className="field grow" style={{ margin: 0 }}>
-              <label>{t("cash.account")}</label>
+            <Field className="grow" style={{ margin: 0 }} label={t("cash.account")}>
               <select value={entry.account} onChange={(e) => setEntry({ ...entry, account: e.target.value })}>
                 {balance.accounts.map((a) => (
                   <option key={a.account} value={a.account}>{a.label}</option>
                 ))}
               </select>
-            </div>
-            <div className="field grow" style={{ margin: 0 }}>
-              <label>{t("cash.article")}</label>
+            </Field>
+            <Field className="grow" style={{ margin: 0 }} label={t("cash.article")}>
               <select value={entry.article} onChange={(e) => setEntry({ ...entry, article: e.target.value })}>
                 {MANUAL_ARTICLES[entry.kind].map((a) => (
                   <option key={a} value={a}>{t(`cash.article_${a}`)}</option>
                 ))}
               </select>
-            </div>
+            </Field>
           </div>
           {ARTICLE_HINTS.includes(entry.article) && (
             <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t(`cash.hint_${entry.article}`)}</p>
@@ -293,29 +337,26 @@ export default function Cash() {
             <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("cash.expensesViaFinance")}</p>
           )}
           <div className="row">
-            <div className="field grow" style={{ margin: 0 }}>
-              <label>{t("cash.amount")}</label>
+            <Field className="grow" style={{ margin: 0 }} label={t("cash.amount")} required error={entryErr.amount}>
               <input
-                type="number" step="any" value={entry.amount} autoFocus
+                type="number" step="any" inputMode="decimal" value={entry.amount} autoFocus
                 onChange={(e) => setEntry({ ...entry, amount: e.target.value })}
               />
-            </div>
-            <div className="field" style={{ margin: 0, width: 180 }}>
-              <label>{t("cash.date")}</label>
+            </Field>
+            <Field style={{ margin: 0, width: 180 }} label={t("cash.date")}>
               <input
                 type="date" value={entry.happened_on}
                 onChange={(e) => setEntry({ ...entry, happened_on: e.target.value })}
               />
-            </div>
+            </Field>
           </div>
-          <div className="field">
-            <label>{t("cash.note")}</label>
+          <Field label={t("cash.note")}>
             <input
               value={entry.note}
               placeholder={t("cash.notePh")}
               onChange={(e) => setEntry({ ...entry, note: e.target.value })}
             />
-          </div>
+          </Field>
           <p className="muted" style={{ fontSize: 12 }}>{t("cash.manualHint")}</p>
         </Modal>
       )}
@@ -334,21 +375,19 @@ export default function Cash() {
         >
           <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>{t("cash.countHint")}</p>
           <div className="row">
-            <div className="field grow" style={{ margin: 0 }}>
-              <label>{t("cash.account")}</label>
+            <Field className="grow" style={{ margin: 0 }} label={t("cash.account")}>
               <select value={counting.account} onChange={(e) => setCounting({ ...counting, account: e.target.value })}>
                 {balance.accounts.map((a) => (
                   <option key={a.account} value={a.account}>{a.label}</option>
                 ))}
               </select>
-            </div>
-            <div className="field grow" style={{ margin: 0 }}>
-              <label>{t("cash.counted")}</label>
+            </Field>
+            <Field className="grow" style={{ margin: 0 }} label={t("cash.counted")} required error={countErr.counted}>
               <input
-                type="number" step="any" value={counting.counted} autoFocus
+                type="number" step="any" inputMode="decimal" value={counting.counted} autoFocus
                 onChange={(e) => setCounting({ ...counting, counted: e.target.value })}
               />
-            </div>
+            </Field>
           </div>
           {counting.counted !== "" && (
             <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
@@ -362,8 +401,8 @@ export default function Cash() {
                   color:
                     Number(counting.counted) -
                       Number(balance.accounts.find((a) => a.account === counting.account)?.balance || 0) === 0
-                      ? "var(--ok)"
-                      : "var(--danger)",
+                      ? "var(--ok-ink)"
+                      : "var(--danger-ink)",
                 }}>
                   {som(
                     Number(counting.counted) -
@@ -373,10 +412,9 @@ export default function Cash() {
               </div>
             </div>
           )}
-          <div className="field">
-            <label>{t("cash.note")}</label>
+          <Field label={t("cash.note")}>
             <input value={counting.note} onChange={(e) => setCounting({ ...counting, note: e.target.value })} />
-          </div>
+          </Field>
         </Modal>
       )}
     </>

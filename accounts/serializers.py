@@ -16,6 +16,7 @@ class CloudeTokenObtainPairSerializer(TokenObtainPairSerializer):
         token = super().get_token(user)
         token["role"] = user.role
         token["username"] = user.username
+        token["cv"] = user.credentials_version
         return token
 
     def validate(self, attrs):

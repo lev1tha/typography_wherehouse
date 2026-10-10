@@ -153,6 +153,15 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
             )
         return kind
 
+    def validate_amount(self, value):
+        # Трата −5 000 вычитала бы из расходов и из кассы, 0 — пустая запись.
+        # Ошибочную трату удаляют, а не гасят минусом. Проверка срабатывает
+        # только когда сумму передали: старая запись с минусом (если такая
+        # есть) правится по остальным полям как раньше.
+        if value <= 0:
+            raise serializers.ValidationError("Сумма должна быть больше нуля.")
+        return value
+
     def validate_useful_life_months(self, value):
         if value is not None and value < 1:
             raise serializers.ValidationError("Срок службы — хотя бы один месяц.")

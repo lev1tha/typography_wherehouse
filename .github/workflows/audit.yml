@@ -1,0 +1,43 @@
+# Еженедельная проверка зависимостей на известные уязвимости.
+#
+# НЕфатальная: красный результат не блокирует работу, а напоминает, что пора
+# обновить пакеты. Запускается по понедельникам и вручную (Actions → Run
+# workflow). Секретов не требует.
+name: Dependency audit
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    name: pip-audit (Python)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pip-audit==2.7.3
+      - name: Аудит requirements-prod.txt
+        run: pip-audit -r requirements-prod.txt --strict --progress-spinner off
+
+  npm-audit:
+    name: npm audit (frontend, только продовые пакеты)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm audit --omit=dev

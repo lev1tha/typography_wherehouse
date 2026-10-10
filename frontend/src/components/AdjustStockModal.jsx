@@ -5,6 +5,8 @@ import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { formatNumber } from "../utils/format.js";
+import Field from "./Field.jsx";
 
 // Исправление остатка — инвентаризация одного материала.
 //
@@ -44,7 +46,7 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
   const target =
     counted === "" ? null : inSheets ? Number(counted) * sheetArea : Number(counted);
   const delta = target == null ? 0 : target - cur;
-  const q2 = (n) => Number(n || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+  const q2 = (n) => formatNumber(n, { max: 2 });
 
   async function submit() {
     if (target == null || target < 0) return;
@@ -108,8 +110,7 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
         </div>
       )}
 
-      <div className="field" style={{ marginTop: 12 }}>
-        <label>{`${t("supply.counted")}, ${enteredUnit}`}</label>
+      <Field style={{ marginTop: 12 }} label={<>{`${t("supply.counted")}, ${enteredUnit}`}</>}>
         <input
           type="number"
           step="any"
@@ -118,16 +119,15 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
           value={counted}
           onChange={(e) => setCounted(e.target.value)}
         />
-      </div>
+      </Field>
 
-      <div className="field">
-        <label>{t("supply.reason")}</label>
+      <Field label={t("supply.reason")}>
         <input
           value={reason}
           onChange={(e) => setReason(e.target.value)}
           placeholder={t("supply.adjustReasonPh")}
         />
-      </div>
+      </Field>
 
       {target != null && target >= 0 && (
         <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
@@ -139,7 +139,7 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
           </div>
           <div className="crow">
             <span className="k">{t("supply.diff")}</span>
-            <strong style={{ color: delta < 0 ? "var(--danger)" : "var(--ok)" }}>
+            <strong style={{ color: delta < 0 ? "var(--danger-ink)" : "var(--ok-ink)" }}>
               {delta > 0 ? "+" : ""}{q2(delta)} {roll ? t("unit.SQM") : unit}
             </strong>
           </div>

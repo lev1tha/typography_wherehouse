@@ -5,6 +5,7 @@ import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import Field from "./Field.jsx";
 
 // Технологическая карта услуги: что она СЪЕДАЕТ сверх основного материала —
 // клей, крепёж, растворитель. Механизм работал с самого начала (расход
@@ -91,8 +92,7 @@ export default function ServiceRecipeModal({ service, materials, onClose, onSave
         <p className="muted" style={{ margin: "6px 0" }}>{t("recipes.empty")}</p>
       )}
 
-      <div className="field" style={{ marginTop: 14 }}>
-        <label>{t("recipes.material")}</label>
+      <Field style={{ marginTop: 14 }} label={t("recipes.material")}>
         <select
           value={form.material}
           onChange={(e) => setForm({ ...form, material: e.target.value })}
@@ -102,11 +102,10 @@ export default function ServiceRecipeModal({ service, materials, onClose, onSave
             <option key={m.id} value={m.id}>{m.name}</option>
           ))}
         </select>
-      </div>
+      </Field>
 
       <div className="row">
-        <div className="field grow" style={{ margin: 0 }}>
-          <label>{t("recipes.rate")}</label>
+        <Field className="grow" style={{ margin: 0 }} label={t("recipes.rate")}>
           <input
             type="number"
             step="any"
@@ -114,9 +113,8 @@ export default function ServiceRecipeModal({ service, materials, onClose, onSave
             onChange={(e) => setForm({ ...form, consumption_per_unit: e.target.value })}
             placeholder="0.05"
           />
-        </div>
-        <div className="field grow" style={{ margin: 0 }}>
-          <label>{t("recipes.mode")}</label>
+        </Field>
+        <Field className="grow" style={{ margin: 0 }} label={t("recipes.mode")}>
           <select
             value={form.consumption_mode}
             onChange={(e) => setForm({ ...form, consumption_mode: e.target.value })}
@@ -124,7 +122,7 @@ export default function ServiceRecipeModal({ service, materials, onClose, onSave
             <option value="PER_SQM">{t("recipes.modePerSqm")}</option>
             <option value="FIXED">{t("recipes.modeFixed")}</option>
           </select>
-        </div>
+        </Field>
       </div>
       {/* «На кв.м» считается от ПЛОЩАДИ куска, а не от метража реза: 0,1 клея
           на кв.м при куске 0,5 кв.м — это 0,05, сколько бы метров его ни

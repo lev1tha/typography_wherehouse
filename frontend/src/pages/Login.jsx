@@ -1,29 +1,53 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useNavigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 
+import { failureKind } from "../api/errors.js";
+import Field, { focusFirstInvalid } from "../components/Field.jsx";
 import LanguageSwitcher from "../components/LanguageSwitcher.jsx";
 import ThemeSwitcher from "../components/ThemeSwitcher.jsx";
 import { useAuth } from "../auth/AuthContext.jsx";
 
 export default function Login() {
   const { t } = useTranslation();
-  const { login, loginCustomer, isAuthenticated, isAdmin, isCustomer } = useAuth();
+  const { login, loginCustomer, isAuthenticated, isAdmin, isAccountant, isCustomer } = useAuth();
   const navigate = useNavigate();
   const [mode, setMode] = useState("staff");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [phone, setPhone] = useState("");
   const [error, setError] = useState("");
+  // Ошибки валидации — рядом с полем, а не одной строкой над кнопкой:
+  // {username, password, phone, custPass}. Общая ошибка (неверный пароль,
+  // сервер недоступен) остаётся в `error`.
+  const [fieldErr, setFieldErr] = useState({});
   const [busy, setBusy] = useState(false);
   // Клиентский вход двухшаговый: сначала телефон, затем пароль (задать/ввести).
   const [custStep, setCustStep] = useState("phone"); // phone | set | enter
   const [custPass, setCustPass] = useState("");
   const [custPass2, setCustPass2] = useState("");
 
+  // Текст общей ошибки входа по ВИДУ сбоя, а не по тексту сервера: detail
+  // приходит по-русски, и кыргызоязычный или англоязычный сотрудник видел бы
+  // чужой язык. Неверный пароль — 400/401; 429 — предел попыток (говорить
+  // «неверный пароль» здесь было бы враньём); всё остальное — сервер/сеть.
+  function loginFailure(err, wrongCredentials) {
+    switch (failureKind(err)) {
+      case "rate":
+        return t("errors.rateLimit");
+      case "timeout":
+      case "network":
+      case "server":
+        return t("errors.server");
+      default:
+        return wrongCredentials;
+    }
+  }
+
   function switchMode(m) {
     setMode(m);
     setError("");
+    setFieldErr({});
     setCustStep("phone");
     setCustPass("");
     setCustPass2("");
@@ -33,31 +57,37 @@ export default function Login() {
     setCustPass("");
     setCustPass2("");
     setError("");
+    setFieldErr({});
   }
 
+  // Уже вошёл — на свою главную. Раньше navigate() вызывался прямо во время
+  // отрисовки (React ругался «Cannot update a component while rendering»).
   if (isAuthenticated) {
-    navigate(isCustomer ? "/me" : isAdmin ? "/admin" : "/app", { replace: true });
+    return <Navigate to={isCustomer ? "/me" : isAdmin ? "/admin" : isAccountant ? "/acc" : "/app"} replace />;
+  }
+
+  function fail(errs) {
+    setFieldErr(errs);
+    focusFirstInvalid();
   }
 
   async function onStaff(e) {
     e.preventDefault();
     setError("");
+    setFieldErr({});
     // Пустые поля отправлять некуда: сервер ответит «неверный логин или
     // пароль», хотя ничего не вводили, — и потратит попытку из предела 10/мин
     // на адрес. Десять таких нажатий запирали вход всей кассе.
-    if (!username.trim() || !password) return setError(t("login.needCredentials"));
+    const errs = {};
+    if (!username.trim()) errs.username = t("login.needUsername");
+    if (!password) errs.password = t("login.needPassword");
+    if (errs.username || errs.password) return fail(errs);
     setBusy(true);
     try {
       const user = await login(username.trim(), password);
-      navigate(user.role === "ADMIN" ? "/admin" : "/app", { replace: true });
+      navigate(user.role === "ADMIN" ? "/admin" : user.role === "ACCOUNTANT" ? "/acc" : "/app", { replace: true });
     } catch (err) {
-      // 429 — предел попыток входа. Показать «неверный логин или пароль» здесь
-      // было бы враньём: пароль может быть и верным, просто ждём.
-      setError(
-        err?.response?.status === 429
-          ? err.response.data?.detail || t("login.error")
-          : t("login.error")
-      );
+      setError(loginFailure(err, t("login.error")));
     } finally {
       setBusy(false);
     }
@@ -66,8 +96,9 @@ export default function Login() {
   async function onCustomer(e) {
     e.preventDefault();
     setError("");
-    if (custStep === "phone" && !phone.trim()) return setError(t("login.needPhone"));
-    if (custStep === "enter" && !custPass) return setError(t("login.needPassword"));
+    setFieldErr({});
+    if (custStep === "phone" && !phone.trim()) return fail({ phone: t("login.needPhone") });
+    if (custStep === "enter" && !custPass) return fail({ custPass: t("login.needPassword") });
     setBusy(true);
     try {
       const res =
@@ -83,7 +114,7 @@ export default function Login() {
         setCustStep("enter");
       }
     } catch (err) {
-      setError(err?.response?.data?.detail || t("login.customerError"));
+      setError(loginFailure(err, t("login.customerError")));
     } finally {
       setBusy(false);
     }
@@ -100,14 +131,15 @@ export default function Login() {
           <ThemeSwitcher />
           <LanguageSwitcher />
         </div>
-        <h1 style={{ color: "var(--accent-strong)" }}>{t("app.title")}</h1>
+        <h1 style={{ color: "var(--accent-ink)" }}>{t("app.title")}</h1>
         <p className="muted" style={{ marginTop: -6 }}>{t("login.subtitle")}</p>
 
-        <div style={{ display: "flex", gap: 8, margin: "16px 0" }}>
+        <div style={{ display: "flex", gap: 8, margin: "16px 0" }} role="group" aria-label={t("login.title")}>
           <button
             type="button"
             className={mode === "staff" ? "" : "secondary"}
             style={{ flex: 1 }}
+            aria-pressed={mode === "staff"}
             onClick={() => switchMode("staff")}
           >
             {t("login.staffTab")}
@@ -116,6 +148,7 @@ export default function Login() {
             type="button"
             className={mode === "customer" ? "" : "secondary"}
             style={{ flex: 1 }}
+            aria-pressed={mode === "customer"}
             onClick={() => switchMode("customer")}
           >
             {t("login.clientTab")}
@@ -128,25 +161,23 @@ export default function Login() {
 
         {mode === "staff" ? (
           <form onSubmit={onStaff}>
-            <div className="field">
-              <label>{t("common.username")}</label>
+            <Field label={t("common.username")} required error={fieldErr.username}>
               <input
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 autoFocus
                 autoComplete="username"
               />
-            </div>
-            <div className="field">
-              <label>{t("common.password")}</label>
+            </Field>
+            <Field label={t("common.password")} required error={fieldErr.password}>
               <input
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="current-password"
               />
-            </div>
-            {error && <div className="error">{error}</div>}
+            </Field>
+            {error && <div className="error" role="alert">{error}</div>}
             <button type="submit" style={{ width: "100%" }} disabled={busy}>
               {busy ? t("common.loading") : t("common.login")}
             </button>
@@ -155,17 +186,22 @@ export default function Login() {
           <form onSubmit={onCustomer}>
             {custStep === "phone" ? (
               <>
-                <div className="field">
-                  <label>{t("clients.phone")}</label>
+                <Field
+                  label={t("clients.phone")}
+                  required
+                  error={fieldErr.phone}
+                  hint={t("login.clientHint")}
+                >
                   <input
+                    type="tel"
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                     autoFocus
                     inputMode="tel"
+                    autoComplete="tel"
                     placeholder="+996 700 00 00 00"
                   />
-                </div>
-                <p className="muted" style={{ fontSize: 13, marginTop: -4 }}>{t("login.clientHint")}</p>
+                </Field>
               </>
             ) : (
               <>
@@ -176,8 +212,7 @@ export default function Login() {
                   {t("login.enterPassHint")}
                 </p>
                 {custStep !== "ask_admin" && (
-                  <div className="field">
-                    <label>{t("common.password")}</label>
+                  <Field label={t("common.password")} required error={fieldErr.custPass}>
                     <input
                       type="password"
                       value={custPass}
@@ -185,19 +220,19 @@ export default function Login() {
                       autoFocus
                       autoComplete="current-password"
                     />
-                  </div>
+                  </Field>
                 )}
                 <button
                   type="button"
                   className="ghost"
                   onClick={custBack}
-                  style={{ padding: 0, fontSize: 13, color: "var(--accent-strong)" }}
+                  style={{ padding: 0, fontSize: 13, color: "var(--accent-ink)" }}
                 >
                   ← {t("login.otherPhone")}
                 </button>
               </>
             )}
-            {error && <div className="error">{error}</div>}
+            {error && <div className="error" role="alert">{error}</div>}
             {/* Без выданного пароля отправлять нечего — кнопку прячем. */}
             {custStep !== "ask_admin" && (
               <button type="submit" style={{ width: "100%", marginTop: 12 }} disabled={busy}>

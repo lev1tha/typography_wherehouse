@@ -1,4 +1,7 @@
+from decimal import Decimal
+
 from django.contrib.auth.hashers import check_password, make_password
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
@@ -24,6 +27,10 @@ class Client(models.Model):
     # заводит — иначе кабинет захватил бы любой, кто знает чужой номер.
     # Никогда не хранится в открытом виде.
     portal_password = models.CharField(_("пароль портала"), max_length=255, blank=True, default="")
+    # Версия учётных данных портала: входит в токен клиента (клейм `cv`).
+    # Новый пароль или смена телефона (логина) её увеличивают — выданные ранее
+    # токены перестают приниматься. Токен без клейма = версия 0.
+    credentials_version = models.PositiveIntegerField(default=0, editable=False)
     telegram_chat_id = models.CharField(
         _("Telegram chat id"), max_length=64, null=True, blank=True
     )
@@ -35,6 +42,13 @@ class Client(models.Model):
         related_name="referrals",
         verbose_name=_("кого привёл"),
         help_text=_("Клиент, который привёл этого клиента"),
+    )
+    # Постоянная скидка клиента, % (2026-10-10, CLI-02). Касса подставляет её
+    # сама при выборе клиента; задаёт и меняет — только админ. 0 — без скидки.
+    discount_percent = models.DecimalField(
+        _("скидка, %"), max_digits=5, decimal_places=2, default=Decimal("0"),
+        validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("100"))],
+        help_text=_("Подставляется в кассе автоматически. 0 — без скидки"),
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -60,6 +74,7 @@ class Client(models.Model):
     def set_password(self, raw: str) -> None:
         """Store a salted hash of the portal password (never the raw value)."""
         self.portal_password = make_password(raw)
+        self.credentials_version = (self.credentials_version or 0) + 1
 
     def check_password(self, raw: str) -> bool:
         return bool(self.portal_password) and check_password(raw, self.portal_password)

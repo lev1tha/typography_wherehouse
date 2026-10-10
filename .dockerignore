@@ -16,9 +16,25 @@ staticfiles/
 .env
 .env.prod
 
-# Фронтенд собирается внутри образа из исходников.
-frontend/node_modules/
+# Фронтенд собирается внутри образа из исходников (стадия `frontend` в
+# Dockerfile копирует frontend/ целиком — поэтому его картинки и иконки
+# исключению ниже не подлежат).
+node_modules/
+**/node_modules/
 frontend/dist/
+
+# Не нужно ни в одной стадии образа (Dockerfile копирует только backend-код,
+# frontend/ и deploy/entrypoint.sh). Скриншоты ревизии интерфейса весят ~50 МБ,
+# а в git они остаются — здесь они только не попадают в контекст сборки.
+ui-review/
+docs/
+.github/
+*.tsv
+**/*.png
+!frontend/**/*.png
+db.sqlite3-journal
+.pytest_cache/
+.ruff_cache/
 
 # Прочее
 .DS_Store

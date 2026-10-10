@@ -10,9 +10,13 @@ import GalleryModal from "../../components/GalleryModal.jsx";
 import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
 import ReceiveStockModal from "../../components/ReceiveStockModal.jsx";
+import LotsModal from "../../components/LotsModal.jsx";
+import { useAuth } from "../../auth/AuthContext.jsx";
 import RefSelect from "../../components/RefSelect.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { apiError } from "../../api/errors.js";
+import { formatNumber } from "../../utils/format.js";
+import Field from "../../components/Field.jsx";
 
 const EMPTY = {
   name: "",
@@ -39,7 +43,7 @@ const PIECE_UNITS = ["PIECE", "KG", "LITER"];
 const trim = (v) => String(v).replace(/\.?0+$/, "").replace(".", ",");
 // Число для показа: до сотых, без хвостовых нулей. В базе остаток лежит с
 // четырьмя знаками — так целое количество листов не превращается в дробь.
-const qty = (v) => Number(v || 0).toLocaleString("ru-RU", { maximumFractionDigits: 2 });
+const qty = (v) => formatNumber(v, { max: 2 });
 function suggestedName(m, types) {
   const type = types.find((x) => String(x.id) === String(m.type));
   const parts = [type?.name || "", m.color || ""];
@@ -376,6 +380,9 @@ export default function Catalog({ embedded = false }) {
   const [rollsLoaded, setRollsLoaded] = useState(false);
   // Рулон, который сейчас промеряют рулеткой.
   const [measuring, setMeasuring] = useState(null);
+  // Партии материала — оттуда «Исправить приход» (только администратор).
+  const { isAdmin } = useAuth();
+  const [lotsOf, setLotsOf] = useState(null);
   const loadRolls = () =>
     api
       .get("/warehouse/rolls/", { params: { page_size: 500 } })
@@ -452,7 +459,7 @@ export default function Catalog({ embedded = false }) {
         m.primary_image ? (
           <img className="thumb" src={m.primary_image} alt="" onClick={() => setGallery(m)} style={{ cursor: "pointer" }} />
         ) : (
-          <div className="thumb" style={{ display: "flex", alignItems: "center", justifyContent: "center", color: "var(--ink-faint)" }}><Icon name="image" size={22} /></div>
+          <div className="thumb" style={{ display: "flex", alignItems: "center", justifyContent: "center", color: "var(--ink-icon)" }}><Icon name="image" size={22} /></div>
         ),
     },
     {
@@ -630,6 +637,13 @@ export default function Catalog({ embedded = false }) {
               <Icon name="clipboard" size={14} /> {t("warehouse.fixStock")}
             </button>
           )}
+          {/* Партии — и пустые тоже: опечатку в приходе находят, когда партия
+              уже распродана. Отсюда «Исправить приход». */}
+          {isAdmin && (
+            <button className="secondary row-btn" onClick={() => setLotsOf(m)}>
+              <Icon name="inbox" size={14} /> {t("lotFix.lots")}
+            </button>
+          )}
           <button className="secondary row-btn" onClick={() => setEditing(m)}>
             <Icon name="pencil" size={14} /> {t("common.edit")}
           </button>
@@ -703,6 +717,17 @@ export default function Catalog({ embedded = false }) {
           manage
           onClose={() => setGallery(null)}
           onChanged={load}
+        />
+      )}
+
+      {lotsOf && (
+        <LotsModal
+          material={lotsOf}
+          onClose={() => setLotsOf(null)}
+          onChanged={() => {
+            loadRolls();
+            load();
+          }}
         />
       )}
 
@@ -793,10 +818,9 @@ export default function Catalog({ embedded = false }) {
               («ЖЕЛТЫЙ лимон 2,5ММ 237»), и отдельное поле дублировало ту же
               цифру. В базе, в поиске и в сетке массового ввода он остаётся —
               заведённые артикулы не теряются. */}
-          <div className="field">
-            <label>{t("warehouse.color")}</label>
+          <Field label={t("warehouse.color")}>
             <input value={editing.color ?? ""} onChange={(e) => setEditing({ ...editing, color: e.target.value })} />
-          </div>
+          </Field>
 
           {/* Размер листа — только у ЛИСТА. У рулона второй стороны нет: он
               продаётся длиной, а ширина у него своя, в поле «Ширина рулона».
@@ -824,7 +848,7 @@ export default function Catalog({ embedded = false }) {
             {suggestedName(editing, types) && suggestedName(editing, types) !== editing.name && (
               <button
                 className="ghost"
-                style={{ marginTop: 4, color: "var(--accent-strong)", padding: 0, height: "auto" }}
+                style={{ marginTop: 4, color: "var(--accent-ink)", padding: 0, height: "auto" }}
                 onClick={() => setEditing({ ...editing, name: suggestedName(editing, types) })}
               >
                 {t("warehouse.useSuggested", { value: suggestedName(editing, types) })}
@@ -840,8 +864,7 @@ export default function Catalog({ embedded = false }) {
               они просто мозолили глаза. */}
           {matForm === "PIECE" && (
             <div className="row">
-              <div className="field grow" style={{ margin: 0 }}>
-                <label>{t("warehouse.unit")}</label>
+              <Field className="grow" style={{ margin: 0 }} label={t("warehouse.unit")}>
                 <select
                   value={editing.unit ?? "PIECE"}
                   onChange={(e) => setEditing({ ...editing, unit: e.target.value })}
@@ -853,7 +876,7 @@ export default function Catalog({ embedded = false }) {
                     <option key={u} value={u}>{t(`unit.${u}`)}</option>
                   ))}
                 </select>
-              </div>
+              </Field>
             </div>
           )}
 
@@ -987,7 +1010,7 @@ export default function Catalog({ embedded = false }) {
                       МОЛЧА продавался по площади, как лист. Об этом говорим
                       здесь, до кнопки, а не тостом после. */}
                   {!(Number(editing.roll_width) > 0) && (
-                    <p style={{ color: "var(--danger)", fontSize: 12, marginTop: -2 }}>
+                    <p style={{ color: "var(--danger-ink)", fontSize: 12, marginTop: -2 }}>
                       {t("warehouse.rollWidthRequired")}
                     </p>
                   )}
@@ -1040,7 +1063,7 @@ export default function Catalog({ embedded = false }) {
                   после. Из размера считается и остаток в листах, и закупка за
                   лист: без него обе строки в каталоге просто не показывались. */}
               {matForm === "SHEET" && !(sheetArea > 0) && (
-                <p style={{ color: "var(--danger)", fontSize: 12, marginTop: -2 }}>
+                <p style={{ color: "var(--danger-ink)", fontSize: 12, marginTop: -2 }}>
                   {t("warehouse.sheetSizeRequired")}
                 </p>
               )}
