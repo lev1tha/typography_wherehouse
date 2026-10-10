@@ -399,7 +399,8 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
             </p>
           )}
           {preview.update.length > 0 ? (
-            <table className="table" style={{ marginTop: 6 }}>
+            <div className="table-scroll" style={{ marginTop: 6 }}>
+            <table className="table plain-table">
               <tbody>
                 {preview.update.flatMap((row) =>
                   row.changes.map((c, i) => (
@@ -412,6 +413,7 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
                 )}
               </tbody>
             </table>
+            </div>
           ) : (
             <p className="muted" style={{ fontSize: 13 }}>{t("stock2.nothingToUpdate")}</p>
           )}

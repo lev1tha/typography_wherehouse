@@ -19,7 +19,7 @@ const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, ме�
 // Дату можно поставить задним числом: деньги берут в цехе, а проводят их позже.
 export default function BulkPayModal({ client, orders: initialOrders, onClose, onPaid }) {
   const { t } = useTranslation();
-  const { toast } = useUI();
+  const { toast, confirm } = useUI();
 
   const [orders, setOrders] = useState(initialOrders || []);
   // Входящий долг на дату переезда (волна 2): сервер гасит его ПЕРВЫМ, в списке
@@ -95,19 +95,46 @@ export default function BulkPayModal({ client, orders: initialOrders, onClose, o
   async function submit() {
     if (!valid) return;
     setBusy(true);
-    try {
-      const body = {
-        // Сумму отправляем только если её ввели: пусто = «закрыть целиком».
-        ...(amount === "" ? {} : { amount: entered }),
-        receipt_ids: chosen.map((o) => o.id),
-        paid_on: paidOn,
-        method,
-      };
+    const base = {
+      // Сумму отправляем только если её ввели: пусто = «закрыть целиком».
+      ...(amount === "" ? {} : { amount: entered }),
+      receipt_ids: chosen.map((o) => o.id),
+      paid_on: paidOn,
+      method,
+    };
+    const send = async (extra = {}) => {
+      const body = { ...base, ...extra };
       const { data } = await api.post(`/clients/clients/${client.id}/pay-debt/`, body, {
         headers: { "Idempotency-Key": idem.keyFor(JSON.stringify([client.id, body])) },
       });
+      return data;
+    };
+    try {
+      let data;
+      try {
+        data = await send();
+      } catch (e) {
+        // Сумма в разы больше долга (D-164) — лишний ноль не уходит молча в
+        // сдачу: тот же вопрос, что у оплаты одного заказа.
+        const warning = e.response?.status === 409 && e.response.data?.needs_confirmation
+          ? (e.response.data.warnings || []).find((w) => w.code === "overpay")
+          : null;
+        if (!warning) throw e;
+        idem.failed(e);
+        const wAmount = Number(warning.amount);
+        const wDebt = Number(warning.debt);
+        const text = wAmount > 0 && wDebt > 0
+          ? t("receiptsV2.overpayAsk", {
+              amount: formatMoney(wAmount),
+              debt: formatMoney(wDebt),
+              times: (wAmount / wDebt).toFixed(1),
+            })
+          : warning.message;
+        if (!(await confirm(text))) return;
+        data = await send({ confirm_overpay: true });
+      }
       idem.done();
-      toast(t("clients.bulkPayDone", { amount: som(data.paid) }));
+      toast(data.idempotent_replay ? t("clients.repeatIgnored") : t("clients.bulkPayDone", { amount: som(data.paid) }));
       onPaid?.(data);
     } catch (e) {
       idem.failed(e);

@@ -1152,7 +1152,8 @@ class SupplierViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = Supplier.objects.prefetch_related(
-            "supplies__lines", "supplies__payments", "payments__offsets", "opening_debts",
+            "supplies__lines", "supplies__payments", "supplies__returns", "payments__offsets",
+            "opening_debts",
         )
         if self.request.query_params.get("archived") == "1":
             return qs
@@ -1409,6 +1410,17 @@ class SupplyViewSet(viewsets.ModelViewSet):
             ctx["dupes"] = duplicate_map()
         return ctx
 
+    def list(self, request, *args, **kwargs):
+        """`?export=csv` — список накладных файлом для Excel (те же фильтры,
+        поиск и сортировка, все страницы; XL-06)."""
+        if request.query_params.get("export") == "csv":
+            from .exports import csv_response, supplies_csv
+
+            qs = self.filter_queryset(self.get_queryset())
+            money = bool(getattr(request.user, "sees_money", False))
+            return csv_response(supplies_csv(qs, money=money, dupes=duplicate_map()), "nakladnye.csv")
+        return super().list(request, *args, **kwargs)
+
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1629,10 +1641,13 @@ class SupplyViewSet(viewsets.ModelViewSet):
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         fresh = self.get_queryset().get(pk=supply.pk)
         what = "; ".join(l.label for l in ret.lines.all())
+        head = (
+            f"Сумма накладной {before[0]} → {fresh.total_cost}" if ret.in_place else
+            f"Накладная закрытого месяца не изменена, закуп {ret.returned_on:%d.%m.%Y} −{ret.amount} сом"
+        )
         AuditLog.record(
             request.user,
-            f"Возврат поставщику по накладной {label}: {what}. Сумма накладной {before[0]} → "
-            f"{fresh.total_cost}, долг {before[2]} → {fresh.debt}"
+            f"Возврат поставщику по накладной {label}: {what}. {head}, долг {before[2]} → {fresh.debt}"
             + (f"; деньги вернулись на {ret.refund_account}: {ret.refund} сом" if ret.refund else
                (f"; кредит у поставщика {fresh.overpaid} сом" if fresh.overpaid else "")),
         )

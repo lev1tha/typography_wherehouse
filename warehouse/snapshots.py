@@ -1,11 +1,21 @@
 """Снимок склада на конец дня и «склад на дату» (STK-04, волна 2).
 
+ОДНА функция стоимости склада на дату (RS-N1/STK-04, перепроверка 10.10):
+ею считают «Склад на дату», `stock_value_total` («Финансы», начало и конец
+цепочки «Сводки», «Обзор») и снимок при закрытии месяца. Раньше их было три,
+и на конец сентября выходило три числа: 47 400, 49 800 и 48 360.
+
 Остаток материала на дату — сумма журнала склада по этот день (точно).
-Раскладка по партиям — от сегодняшних остатков партий назад: то, что ушло после
-даты, возвращается в партии с самой свежей (обратный FIFO), пришедшее после
-даты — отнимается со старейшей. Для снимка, снятого в день закрытия месяца,
-это и есть точное состояние; снятого позже — близкое к нему, но после снятия
-цифра больше не плывёт от поставок, внесённых задним числом.
+Остаток ПАРТИИ на дату — сегодняшний остаток партии плюс то, что ушло из неё
+после даты, минус то, что вернулось: движения журнала, привязанные к партиям
+(`InventoryLogLot` — продажа, возврат, недостача, излишек, отход, списание,
+промер, возврат поставщику датой возврата). Октябрьская недостача, ушедшая со
+старейшей партии, сентябрь больше не двигает.
+
+Остаток, который партиями не объясняется (движения до 10.10 без раскладки по
+партиям, количество без партий), — как раньше: сначала «хвост сверх партий»
+(по последней закупочной), остальное — назад в самые свежие партии, где есть
+место. «Сейчас» это ровно `Material.stock_value`.
 """
 from __future__ import annotations
 
@@ -16,9 +26,10 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
-from .models import InventoryLog, Material, StockSnapshot, StockSnapshotLine
+from .models import InventoryLog, InventoryLogLot, Material, StockSnapshot, StockSnapshotLine
 
 ZERO = Decimal("0")
+CENT = Decimal("0.01")
 
 
 def _journal_qty(day) -> dict:
@@ -29,54 +40,110 @@ def _journal_qty(day) -> dict:
     }
 
 
-def lots_at(material: Material, day, qty_at: Decimal | None = None):
-    """[(партия, кв.м)] и хвост сверх партий на конец дня `day`."""
-    today = timezone.localdate()
+def _moves_after(day) -> dict:
+    """{партия: сумма её движений ПОСЛЕ дня `day`} — со знаком журнала (минус —
+    ушло из партии, плюс — вернулось)."""
+    out = defaultdict(lambda: ZERO)
+    for row in (
+        InventoryLogLot.objects.filter(log__happened_at__date__gt=day)
+        .values("roll_id").annotate(v=Sum("area"))
+    ):
+        out[row["roll_id"]] += row["v"] or ZERO
+    # Запись с партией, но без раскладки: всё её количество — этой партии.
+    # Приход не в счёт: партия, пришедшая после даты, в расчёт не входит.
+    for row in (
+        InventoryLog.objects.filter(happened_at__date__gt=day, roll__isnull=False, lot_moves__isnull=True)
+        .exclude(type=InventoryLog.Type.SUPPLY).exclude(quantity_changed=0)
+        .values("roll_id").annotate(v=Sum("quantity_changed"))
+    ):
+        out[row["roll_id"]] += row["v"] or ZERO
+    return out
+
+
+def lots_at(material: Material, day, qty_at: Decimal | None = None, moves_after=None):
+    """[(партия, кв.м)] и хвост сверх партий на конец дня `day`.
+
+    ``qty_at`` — остаток материала на эту дату (по журналу); None — «сейчас».
+    ``moves_after`` — `_moves_after(day)`; без него партии берутся как есть."""
+    rolls = list(material.rolls.all())
     lots = sorted(
-        (r for r in material.rolls.all() if timezone.localtime(r.received_at).date() <= day),
+        (r for r in rolls if timezone.localtime(r.received_at).date() <= day),
         key=lambda r: (r.received_at, r.pk),
     )
-    areas = {r.pk: r.remaining_area for r in lots}
-    if day >= today or qty_at is None:
-        tail = (material.quantity or ZERO) - sum(areas.values(), ZERO)
-        return [(r, areas[r.pk]) for r in lots], max(tail, ZERO)
+    quantity = material.quantity or ZERO
+    if qty_at is None:
+        qty_at = quantity
+    moves_after = moves_after or {}
+    areas = {r.pk: max(r.remaining_area - moves_after.get(r.pk, ZERO), ZERO) for r in lots}
     diff = qty_at - sum(areas.values(), ZERO)
+    tail = ZERO
     if diff > 0:
-        for r in reversed(lots):           # ушло после даты — назад в свежие
-            room = r.initial_area - areas[r.pk]
-            give = min(room, diff)
+        # Сначала — хвост сверх партий: он и сегодня лежит вне партий.
+        tail_now = max(quantity - sum((r.remaining_area for r in rolls), ZERO), ZERO)
+        tail = min(diff, tail_now)
+        diff -= tail
+        # Ушло после даты без раскладки по партиям — назад в свежие.
+        for r in reversed(lots):
+            if diff <= 0:
+                break
+            give = min(r.initial_area - areas[r.pk], diff)
             if give > 0:
                 areas[r.pk] += give
                 diff -= give
+        tail += max(diff, ZERO)
     elif diff < 0:
-        need = -diff
-        for r in lots:                     # вернулось после даты — со старейших
-            take = min(areas[r.pk], need)
-            areas[r.pk] -= take
-            need -= take
-        diff = ZERO
-    return [(r, areas[r.pk]) for r in lots], max(diff, ZERO)
+        # Партии знают больше остатка — как `Material.stock_value`: в пределах
+        # остатка, со старейших.
+        left = qty_at
+        for r in lots:
+            take = min(areas[r.pk], max(left, ZERO))
+            areas[r.pk] = take
+            left -= take
+    return [(r, areas[r.pk]) for r in lots], tail
 
 
 def _rows(day) -> list[dict]:
-    qty = _journal_qty(day) if day < timezone.localdate() else None
+    """По материалам на конец дня `day`: строки (партия, кв.м, сом) и итог.
+
+    Сумма строк материала равна его стоимости до тыйына: стоимость материала
+    округляется один раз (как `Material.stock_value`), строки — каждая, а
+    копейка округления ложится на последнюю. Поэтому снимок и расчёт дают одно
+    и то же число."""
+    past = day < timezone.localdate()
+    if past:
+        qty = _journal_qty(day)
+        moves = _moves_after(day)
+        materials = Material.objects.filter(pk__in=[pk for pk, v in qty.items() if v > 0])
+    else:
+        qty, moves = None, {}
+        materials = Material.objects.filter(quantity__gt=0)
     out = []
-    for m in Material.objects.prefetch_related("rolls").order_by("name"):
-        at = qty.get(m.pk, ZERO) if qty is not None else None
-        if at is not None and at <= 0:
+    for m in materials.prefetch_related("rolls").order_by("name"):
+        at = qty.get(m.pk, ZERO) if past else (m.quantity or ZERO)
+        if at <= 0:
             continue
-        if at is None and (m.quantity or ZERO) <= 0:
-            continue
-        lots, tail = lots_at(m, day, at)
-        lines = [(r, a, r.cost_of(a)) for r, a in lots if a > 0]
+        lots, tail = lots_at(m, day, at, moves)
+        raw = [(r, a, r.cost_of(a)) for r, a in lots if a > 0]
         if tail > 0:
-            lines.append((None, tail, tail * (m.purchase_price or ZERO)))
-        quantity = sum((a for _r, a, _v in lines), ZERO)
+            raw.append((None, tail, tail * (m.purchase_price or ZERO)))
+        value = sum((v for *_x, v in raw), ZERO).quantize(CENT)
+        lines = [(r, a, v.quantize(CENT)) for r, a, v in raw]
+        if lines:
+            drift = value - sum((v for *_x, v in lines), ZERO)
+            if drift:
+                r, a, v = lines[-1]
+                lines[-1] = (r, a, v + drift)
         out.append({
-            "material": m, "lines": lines, "quantity": quantity,
-            "value": sum((v for *_x, v in lines), ZERO).quantize(Decimal("0.01")),
+            "material": m, "lines": lines,
+            "quantity": sum((a for _r, a, _v in lines), ZERO),
+            "value": value,
         })
     return out
+
+
+def stock_value_on(day) -> Decimal:
+    """Стоимость всего склада на конец дня `day` — расчётом (без снимка)."""
+    return sum((r["value"] for r in _rows(day)), ZERO).quantize(CENT)
 
 
 @transaction.atomic
@@ -135,7 +202,10 @@ def stock_on_date(day) -> dict:
 
 def on_period_lock_saved(sender, instance, **kwargs):
     """Закрыли месяц — снять склад на дату закрытия (если снимка ещё нет).
-    Открыли назад — снимки закрытия позже новой границы больше не заперты: их
+    Снимается состояние на КОНЕЦ дня закрытия, а не партии в момент нажатия:
+    тот же расчёт, что «Склад на дату» и `stock_value_total`, поэтому движения
+    нового месяца, прошедшие до закрытия, в снимок не попадают, а пересъёмка
+    командой `stock_snapshot --month` даёт то же число. Открыли назад — снимки закрытия позже новой границы больше не заперты: их
     убираем, при новом закрытии снимутся заново."""
     limit = instance.closed_through
     stale = StockSnapshot.objects.filter(source="close")

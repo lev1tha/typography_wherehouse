@@ -652,6 +652,157 @@ def apply_order_rounding(receipt: Receipt, items) -> None:
                 item.save(update_fields=["price_per_item"])
 
 
+def cut_partner(item: TransactionItem):
+    """Вторая строка пары «работа реза + материал куска» или None.
+
+    `_build_item` создаёт их подряд: работа (в ней размеры детали, число
+    деталей и материал работы), сразу за ней — материал по площади того же
+    материала. Связи в базе нет, поэтому пара узнаётся по соседству и
+    признакам — так же, как её склеивает «Повторить заказ».
+    """
+    sqm = TransactionItem.SaleMode.SQM
+    if item.type == TransactionItem.Type.SERVICE:
+        if not (
+            item.service_id and item.service.uses_material and item.work_material_id
+            and item.width and item.length
+        ):
+            return None
+        other = item.receipt.items.filter(id__gt=item.id).order_by("id").first()
+        if (
+            other is not None and other.type == TransactionItem.Type.MATERIAL
+            and other.material_id == item.work_material_id and other.sale_mode == sqm
+            and not other.roll_area
+        ):
+            return other
+        return None
+    if item.sale_mode != sqm or item.roll_area or not item.material_id:
+        return None
+    other = item.receipt.items.filter(id__lt=item.id).order_by("-id").first()
+    if (
+        other is not None and other.type == TransactionItem.Type.SERVICE
+        and other.work_material_id == item.material_id and other.service_id
+        and other.service.uses_material and other.width and other.length
+    ):
+        return other
+    return None
+
+
+def _part_material(receipt: Receipt, work: TransactionItem, pool) -> Decimal:
+    """«Материал детали» строки работы для минимума «деталь» (D-152).
+
+    - рез куска — его строка материала (пара);
+    - рез ЦЕЛОГО листа (у работы нет площади) — листы того же материала,
+      проданные в этом заказе своими строками (`=МАКС(500; листы + рез)`);
+    - иначе 0.
+    Сумма — до срочности и скидки, как её считает `_line_rules`.
+    """
+    live = [i for i in pool if not i.is_returned and i.catalog_price is not None]
+    by_id = {i.id: n for n, i in enumerate(live)}
+    paired = set()
+    for n, i in enumerate(live):
+        if (
+            i.type == TransactionItem.Type.SERVICE and i.width and i.length
+            and i.work_material_id and i.service_id and i.service.uses_material
+            and n + 1 < len(live)
+            and live[n + 1].type == TransactionItem.Type.MATERIAL
+            and live[n + 1].material_id == i.work_material_id
+            and live[n + 1].sale_mode == TransactionItem.SaleMode.SQM
+            and not live[n + 1].roll_area
+        ):
+            paired.add(live[n + 1].id)
+            if i.id == work.id:
+                mat = live[n + 1]
+                return _part_amount(receipt, mat.quantity * mat.catalog_price)
+    if work.id in by_id and work.width and work.length:
+        return Decimal("0")      # рез куска без строки материала (её убрали)
+    sheets = [
+        i for i in live
+        if i.type == TransactionItem.Type.MATERIAL and i.material_id == work.work_material_id
+        and i.id not in paired
+    ]
+    return sum((_part_amount(receipt, i.quantity * i.catalog_price) for i in sheets), Decimal("0"))
+
+
+def refresh_part_minimum(receipt: Receipt, targets, pool) -> None:
+    """Минимум «деталь» заново для строк работы `targets` (D-152).
+
+    Минимум работы в этом режиме — минимум минус материал её детали; материал
+    мог стать другим (правка деталей, удаление строки, пересчёт по прайсу) или
+    оказаться в заказе отдельной строкой листа. Правила — сегодняшние
+    настройки и правила заказа (`_line_rules`), как у дозаказа.
+    """
+    settings = _pricing_settings(receipt)
+    if settings.min_mode != settings.MinMode.PART:
+        return
+    pool = list(pool)
+    for work in targets:
+        if (
+            work.is_returned or work.catalog_price is None
+            or work.type != TransactionItem.Type.SERVICE or not work.service_id
+            or not work.service.uses_material or not work.work_material_id
+        ):
+            continue
+        rules = _line_rules(
+            receipt, TransactionItem.Type.SERVICE, work.service, _part_material(receipt, work, pool),
+        )
+        minimum = rules.minimum if rules.minimum > 0 else None
+        if minimum != work.min_amount:
+            work.min_amount = minimum
+            reprice_line(work)
+            work.save(update_fields=["price_per_item", "min_amount", "min_applied"])
+
+
+def apply_order_rules(receipt: Receipt, built) -> None:
+    """Правила, которые видят заказ целиком, — после сборки всех строк:
+    минимум «деталь» для реза целого листа, минимум «заказ», округление
+    «итог одной формулой»."""
+    refresh_part_minimum(
+        receipt, [i for i in built if not (i.width and i.length)], built,
+    )
+    apply_order_minimum(receipt, built)
+    apply_order_rounding(receipt, built)
+
+
+def reapply_order_rules(receipt: Receipt, *, part_targets=()) -> None:
+    """Минимум и округление заказа заново после правки состава и пересчёта
+    по прайсу (S2 «минимум заказа», D-151).
+
+    Раньше они применялись только при оформлении: убрали строку, на которой
+    висел минимум заказа, — минимум пропал (594 → 67); правка количества в
+    режиме «итог одной формулой» теряла остаток округления.
+
+    - «деталь» — для строк работы `part_targets` (затронутых правкой);
+    - «заказ» — прежний подъём снимается со строки, где он был, и ставится
+      заново от нового состава;
+    - «итог одной формулой» — строки пересчитываются по своим правилам и
+      итог раскладывается заново.
+    """
+    settings = _pricing_settings(receipt)
+    live = list(
+        receipt.items.filter(is_returned=False).order_by("id")
+        .select_related("service", "material", "work_material")
+    )
+    wanted = {i.id for i in part_targets}
+    refresh_part_minimum(receipt, [i for i in live if i.id in wanted], live)
+    if settings.min_mode == settings.MinMode.ORDER and settings.min_line_amount > 0:
+        # В этом режиме у строк своего минимума нет: минимум на строке — это
+        # прежний подъём заказа до минимума.
+        for item in live:
+            if item.type == TransactionItem.Type.SERVICE and item.catalog_price is not None and item.min_amount:
+                item.min_amount = None
+                reprice_line(item)
+                item.save(update_fields=["price_per_item", "min_amount", "min_applied"])
+        apply_order_minimum(receipt, live)
+    if settings.rounding_mode == settings.Rounding.ORDER:
+        for item in live:
+            if item.catalog_price is not None:
+                was = item.price_per_item
+                reprice_line(item)
+                if item.price_per_item != was:
+                    item.save(update_fields=["price_per_item", "min_applied"])
+        apply_order_rounding(receipt, live)
+
+
 def reprice_line(item: TransactionItem, *, base_price=None) -> None:
     """Пересчитать цену строки по ЕЁ правилам после правки количества/цены.
 
@@ -740,8 +891,28 @@ class NeedsConfirmation(Exception):
         self.warnings = warnings
 
 
-# Предупреждения, которые обязаны быть подтверждены явно.
-CONFIRM_CODES = ("line_total_high", "size_exceeds_sheet", "debt_over_limit")
+class NeedsAdmin(Exception):
+    """Сомнение, которое подтверждает только администратор (403, CALC-06).
+
+    «Строка выше порога» и «деталь больше листа» — это сантиметры вместо
+    метров: складовщик подтверждал их сам и оформил чек на 1,66 млрд. Теперь
+    он получает отказ с просьбой позвать администратора; заказ откатывается.
+    """
+
+    def __init__(self, warnings):
+        super().__init__(
+            "Нужно подтверждение администратора: "
+            + " ".join(w["message"] for w in warnings)
+            + " Позовите администратора — он проверит и оформит заказ."
+        )
+        self.warnings = warnings
+
+
+# Предупреждения, которые обязаны быть подтверждены явно. `quote_changed` —
+# заказ из КП выходит не по цене КП (КП просрочено или состав изменён).
+CONFIRM_CODES = ("line_total_high", "size_exceeds_sheet", "debt_over_limit", "quote_changed")
+# Из них — только администратором (перепроверка 10.10, CALC-06).
+ADMIN_CONFIRM_CODES = ("line_total_high", "size_exceeds_sheet")
 
 
 def _fits_sheet(width, length, sheet_w, sheet_h) -> bool:
@@ -851,21 +1022,32 @@ def check_order_limits(
 ) -> list:
     """Проверки оформления после сборки строк (внутри транзакции продажи).
 
-    Жёсткий потолок складовщика — `OrderRejected` (400). Остальные сомнения
-    без подтверждения — `NeedsConfirmation` (409), и вызывающий откатывает
-    заказ. Возвращает предупреждения, которые подтверждены (их показывают
-    после оформления).
+    Жёсткий потолок складовщика — `OrderRejected` (400). «Строка выше
+    порога» и «деталь больше листа» у не-админа — `NeedsAdmin` (403): их
+    подтверждает только администратор (в предпросмотре они помечены
+    `admin_only`). Остальные сомнения без подтверждения — `NeedsConfirmation`
+    (409), и вызывающий откатывает заказ. Возвращает предупреждения, которые
+    подтверждены (их показывают после оформления).
     """
     settings = _pricing_settings(receipt)
     cap = settings.staff_line_cap
-    if cap > 0 and not getattr(user, "is_admin_role", False):
+    is_admin = getattr(user, "is_admin_role", False)
+    if cap > 0 and not is_admin:
         for item in items:
             if not item.is_returned and item.sold_total > cap:
                 raise OrderRejected(
                     f"«{_line_name(item)}»: сумма строки {item.sold_total} сом выше "
                     f"потолка {cap} сом для складовщика. Позовите администратора."
                 )
-    found = order_warnings(receipt, items, with_debt=with_debt)
+    found = order_warnings(receipt, items, with_debt=with_debt) + list(
+        getattr(receipt, "quote_warnings", None) or []
+    )
+    if not is_admin:
+        admin_only = [w for w in found if w["code"] in ADMIN_CONFIRM_CODES]
+        for w in admin_only:
+            w["admin_only"] = True
+        if admin_only and raise_pending:
+            raise NeedsAdmin(admin_only)
     confirmed = set(confirmed or ())
     pending = [
         w for w in found
@@ -882,14 +1064,30 @@ def _contract_prices(receipt: Receipt) -> dict:
     заказа без клиента их нет."""
     cached = receipt.__dict__.get("_contract_prices")
     if cached is None:
-        cached = {}
-        if receipt.client_id and not receipt.is_warranty:
-            from clients.models import ClientPrice
-
-            for cp in ClientPrice.objects.filter(client_id=receipt.client_id):
-                cached[(cp.service_id, cp.material_id, cp.sale_mode or "")] = cp.price
+        cached = {} if receipt.is_warranty else contract_prices_for(receipt.client_id)
         receipt.__dict__["_contract_prices"] = cached
     return cached
+
+
+def contract_prices_for(client_id) -> dict:
+    """Договорные цены клиента {(услуга, материал, единица): цена}; нет клиента — {}."""
+    if not client_id:
+        return {}
+    from clients.models import ClientPrice
+
+    return {
+        (cp.service_id, cp.material_id, cp.sale_mode or ""): cp.price
+        for cp in ClientPrice.objects.filter(client_id=client_id)
+    }
+
+
+def service_contract(prices: dict, service, material=None):
+    """Договорная ставка работы: «услуга + материал», потом «услуга»; None — нет."""
+    if material is not None:
+        hit = prices.get((service.pk, material.pk, ""))
+        if hit is not None:
+            return hit
+    return prices.get((service.pk, None, ""))
 
 
 def _contract_for_material(receipt: Receipt, material, mode):
@@ -897,12 +1095,87 @@ def _contract_for_material(receipt: Receipt, material, mode):
 
 
 def _contract_for_service(receipt: Receipt, service, material=None):
-    prices = _contract_prices(receipt)
-    if material is not None:
-        hit = prices.get((service.pk, material.pk, ""))
-        if hit is not None:
-            return hit
-    return prices.get((service.pk, None, ""))
+    return service_contract(_contract_prices(receipt), service, material)
+
+
+def _effective_prices(entry, prices: dict) -> dict:
+    """Цены позиции, которые касса взяла бы САМА, без ручной правки (S1 №1,
+    перепроверка 10.10): договорная цена клиента, если она есть, иначе каталог
+    или матрица — тот же выбор, что в `_build_item`. Ключи — как у полей
+    ручной цены: `cut_rate` (ставка работы за один проход) и `material_price`.
+    """
+    out = {}
+    if entry.get("type") == TransactionItem.Type.MATERIAL:
+        material = entry.get("material")
+        if material is None:
+            return out
+        mode = entry.get("mode") or TransactionItem.SaleMode.SQM
+        if mode == TransactionItem.SaleMode.PIECE:
+            price = material.piece_price_for_qty(_qty(entry.get("quantity") or 0))
+            if not price and not material.is_roll_material:
+                price = material.price_per_unit
+        elif mode == TransactionItem.SaleMode.METER:
+            price = material.price_per_pm
+        elif material.sells_roll_by_area and entry.get("width") and entry.get("length"):
+            mode, price = TransactionItem.SaleMode.SQM, material.price_per_sqm
+        else:
+            mode = TransactionItem.SaleMode.SQM
+            price = material.sqm_price if material.is_roll_material else material.price_per_unit
+        contract = prices.get((None, material.pk, mode))
+        out["material_price"] = contract if contract is not None else price
+        return out
+    service = entry.get("service")
+    if service is None:
+        return out
+    if service.uses_free_measure:
+        out["cut_rate"] = {
+            TransactionItem.SaleMode.METER: service.rate_per_pm,
+            TransactionItem.SaleMode.PIECE: service.rate_per_piece,
+        }.get(entry.get("mode") or TransactionItem.SaleMode.SQM, service.rate_flat)
+        return out
+    if service.uses_area:
+        material = None if entry.get("own_material") else entry.get("material")
+        contract = service_contract(prices, service, material)
+        out["cut_rate"] = contract if contract is not None else resolve_rate(service, material).rate
+        if service.uses_material and material is not None:
+            contract = prices.get((None, material.pk, TransactionItem.SaleMode.SQM))
+            out["material_price"] = contract if contract is not None else material.sqm_price
+        return out
+    contract = service_contract(prices, service)
+    out["cut_rate"] = (
+        contract if contract is not None
+        else (service.rate_per_piece if service.uses_pieces else service.base_price)
+    )
+    return out
+
+
+def drop_unchanged_prices(entry, prices: dict):
+    """Убрать из позиции «ручную» цену, равную действующей (S1 №1, RU-N1/RU-N2).
+
+    Окно позиции в кассе показывает ставку и шлёт её на сервер; раньше любая
+    присланная ставка считалась вписанной руками: строка получала «цена
+    вручную», выпадала из пересчёта по прайсу, а договорная цена клиента
+    подменялась каталожной из окна. Ставка, равная действующей (договорной или
+    каталожной), — не ручная цена: её убираем, и строка считается так, будто её
+    не присылали. Нулевая действующая цена (пустой каталог) не совпадает ни с
+    чем: явный ноль — подарок админа, и он остаётся ручным. Меняет `entry` на
+    месте и возвращает его.
+    """
+    effective = None
+    for key in ("cut_rate", "material_price"):
+        raw = entry.get(key)
+        if raw in (None, ""):
+            continue
+        if effective is None:
+            effective = _effective_prices(entry, prices)
+        now = effective.get(key)
+        try:
+            same = now is not None and Decimal(now) > 0 and Decimal(str(raw)) == Decimal(now)
+        except (InvalidOperation, ValueError, TypeError):
+            same = False
+        if same:
+            entry.pop(key)
+    return entry
 
 
 def _build_item(receipt, entry) -> list[TransactionItem]:
@@ -918,7 +1191,12 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
     - SERVICE / FIXED (installation, other): base_price × count.
     - SERVICE / WASTE (отходы): мерка из `mode` — кв.м, пог.м или штуки;
       склада не касается, материала отдельной строкой нет.
+
+    Цена, присланная кассой и равная действующей (договорной или каталожной),
+    ручной не считается (`drop_unchanged_prices`).
     """
+    entry = drop_unchanged_prices(dict(entry), _contract_prices(receipt))
+
     def _override(key):
         v = entry.get(key)
         return Decimal(str(v)) if v not in (None, "") else None
@@ -1296,9 +1574,14 @@ def create_sale(
     created_at=None, pay_full=False, use_change=False, pay_debt_ids=None,
     is_urgent=False, urgency_percent=None, discount_percent=None,
     is_warranty=False, warranty_of=None, warranty_reason="", warranty_culprit="",
-    buyer_name="", use_advance=False, pay_opening=False,
+    buyer_name="", use_advance=False, pay_opening=False, quote=None,
 ) -> Receipt:
     """Create a receipt with its line items.
+
+    ``quote`` — КП, из которого оформляют заказ (проверено вьюхой: есть, не
+    отменено, не оформлено). В срок и того же состава — строки по ценам КП;
+    иначе — по сегодняшним, а расхождение с итогом КП ложится в
+    `receipt.quote_warnings` («КП №X: было Y, сейчас Z», подтверждение).
 
     ``use_advance=True`` — закрыть остаток заказа АВАНСОМ клиента (волна 2,
     D-93): сразу после зачёта сдачи, тем же способом — деньги лежат в кассе с
@@ -1367,11 +1650,18 @@ def create_sale(
     built = []
     for entry in items_data:
         built += _build_item(receipt, entry)  # creates one or more line items
-    # Минимум «заказ» и округление «итог одной формулой» видят заказ целиком.
-    apply_order_minimum(receipt, built)
-    apply_order_rounding(receipt, built)
+    # Заказ из КП в срок и того же состава — по ценам КП (D-153). Иначе
+    # минимум «деталь» для реза целого листа, минимум «заказ» и округление
+    # «итог одной формулой» видят заказ целиком.
+    quoted = quote is not None and apply_quote_prices(receipt, built, quote)
+    if not quoted:
+        apply_order_rules(receipt, built)
 
     total = receipt.recalculate_total()
+    receipt.quote_warnings = (
+        quote_changed_warnings(receipt, built, quote, total)
+        if quote is not None and not quoted else []
+    )
 
     if payment_method != Receipt.PaymentMethod.ONLINE:
         # Наличные / MBank / DemirBank — товар отдаём сразу, поэтому склад
@@ -1636,6 +1926,11 @@ def add_items_to_receipt(receipt: Receipt, items_data, *, user=None, confirmed=(
     built = []
     for entry in items_data:
         built += _build_item(receipt, entry)
+    # Рез целого листа, лист которого уже в заказе, — та же деталь (D-152).
+    refresh_part_minimum(
+        receipt, [i for i in built if not (i.width and i.length)],
+        receipt.items.filter(is_returned=False).order_by("id"),
+    )
     # Округление «итог одной формулой» — по добавленным строкам: уже принятые
     # строки и их цены не трогаем.
     apply_order_rounding(receipt, built)
@@ -2055,7 +2350,7 @@ def _money_held(receipt: Receipt) -> Decimal:
     return min(receipt.amount_paid, kept)
 
 
-def _resettle(receipt: Receipt, *, held=None) -> None:
+def _resettle(receipt: Receipt, *, held=None, user=None) -> None:
     """Пересчитать итог, статус оплаты и сдачу после правки состава.
 
     Если итог УПАЛ ниже уже принятых денег — разница не пропадает и не остаётся
@@ -2077,6 +2372,15 @@ def _resettle(receipt: Receipt, *, held=None) -> None:
     total = receipt.recalculate_total()
     owed_base = total - receipt.refunded_amount
     over = receipt.amount_paid - owed_base
+    if over > 0:
+        # Списанный долг — не деньги (D-159): лишнее сверх нового итога сначала
+        # уменьшает списание и его расход «Безнадёжные долги», и только остаток
+        # становится сдачей. Иначе заказ, списанный целиком и потом уменьшенный
+        # правкой, «должен» клиенту сдачу из денег, которых тот не платил.
+        cut = reduce_writeoff(receipt, over, user=user)
+        if cut > 0:
+            receipt.amount_paid -= cut
+            over -= cut
     if over > 0:
         receipt.amount_paid = owed_base if owed_base > 0 else Decimal("0")
         receipt.change_due = receipt.change_due + over
@@ -2207,19 +2511,39 @@ def _parse_dim_edit(item: TransactionItem, change) -> dict:
     return out
 
 
-def _apply_dim_edit(item: TransactionItem, dims: dict, qty, price):
+def _apply_dim_edit(item: TransactionItem, dims: dict, qty, price, *, pair_sizes=None):
     """Применить разобранную правку размеров к строке. Возвращает новые
-    `(количество, цена до правил)` — те, что пойдут в пересчёт по правилам."""
+    `(количество, цена до правил)` — те, что пойдут в пересчёт по правилам.
+
+    `pair_sizes` — (ширина, длина) детали у материала пары реза: свои размеры
+    он не хранит, они у строки работы (S1 №2, RP-N1). Материал без размеров
+    и без пары число деталей не пересчитает — отказ, а не молчание."""
     if not dims:
         return qty, price
     old_parts = item.parts_count or 1
     new_parts = dims.get("parts_count", old_parts)
+    if item.type == TransactionItem.Type.MATERIAL and pair_sizes is not None:
+        width, length = pair_sizes
+        item.parts_count = new_parts
+        # Размеры, названные в правке, строка помнит (как и до пар, D-131).
+        if "width" in dims:
+            item.width = dims["width"]
+        if "length" in dims:
+            item.length = dims["length"]
+        if qty is None and width and length:
+            qty = _qty(width * length * new_parts)
+        return qty, price
     width = dims.get("width", item.width)
     length = dims.get("length", item.length)
     item.width, item.length, item.parts_count = width, length, new_parts
     if item.type == TransactionItem.Type.MATERIAL:
         if qty is None and width and length:
             qty = _qty(width * length * new_parts)
+        elif qty is None and new_parts != old_parts:
+            raise ItemEditRejected(
+                f"«{_line_name(item)}»: у материала нет размеров детали — число деталей не "
+                "пересчитать в площадь. Поправьте детали у строки реза или площадь (quantity)."
+            )
         return qty, price
     # Работа. Цена за единицу: проходы умножают ставку «за один проход»; смена
     # станка берёт ставку нового станка (если цену не вписывали руками).
@@ -2231,15 +2555,86 @@ def _apply_dim_edit(item: TransactionItem, dims: dict, qty, price):
     if "service" in dims:
         item.service = dims["service"]
         if price is None and not item.price_is_manual:
-            resolved = resolve_rate(item.service, item.work_material)
-            price = apply_passes(resolved.rate, new_passes)
-            item.thickness_coef = resolved.coefficient
+            # Договорная строка (S3, C3b): у нового станка своя договорная
+            # ставка — она; нет — каталог СО скидкой клиента, а не без неё.
+            contract = (
+                _contract_for_service(item.receipt, item.service, item.work_material)
+                if item.client_price else None
+            )
+            if contract is not None:
+                price = apply_passes(contract, new_passes)
+                item.thickness_coef = None
+            else:
+                resolved = resolve_rate(item.service, item.work_material)
+                price = apply_passes(resolved.rate, new_passes)
+                item.thickness_coef = resolved.coefficient
+                if item.client_price:
+                    item.client_price = False
+                    item.discount_percent = item.receipt.discount_percent or Decimal("0")
     if item.service.uses_running_meter:
         if qty is None and new_parts != old_parts:
             qty = _qty(item.quantity / old_parts * new_parts)
     elif qty is None and width and length:
         qty = _qty(width * length * new_parts)
     return qty, price
+
+
+PAIR_DIM_KEYS = ("width", "length", "parts_count")
+
+
+def _pair_changes(receipt: Receipt, changes):
+    """Правка размеров или деталей у одной строки реза — правка пары (S1 №2).
+
+    Работа и материал куска — одна позиция кассы: 12 → 10 деталей у работы
+    обязаны сделать материал 0,6 кв.м вместо 0,72, и наоборот. Раньше правка
+    материала принималась и ничего не меняла, а правка работы не трогала
+    материал. Возвращает `(правки, размеры)`: к правкам добавлена правка
+    второй строки пары (те же размеры и детали), `размеры` — ширина и длина
+    детали для строки материала пары (новые, если их правят у работы).
+    """
+    if not isinstance(changes, list):
+        return changes, {}
+    out = [c for c in changes]
+    by_id = {str(c.get("id")): c for c in out if isinstance(c, dict)}
+    sizes = {}
+    for change in list(out):
+        if not isinstance(change, dict) or change.get("remove"):
+            continue
+        dims = {k: change[k] for k in PAIR_DIM_KEYS if k in change}
+        if not dims:
+            continue
+        try:
+            item = receipt.items.select_related("service").get(pk=change.get("id"))
+        except (TransactionItem.DoesNotExist, ValueError, TypeError):
+            continue        # «строка не найдена» скажет основной цикл
+        if item.is_returned:
+            continue
+        partner = cut_partner(item)
+        if partner is None or partner.is_returned:
+            continue
+        work, mat = (item, partner) if item.type == TransactionItem.Type.SERVICE else (partner, item)
+        twin = by_id.get(str(partner.id))
+        if twin is None:
+            twin = {"id": partner.id}
+            out.append(twin)
+            by_id[str(partner.id)] = twin
+        for key, value in dims.items():
+            twin.setdefault(key, value)
+            if key == "parts_count" and str(twin[key]).strip() != str(value).strip():
+                raise ItemEditRejected(
+                    "У работы реза и её материала число деталей одно — пришло два разных."
+                )
+        work_change = by_id.get(str(work.id), {})
+        width = work_change.get("width", work.width)
+        length = work_change.get("length", work.length)
+        try:
+            sizes[mat.id] = (
+                _edit_number(width, places=3, digits=8, what="Размер"),
+                _edit_number(length, places=3, digits=8, what="Размер"),
+            )
+        except ItemEditRejected:
+            continue        # кривой размер отклонит разбор правки работы
+    return out, sizes
 
 
 def _edit_executor(item: TransactionItem, raw):
@@ -2289,6 +2684,10 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
     held = _money_held(receipt) if receipt.refunded_amount > 0 else None
     # Правка одних исполнителей денег не трогает — пересчёт оплаты не нужен.
     touched = False
+    # Детали и размеры у одной строки реза правят пару «работа + материал».
+    changes, pair_sizes = _pair_changes(receipt, changes)
+    # Материалы затронутых строк: минимум «деталь» их работ — заново.
+    touched_materials = set()
 
     for change in changes:
         try:
@@ -2320,6 +2719,7 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
                 item.save(update_fields=["executor"])
                 continue
         touched = True
+        touched_materials.add(item.work_material_id or item.material_id)
         remove = bool(change.get("remove"))
         qty = price = None
         dims = {}
@@ -2341,6 +2741,14 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
                     raise ItemEditRejected(
                         "Количество должно быть больше нуля. Ноль — это удаление строки."
                     )
+                by_piece = item.service_id and (
+                    item.service.uses_pieces
+                    or (item.service.uses_free_measure and item.sale_mode == TransactionItem.SaleMode.PIECE)
+                )
+                if by_piece and qty != qty.to_integral_value():
+                    raise ItemEditRejected(
+                        f"«{_line_name(item)}» считается штуками — {qty} не получится, только целое число."
+                    )
             if change.get("price_per_item") is not None:
                 price = _edit_number(
                     change["price_per_item"], places=2, digits=12, what="Цена"
@@ -2359,7 +2767,7 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
             item.delete()
             continue
 
-        qty, price = _apply_dim_edit(item, dims, qty, price)
+        qty, price = _apply_dim_edit(item, dims, qty, price, pair_sizes=pair_sizes.get(item.id))
         if qty is not None:
             item.quantity = qty
         # Цена из правки — цена ДО правил прайса (как в кассе): минимум,
@@ -2369,7 +2777,7 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
         item.save(update_fields=[
             "quantity", "price_per_item", "catalog_price", "min_applied",
             "width", "length", "parts_count", "passes", "service", "thickness_coef",
-            "executor",
+            "executor", "client_price", "discount_percent",
         ])
 
         if receipt.stock_deducted:
@@ -2399,7 +2807,17 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
             ) + below_cost_warnings([item], user)
 
     if touched:
-        _resettle(receipt, held=held)
+        # Минимум «деталь» затронутых работ, минимум «заказ» и округление
+        # «итог одной формулой» — заново по новому составу (D-151).
+        touched_materials.discard(None)
+        reapply_order_rules(
+            receipt,
+            part_targets=receipt.items.filter(
+                is_returned=False, type=TransactionItem.Type.SERVICE,
+                work_material_id__in=touched_materials,
+            ),
+        )
+        _resettle(receipt, held=held, user=user)
     return receipt
 
 
@@ -2497,24 +2915,145 @@ def return_applied_change(receipt: Receipt) -> Decimal:
 
 
 def writeoff_total(receipt: Receipt) -> Decimal:
-    """Сколько долга по чеку списано как безнадёжный (деньгами не пришло)."""
+    """Сколько долга по чеку списано как безнадёжный (деньгами не пришло).
+
+    Чистая сумма: встречные записи отмены и уменьшения списания — с минусом."""
     return sum(
         (p.amount for p in receipt.payments.all() if p.method == Payment.Method.WRITE_OFF),
         Decimal("0"),
     )
 
 
-def drop_writeoff_expenses(receipt: Receipt) -> None:
-    """Убрать расходы «Безнадёжные долги», порождённые списаниями по чеку
-    (откат оплаты и отмена списания)."""
+# --- Встречные записи оплат (D-155…D-158) ----------------------------------------
+#
+# Отменённая оплата (и списание, уменьшенное возвратом) НЕ удаляется: она
+# остаётся своим днём, а отмена пишется встречной записью `Payment` — та же
+# сумма с минусом, тот же способ, день отмены. Так акт сверки прошлого (в том
+# числе закрытого) месяца не переписывается — как у входящего долга (D-141), —
+# а суммы записей по способу сразу «чистые» (`writeoff_total`, «получено» в
+# «Обзоре»). Ссылку на отменённую запись модели продаж без миграции хранить
+# негде, поэтому она в примечании встречной записи: первое «#<id>». Такие
+# примечания пишет только сервер, а сумму с минусом через API не провести
+# (`parse_amount`), поэтому пользовательский текст за ссылку не примется.
+
+def reversal_target(payment) -> int | None:
+    """id оплаты, которую отменяет эта встречная запись; None — не встречная
+    или без ссылки (откат «оплаты при оформлении» — у неё записи нет)."""
+    import re
+
+    if payment.amount >= 0:
+        return None
+    found = re.search(r"#(\d+)", payment.note or "")
+    return int(found.group(1)) if found else None
+
+
+def live_amounts(payments) -> dict:
+    """{id оплаты: сколько от неё ещё не отменено} — для записей с плюсом."""
+    payments = list(payments)
+    live = {p.pk: p.amount for p in payments if p.amount > 0}
+    for p in payments:
+        target = reversal_target(p)
+        if target in live:
+            live[target] += p.amount
+    return {pk: max(value, Decimal("0")) for pk, value in live.items()}
+
+
+def _reverse_payment(original, amount: Decimal, *, note: str, user, expense_id=None) -> Payment:
+    """Встречная запись к `original` на `amount` (> 0) сегодняшним днём."""
+    return Payment.objects.create(
+        receipt_id=original.receipt_id, amount=-amount, method=original.method,
+        paid_on=timezone.localdate(), note=note[:255], created_by=user, expense_id=expense_id,
+    )
+
+
+def _ensure_writeoffs_open(payments, what: str) -> None:
+    """Списание лежит расходом «Безнадёжные долги» в своём месяце: отменять или
+    убирать его можно, только пока этот месяц открыт (как у входящего долга,
+    D-141) — иначе поменялась бы прибыль закрытого месяца (RM-N3)."""
     from finance.models import ExpenseEntry
+    from finance.periods import ensure_open
+
+    for p in payments:
+        if p.method != Payment.Method.WRITE_OFF:
+            continue
+        ensure_open(p.paid_on, what)
+        if p.expense_id:
+            ensure_open(
+                ExpenseEntry.objects.filter(pk=p.expense_id).values_list("spent_at", flat=True).first(),
+                what,
+            )
+
+
+def drop_writeoff_expenses(receipt: Receipt, what: str = "Убрать списание долга этого месяца") -> None:
+    """Убрать расходы «Безнадёжные долги», порождённые списаниями по чеку
+    (откат оплаты, удаление заказа) — и уменьшения их возвратом. Месяц каждого
+    расхода должен быть открыт (RM-N2, RM-N3): закрытая прибыль не меняется."""
+    from finance.models import ExpenseEntry
+    from finance.periods import ensure_open
 
     ids = [
-        p.expense_id for p in receipt.payments.all()
+        p.expense_id for p in Payment.objects.filter(receipt=receipt)
         if p.method == Payment.Method.WRITE_OFF and p.expense_id
     ]
-    if ids:
-        ExpenseEntry.objects.filter(pk__in=ids).delete()
+    if not ids:
+        return
+    entries = list(ExpenseEntry.objects.filter(pk__in=ids))
+    for entry in entries:
+        ensure_open(entry.spent_at, what)
+    ExpenseEntry.objects.filter(pk__in=[e.pk for e in entries]).delete()
+
+
+def reduce_writeoff(receipt: Receipt, amount: Decimal, *, user=None) -> Decimal:
+    """Уменьшить списанный долг чека на `amount` (не больше списанного) —
+    возврат товара по списанному заказу (RM-N1, D-155). Возвращает, на сколько
+    уменьшили; `amount_paid` правит вызывающий.
+
+    Берём с самых свежих списаний. Расход «Безнадёжные долги» уменьшается на
+    месте, если месяц списания открыт; закрыт — его прибыль не трогаем, а
+    пишем расход с минусом днём возврата (в месяц, где возврат уменьшил
+    выручку). Само списание остаётся своим днём, уменьшение — встречной
+    записью: акт прошлого месяца не меняется.
+    """
+    from finance.models import ExpenseEntry
+    from finance.periods import is_closed
+
+    payments = list(Payment.objects.filter(receipt=receipt))
+    live = live_amounts(payments)
+    originals = sorted(
+        (p for p in payments if p.method == Payment.Method.WRITE_OFF and live.get(p.pk, 0) > 0),
+        key=lambda p: (p.paid_on, p.pk), reverse=True,
+    )
+    left = amount
+    done = Decimal("0")
+    for p in originals:
+        if left <= 0:
+            break
+        take = min(live[p.pk], left)
+        counter_id = None
+        expense = ExpenseEntry.objects.filter(pk=p.expense_id).first() if p.expense_id else None
+        if expense is not None and not is_closed(expense.spent_at):
+            if expense.amount > take:
+                expense.amount -= take
+                expense.save(update_fields=["amount"])
+            else:
+                expense.delete()
+                p.expense_id = None
+                p.save(update_fields=["expense_id"])
+        elif expense is not None:
+            counter = ExpenseEntry.objects.create(
+                kind=expense.kind, amount=-take, spent_at=timezone.localdate(),
+                name=f"{expense.name} — уменьшено возвратом"[:255],
+                note=f"Списание от {p.paid_on:%d.%m.%Y} (месяц закрыт) уменьшено возвратом товара",
+                created_by=user,
+            )
+            counter_id = counter.pk
+        _reverse_payment(
+            p, take, user=user, expense_id=counter_id,
+            note=f"Списание #{p.pk} от {p.paid_on:%d.%m.%Y} уменьшено возвратом",
+        )
+        left -= take
+        done += take
+    return done
 
 
 def _refund_cash_out(receipt: Receipt) -> Decimal:
@@ -2594,13 +3133,20 @@ def delete_receipt(receipt: Receipt, *, user=None) -> None:
       что сделанный возврат: показывать «продажа по чеку №18 / возврат по чеку
       №18» для заказа, которого нет, — врать журналу, а «проданные» в складском
       листе считались бы по несуществующей продаже;
-    - оплаты снимаются вместе с чеком (CASCADE).
+    - оплаты снимаются вместе с чеком (CASCADE);
+    - расходы «Безнадёжные долги» его списаний (и их уменьшения возвратом)
+      удаляются тоже: заказа не было — нечего было и списывать (RM-N2, D-156).
+      Месяц такого расхода закрыт — 400: прибыль закрытого месяца не меняется.
 
     След остаётся в ЖУРНАЛЕ ДЕЙСТВИЙ — кто, когда и что удалил, вместе с
     составом (см. ``receipt_summary``). Это ответственность администратора, у
     складовщика такой кнопки нет.
     """
     lock_receipt(receipt)
+    # Первым делом — расходы списаний: в закрытом месяце отказ должен прийти
+    # до того, как что-то сдвинулось (транзакция откатит и так, но порядок
+    # «сначала проверки» читается проще).
+    drop_writeoff_expenses(receipt, "Удалить заказ со списанием долга закрытого месяца")
     _ensure_change_not_spent(receipt)
     # Сдача, зачтённая в этот заказ, возвращается клиенту: заказа не было,
     # значит и тратить её было не на что.
@@ -2810,6 +3356,17 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None, method=None, q
         receipt.payment_status = Receipt.PaymentStatus.REFUNDED
         receipt.status = Receipt.Status.CANCELLED
     receipt.save(update_fields=["refunded_amount", "payment_status", "status", "updated_at"])
+    # Списанный долг — не деньги (RM-N1, D-155). Переплату, которую создал
+    # этот возврат, сначала забирает списание (вместе со своим расходом
+    # «Безнадёжные долги»), и только остаток уходит клиенту из кассы. Раньше
+    # списание сидело в `amount_paid` как оплата, и заказ, списанный целиком,
+    # при возврате «отдавал» из ящика всю сумму списания (касса 0 → −7 400).
+    overpaid = _excess() - excess_before
+    if overpaid > 0:
+        cut = reduce_writeoff(receipt, overpaid, user=user)
+        if cut > 0:
+            receipt.amount_paid -= cut
+            receipt.save(update_fields=["amount_paid", "updated_at"])
     # Из кассы уходит ровно переплата, возникшая этим возвратом: неоплаченный
     # заказ возврата денег не порождает вовсе, оплаченный целиком — вернёт
     # стоимость возвращённых строк, оплаченный частично — только то, что
@@ -2835,13 +3392,24 @@ def cancel_payment(receipt: Receipt, payment_id, *, user=None, reason="") -> Dec
     """Отменить одну принятую оплату долга (cash-03), а не весь заказ.
 
     Раньше ошибочный платёж можно было только откатить вместе со ВСЕМИ оплатами
-    чека — терялась история остальных. Теперь запись оплаты убирается, а в
-    кассовую книгу пишется встречный расход (сама исходная запись остаётся:
-    книга не подчищается). Зачёт сдачи возвращает сдачу клиенту, списание долга
-    убирает свой расход «Безнадёжные долги». След остаётся в журнале действий.
+    чека — терялась история остальных. В кассовую книгу пишется встречный
+    расход (сама исходная запись остаётся: книга не подчищается). Зачёт сдачи
+    возвращает сдачу клиенту, списание долга убирает свой расход «Безнадёжные
+    долги» — только пока месяц списания открыт (RM-N3, D-157: иначе менялась
+    бы прибыль закрытого месяца). След остаётся в журнале действий.
+
+    Запись оплаты (и списания) НЕ удаляется (RM-N4, D-158): она остаётся своим
+    днём, а отмена — встречной записью с минусом сегодняшним днём. Удаление
+    переписывало акт сверки закрытого месяца (на 30.09 было 14 400, стало
+    17 400) — касса помнила приход, а акт нет. Зачёт сдачи по-прежнему
+    снимается целиком: это не деньги, а перенос сдачи, и акт ставит его
+    деньги днём их внесения.
+
     Первую оплату, принятую при оформлении (записи `Payment` у неё нет),
     откатывает «Откат оплаты» целиком. Возвращает отменённую сумму.
     """
+    from finance.periods import ensure_open
+
     lock_receipt(receipt)
     if receipt.status == Receipt.Status.CANCELLED or receipt.payment_status in (
         Receipt.PaymentStatus.REFUNDED, Receipt.PaymentStatus.PARTIALLY_REFUNDED,
@@ -2851,27 +3419,113 @@ def cancel_payment(receipt: Receipt, payment_id, *, user=None, reason="") -> Dec
         payment = receipt.payments.get(pk=payment_id)
     except (Payment.DoesNotExist, ValueError, TypeError):
         raise PaymentRejected("Оплата не найдена в этом заказе.")
-    amount = payment.amount
+    if payment.amount < 0:
+        raise PaymentRejected("Это запись отмены, а не оплата — отменять её нечем.")
+    payments = list(receipt.payments.all())
+    amount = live_amounts(payments).get(payment.pk, Decimal("0"))
+    if amount <= 0:
+        raise PaymentRejected("Эта оплата уже отменена.")
+    when =f"от {payment.paid_on:%d.%m.%Y}"
+    tail = f": {reason}" if reason else ""
     if payment.method == Payment.Method.CHANGE:
         # Сдача возвращается клиенту — на его другой заказ, как при откате.
         receipt.change_applied = max(receipt.change_applied - amount, Decimal("0"))
         _return_change_to_client(receipt, amount)
+        payment.delete()
     elif payment.method == Payment.Method.WRITE_OFF:
         from finance.models import ExpenseEntry
 
+        ensure_open(payment.paid_on, "Отменить списание долга этого месяца")
         if payment.expense_id:
-            ExpenseEntry.objects.filter(pk=payment.expense_id).delete()
+            expense = ExpenseEntry.objects.filter(pk=payment.expense_id).first()
+            if expense is not None:
+                ensure_open(expense.spent_at, "Отменить списание долга этого месяца")
+                expense.delete()
+            payment.expense_id = None
+            payment.save(update_fields=["expense_id"])
+        _reverse_payment(payment, amount, user=user, note=f"Отмена списания #{payment.pk} {when}{tail}")
     else:
         label = f"Отмена оплаты по заказу №{receipt.order_number}" if receipt.order_number else "Отмена оплаты"
         cash.payment_reverted(
             receipt, amount, user=user,
             note=f"{label}: {reason}".strip(": ") if reason else label,
         )
+        _reverse_payment(payment, amount, user=user, note=f"Отмена оплаты #{payment.pk} {when}{tail}")
     receipt.amount_paid = max(receipt.amount_paid - amount, Decimal("0"))
     receipt.payment_status = Receipt.PaymentStatus.PENDING
     receipt.save(update_fields=["amount_paid", "change_applied", "change_due", "payment_status", "updated_at"])
-    payment.delete()
     return amount
+
+
+@transaction.atomic
+def unpay_receipt(receipt: Receipt, *, user=None) -> Decimal:
+    """Откат оплаты (`/unpay/`): чек снова «Не оплачено», весь долг возвращается.
+    Проверки статуса — во вьюхе. Возвращает, сколько было принято (`amount_paid`).
+
+    Из кассы уходит всё, что по этому чеку в неё попало: принятые деньги плюс
+    НЕ ВЫДАННАЯ сдача — она физически лежит в ящике и уходит вместе с откатом.
+    Часть, закрытая СДАЧЕЙ с прошлых заказов (`change_applied`), в кассу по
+    этому чеку не приходила — и уходить ей неоткуда (заказ на 60, закрытый
+    сдачей, после отката уводил кассу в −60). Списанный долг денег не приносил
+    — откатывать нечего, а его расход «Безнадёжные долги» уходит вместе с
+    оплатой, только пока месяц списания открыт (D-157).
+
+    Записи оплат остаются своими днями, откат — встречными записями сегодня
+    (D-158): каждой живой оплате и списанию — своя, деньгам при оформлении
+    (записи у них нет) и невыданной сдаче — одна общая. Удаление записей
+    переписывало акт закрытого месяца. Зачёт сдачи снимается целиком, как
+    раньше: сдача возвращается клиенту (`return_applied_change`).
+    """
+    lock_receipt(receipt)
+    payments = list(Payment.objects.filter(receipt=receipt))
+    live = live_amounts(payments)
+    alive = [p for p in payments if live.get(p.pk, Decimal("0")) > 0]
+    what = "Откатить оплату со списанием долга этого месяца"
+    _ensure_writeoffs_open(alive, what)
+
+    returned = receipt.amount_paid
+    returned_cash = returned - receipt.change_applied + receipt.change_due - writeoff_total(receipt)
+    own_change = receipt.change_due
+    drop_writeoff_expenses(receipt, what)
+    # Сдача клиента возвращается ему — на другой его заказ, а если других
+    # нет, то сдачей на этот же.
+    return_applied_change(receipt)
+    receipt.refresh_from_db()
+    receipt.amount_paid = Decimal("0")
+    # Сдача С ЭТОЙ оплаты уходит вместе с ней: откат означает «денег не
+    # брали», а сдача — часть тех же денег. Возвращённая выше сдача прошлых
+    # заказов остаётся.
+    receipt.change_due = receipt.change_due - own_change
+    receipt.payment_status = Receipt.PaymentStatus.PENDING
+    receipt.save(update_fields=["amount_paid", "change_due", "payment_status", "updated_at"])
+
+    Payment.objects.filter(receipt=receipt, method=Payment.Method.CHANGE).delete()
+    money_back = Decimal("0")
+    for p in alive:
+        if p.method == Payment.Method.CHANGE:
+            continue
+        if p.method == Payment.Method.WRITE_OFF:
+            if p.expense_id:
+                p.expense_id = None
+                p.save(update_fields=["expense_id"])
+            label = "Откат списания"
+        else:
+            label = "Откат оплаты"
+            money_back += live[p.pk]
+        _reverse_payment(p, live[p.pk], user=user, note=f"{label} #{p.pk} от {p.paid_on:%d.%m.%Y}")
+    # Деньги, принятые при оформлении, и невыданная сдача — одной записью
+    # способом чека: так акт сверки снимает ровно то, что ушло из кассы.
+    upfront = returned_cash - money_back
+    if upfront > 0:
+        Payment.objects.create(
+            receipt=receipt, amount=-upfront, method=receipt.payment_method,
+            paid_on=timezone.localdate(), note="Откат оплаты при оформлении заказа",
+            created_by=user,
+        )
+    # Кассовую книгу не подчищаем — пишем встречный расход: по ней должно быть
+    # видно, что деньги приходили и их откатили.
+    cash.payment_reverted(receipt, returned_cash, user=user)
+    return returned
 
 
 def _return_change_to_client(receipt: Receipt, amount: Decimal) -> None:
@@ -2961,9 +3615,12 @@ def undo_refund(receipt: Receipt, *, item_ids=None, user=None) -> Receipt:
 def issue_items(receipt: Receipt, issued, *, user=None) -> Receipt:
     """Выдача по позициям (G1-N4): 8 деталей из 10 вручили в понедельник.
 
-    `issued` — список `{"id": строка, "quantity": сколько выдали СЕЙЧАС}`.
-    Статус заказа: все позиции выданы целиком — «Выдан», хоть что-то — «Выдан
-    частично». Больше, чем осталось выдать, — отказ.
+    `issued` — список `{"id": строка, "quantity": сколько выдали СЕЙЧАС}`;
+    у строки с деталями (`parts_count` > 1) — `{"id", "parts": сколько
+    деталей}` (RU-N3): клиенту отдают таблички штуками, а не 0,3 кв.м.
+    Количество строки при этом — доля деталей (последняя деталь — ровно
+    остаток). Статус заказа: все позиции выданы целиком — «Выдан», хоть что-то
+    — «Выдан частично». Больше, чем осталось выдать, — отказ.
     """
     lock_receipt(receipt)
     if receipt.status == Receipt.Status.CANCELLED or receipt.payment_status == Receipt.PaymentStatus.REFUNDED:
@@ -2971,14 +3628,22 @@ def issue_items(receipt: Receipt, issued, *, user=None) -> Receipt:
     if not isinstance(issued, list) or not issued:
         raise ItemEditRejected("Не передано ни одной позиции для выдачи.")
     for entry in issued:
-        if not isinstance(entry, dict) or set(entry) - {"id", "quantity"}:
-            raise ItemEditRejected("Позиция выдачи: ожидаются только поля id и quantity.")
+        if (
+            not isinstance(entry, dict) or set(entry) - {"id", "quantity", "parts"}
+            or ("quantity" in entry) == ("parts" in entry)
+        ):
+            raise ItemEditRejected(
+                "Позиция выдачи: ожидаются поля id и quantity (у строки с деталями — parts)."
+            )
         try:
             item = receipt.items.get(pk=entry.get("id"))
         except (TransactionItem.DoesNotExist, ValueError, TypeError):
             raise ItemEditRejected("Строка не найдена в этом чеке.")
         if item.is_returned:
             raise ItemEditRejected("Строка возвращена клиентом — выдавать её нельзя.")
+        if (item.parts_count or 1) > 1 or "parts" in entry:
+            _issue_parts(item, entry)
+            continue
         qty = _edit_number(entry.get("quantity"), places=3, digits=12, what="Количество")
         if qty <= 0:
             raise ItemEditRejected("Количество к выдаче должно быть больше нуля.")
@@ -2991,6 +3656,45 @@ def issue_items(receipt: Receipt, issued, *, user=None) -> Receipt:
         item.save(update_fields=["issued_qty"])
     refresh_issue_status(receipt)
     return receipt
+
+
+def issued_parts_of(item: TransactionItem) -> int:
+    """Сколько деталей строки уже выдано (выдано целиком — все)."""
+    total = item.parts_count or 1
+    if item.quantity > 0 and item.issued_qty >= item.quantity:
+        return total
+    return min(item.issued_parts or 0, total)
+
+
+def _issue_parts(item: TransactionItem, entry) -> None:
+    """Выдача строки с деталями штуками (RU-N3)."""
+    total = item.parts_count or 1
+    name = _line_name(item)
+    if total <= 1:
+        raise ItemEditRejected(f"«{name}»: у строки нет деталей — укажите количество (quantity).")
+    if "parts" not in entry:
+        raise ItemEditRejected(
+            f"«{name}»: в строке {total} дет. — выдача в деталях (parts, шт), а не в кв.м или пог.м."
+        )
+    raw = str(entry.get("parts")).strip()
+    if not raw.isdigit():
+        raise ItemEditRejected(f"«{name}»: деталей — целое число штук.")
+    count = int(raw)
+    if count <= 0:
+        raise ItemEditRejected("Количество к выдаче должно быть больше нуля.")
+    done = issued_parts_of(item)
+    if done + count > total:
+        raise ItemEditRejected(
+            f"«{name}»: осталось выдать {total - done} дет., а указано {count}."
+        )
+    item.issued_parts = done + count
+    item.issued_qty = (
+        item.quantity if item.issued_parts >= total
+        else (item.quantity * item.issued_parts / total).quantize(
+            Decimal("0.001"), rounding=ROUND_HALF_UP
+        )
+    )
+    item.save(update_fields=["issued_qty", "issued_parts"])
 
 
 def refresh_issue_status(receipt: Receipt) -> None:
@@ -3100,12 +3804,17 @@ def reprice_receipt(receipt: Receipt, *, user=None) -> dict:
         raise ItemEditRejected("Заказ уже выдан клиенту — пересчитывать его нельзя.")
     before = receipt.total_price
     changed, skipped = [], []
+    # Строки работы, которые пересчитываются: их минимум «деталь» — заново от
+    # новой цены материала детали (C1: 508 → 500).
+    part_targets = []
     for item in receipt.items.filter(is_returned=False).select_related(
         "material", "service", "work_material"
     ):
         if item.catalog_price is None or item.price_is_manual or item.client_price:
             skipped.append({"item": item.id, "name": _line_name(item)})
             continue
+        if item.type == TransactionItem.Type.SERVICE:
+            part_targets.append(item)
         base = _current_base_price(item)
         if base is None:
             skipped.append({"item": item.id, "name": _line_name(item)})
@@ -3119,7 +3828,10 @@ def reprice_receipt(receipt: Receipt, *, user=None) -> dict:
             "item": item.id, "name": _line_name(item),
             "was_total": was, "now_total": item.sold_total, "price": base,
         })
-    _resettle(receipt)
+    # Минимум «деталь» от нового материала, минимум «заказ» и округление
+    # «итог одной формулой» — по всему заказу заново (D-151).
+    reapply_order_rules(receipt, part_targets=part_targets)
+    _resettle(receipt, user=user)
     from audit.models import AuditLog
 
     AuditLog.record(
@@ -3152,7 +3864,158 @@ def price_cart(
     built = []
     for entry in items_data:
         built += _build_item(receipt, entry)
-    apply_order_minimum(receipt, built)
-    apply_order_rounding(receipt, built)
+    apply_order_rules(receipt, built)
     receipt.recalculate_total()
     return receipt, built
+
+
+# --- Заказ из КП (перепроверка 10.10, CALC-03, D-153) -----------------------
+
+
+class QuoteRefused(Exception):
+    """КП нельзя оформить заказом: его нет (400), оно отменено или уже
+    оформлено (409)."""
+
+    def __init__(self, message, status=409):
+        super().__init__(message)
+        self.status = status
+
+
+def quote_for_order(quote_id):
+    """КП, из которого оформляют заказ, или `QuoteRefused` с причиной.
+
+    Раньше `quote_id` принимался любой: несуществующее, отменённое и уже
+    оформленное КП молча проходили, и одно КП закрывало два заказа.
+    """
+    from .models import Quote
+
+    try:
+        quote = Quote.objects.select_related("receipt").get(pk=quote_id)
+    except (Quote.DoesNotExist, ValueError, TypeError):
+        raise QuoteRefused(
+            f"КП (запись {quote_id}) не найдено — оформите заказ без КП.", status=400,
+        )
+    if quote.status == Quote.Status.ORDERED:
+        number = quote.receipt.order_number if quote.receipt_id else None
+        raise QuoteRefused(
+            f"Из КП №{quote.number} уже оформлен заказ"
+            + (f" №{number}" if number else "")
+            + " — повторно КП не оформляется."
+        )
+    if quote.status == Quote.Status.CANCELLED:
+        raise QuoteRefused(f"КП №{quote.number} отменено — оформите заказ без КП.")
+    return quote
+
+
+def quote_in_term(quote) -> bool:
+    """КП ещё действует: срок не задан или не прошёл."""
+    return quote.valid_until is None or quote.valid_until >= timezone.localdate()
+
+
+_QUOTE_LINE_KEYS = (
+    "type", "material", "service", "quantity", "width", "length", "parts_count",
+    "passes", "sale_mode", "own_material", "work_material",
+)
+
+
+def _quote_value(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    try:
+        return Decimal(str(value)).normalize()
+    except (InvalidOperation, ValueError):
+        return str(value)
+
+
+def _built_composition(item: TransactionItem) -> tuple:
+    values = {
+        "type": item.type, "material": item.material_id, "service": item.service_id,
+        "quantity": item.quantity, "width": item.width, "length": item.length,
+        "parts_count": item.parts_count, "passes": item.passes, "sale_mode": item.sale_mode,
+        "own_material": item.own_material, "work_material": item.work_material_id,
+    }
+    return tuple(_quote_value(values[k]) for k in _QUOTE_LINE_KEYS)
+
+
+def _quote_composition(line: dict) -> tuple:
+    return tuple(_quote_value(line.get(k)) for k in _QUOTE_LINE_KEYS)
+
+
+def _same_as_quote(built, quote) -> bool:
+    lines = quote.lines or []
+    return len(lines) == len(built) and all(
+        _built_composition(item) == _quote_composition(line) for item, line in zip(built, lines)
+    )
+
+
+def apply_quote_prices(receipt: Receipt, built, quote) -> bool:
+    """Строки заказа по ценам КП, если КП в срок и состав тот же (D-153).
+
+    Состав сравнивается по собранным строкам (что, сколько, размеры, детали,
+    проходы), а не по запросу: касса грузит КП в корзину своим кодом, и формат
+    позиций у неё может отличаться. Цена, правила и признаки строки берутся из
+    снимка КП — итог заказа равен итогу КП до сома. Возвращает, применено ли.
+    """
+    if not quote_in_term(quote) or not _same_as_quote(built, quote):
+        return False
+
+    def dec(value):
+        return Decimal(str(value)) if value not in (None, "") else None
+
+    for item, line in zip(built, quote.lines):
+        item.catalog_price = dec(line.get("catalog_price"))
+        item.price_per_item = dec(line.get("price_per_item")) or Decimal("0")
+        item.min_amount = dec(line.get("min_amount"))
+        item.min_applied = bool(line.get("min_applied"))
+        item.urgency_percent = dec(line.get("urgency_percent")) or Decimal("0")
+        item.discount_percent = dec(line.get("discount_percent")) or Decimal("0")
+        item.price_is_manual = bool(line.get("price_is_manual"))
+        item.client_price = bool(line.get("client_price"))
+        item.save(update_fields=[
+            "catalog_price", "price_per_item", "min_amount", "min_applied",
+            "urgency_percent", "discount_percent", "price_is_manual", "client_price",
+        ])
+    return True
+
+
+def _som(value) -> str:
+    value = Decimal(value).quantize(Decimal("0.01"))
+    return str(value.to_integral_value()) if value == value.to_integral_value() else str(value)
+
+
+def quote_changed_warnings(receipt: Receipt, built, quote, total) -> list:
+    """«КП №X: было Y, сейчас Z» — заказ из КП выходит не по цене КП.
+
+    Бывает, когда КП просрочено (цены сегодняшние) или в корзину внесли
+    изменения. Совпал итог — спрашивать не о чем.
+    """
+    if total == quote.total_price:
+        return []
+    reasons = []
+    if not quote_in_term(quote):
+        reasons.append(f"срок КП истёк {quote.valid_until:%d.%m.%Y}")
+    if not _same_as_quote(built, quote):
+        reasons.append("состав заказа изменён")
+    why = ", ".join(reasons) or "цены пересчитаны"
+    return [{
+        "code": "quote_changed", "quote": quote.number,
+        "was": quote.total_price, "now": total,
+        "message": (
+            f"КП №{quote.number}: было {_som(quote.total_price)} сом, сейчас {_som(total)} сом "
+            f"({why}). Оформить по новой сумме?"
+        ),
+    }]
+
+
+def mark_quote_ordered(quote, receipt: Receipt) -> None:
+    """КП → «оформлен заказ» со ссылкой на чек, в той же транзакции, что и
+    продажа. Кто-то успел раньше — `QuoteRefused`, продажа откатывается."""
+    from .models import Quote
+
+    taken = Quote.objects.filter(pk=quote.pk, status=Quote.Status.ACTIVE).update(
+        status=Quote.Status.ORDERED, receipt=receipt,
+    )
+    if not taken:
+        raise QuoteRefused(f"Из КП №{quote.number} уже оформлен заказ — повторно КП не оформляется.")

@@ -5,6 +5,13 @@
 долг, касса и выручка КП не трогаются; оформить заказ из КП можно позже —
 касса грузит его позиции в корзину (`cartFromReceipt`) и оформляет обычным
 `checkout` с `quote_id`.
+
+Оформление по `quote_id` (перепроверка 10.10, D-153): КП должно существовать,
+не быть отменённым и ещё не оформленным (400/409). КП в срок и того же состава
+оформляется по своим ценам, срочности и скидке; просроченное или изменённое —
+по сегодняшним, с подтверждением «КП №X: было Y, сейчас Z». Оформленное КП
+ссылается на чек и второй раз не оформляется (`sale_service.quote_for_order`,
+`apply_quote_prices`, `mark_quote_ordered`).
 """
 import json
 from datetime import timedelta
@@ -24,7 +31,7 @@ from audit.models import AuditLog
 from clients.models import Client
 
 from .models import Quote
-from .sale_service import price_cart
+from .sale_service import contract_prices_for, drop_unchanged_prices, price_cart
 from .serializers import SaleItemInputSerializer, TransactionItemSerializer
 from .views import _order_pricing, _price_override_forbidden
 
@@ -124,10 +131,15 @@ class QuoteViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = QuoteCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        client = data.get("client_id")
+        # Ставка, равная действующей (договорной или каталожной), — не ручная
+        # цена (перепроверка 10.10, S1 №1): как в кассе.
+        contracts = contract_prices_for(client.pk if client is not None else None)
+        for entry in data["items"]:
+            drop_unchanged_prices(entry, contracts)
         forbidden = _price_override_forbidden(data["items"], request.user)
         if forbidden:
             return Response({"detail": forbidden}, status=status.HTTP_403_FORBIDDEN)
-        client = data.get("client_id")
         pricing, refused = _order_pricing(data, client, request.user)
         if refused:
             return Response({"detail": refused[0]}, status=refused[1])

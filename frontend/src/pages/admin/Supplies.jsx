@@ -15,6 +15,7 @@ import LotCorrectionModal from "../../components/LotCorrectionModal.jsx";
 import PaySupplierModal from "../../components/PaySupplierModal.jsx";
 import SupplyReturnModal from "../../components/SupplyReturnModal.jsx";
 import SuppliersPanel from "../../components/SuppliersPanel.jsx";
+import { downloadFile } from "../../utils/download.js";
 import { formatDate, formatMoney, formatNumber } from "../../utils/format.js";
 import { looksLikeTable, money2, parseNumber, parseTable } from "../../utils/pasteTable.js";
 import Tabs from "../../components/Tabs.jsx";
@@ -483,7 +484,17 @@ export default function Supplies({ embedded = false }) {
             <p className="muted" style={{ fontSize: 13, margin: 0, maxWidth: "60ch" }}>
               {t("supplies.hint")}
             </p>
-            <button onClick={startDraft}>+ {t("supplies.newDoc")}</button>
+            <div className="row" style={{ gap: 8, margin: 0 }}>
+              {/* Список накладных файлом для Excel (XL-06): все, не только 100 на экране. */}
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => downloadFile("/warehouse/supplies/", { export: "csv" }, "nakladnye.csv")}
+              >
+                {t("stock2.toExcel")}
+              </button>
+              <button onClick={startDraft}>+ {t("supplies.newDoc")}</button>
+            </div>
           </div>
 
           <div className="stat-grid" style={{ margin: "14px 0" }}>

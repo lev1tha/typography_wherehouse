@@ -58,7 +58,8 @@ export default function StockOnDate() {
           {data.rows.length === 0 ? (
             <p className="muted">{t("stock2.emptyOnDate")}</p>
           ) : (
-            <table className="table">
+            <div className="table-scroll">
+            <table className="table plain-table">
               <thead>
                 <tr>
                   <th>{t("common.name")}</th>
@@ -76,6 +77,7 @@ export default function StockOnDate() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </>
       )}

@@ -48,8 +48,12 @@ export default function ReorderPanel({ reloadKey }) {
           {t("stock2.toExcel")}
         </button>
       </div>
+      {/* Своя прокручиваемая таблица, а не `.table`: на телефоне (до 900px)
+          `.table` прячется ради карточек DataTable, а карточек у этой панели
+          нет — открытый список был пустым (RU-N4, перепроверка 10.10). */}
       {open && (
-        <table className="table" style={{ marginTop: 8 }}>
+        <div className="table-scroll" style={{ marginTop: 8 }}>
+        <table className="table plain-table">
           <thead>
             <tr>
               <th>{t("common.name")}</th>
@@ -73,6 +77,7 @@ export default function ReorderPanel({ reloadKey }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   );

@@ -26,7 +26,7 @@ from django.db.models.functions import TruncMonth
 from django.utils import timezone
 
 from sales.models import Receipt, TransactionItem
-from warehouse.models import InventoryLog, MaterialMonthOpening, Roll, SupplyLine
+from warehouse.models import InventoryLog, MaterialMonthOpening, Roll, SupplierReturnLine, SupplyLine
 
 ZERO = Decimal("0")
 _CENT = Decimal("0.01")
@@ -113,6 +113,17 @@ def collect_flows(materials):
         received[material.id][(day.year, day.month)] += to_units(
             material, roll["initial_area"], width=roll["width"]
         )
+    # Возврат поставщику датой возврата (накладная закрытого месяца не
+    # переписана, D-171) — минус к поступлению месяца возврата.
+    for row in SupplierReturnLine.objects.filter(ret__in_place=False).values(
+        "material_id", "area", "ret__returned_on", "supply_line__roll__width"
+    ):
+        material = by_id.get(row["material_id"])
+        if not material:
+            continue
+        day = row["ret__returned_on"]
+        width = row["supply_line__roll__width"] if material.id in metre_ids else None
+        received[material.id][(day.year, day.month)] -= to_units(material, row["area"], width=width)
 
     # Продажа — месяцем ЗАКАЗА, возврат — месяцем ВОЗВРАТА (минусом): так же
     # считают деньги (`sales.reporting`). Раньше возвращённая строка просто
@@ -192,6 +203,15 @@ def purchases_from_stock_by_day(d_from=None, d_to=None) -> dict:
         lines = lines.filter(supply__received_on__lte=d_to)
     for row in lines.values("supply__received_on").annotate(v=Sum("cost")):
         out[row["supply__received_on"]] += row["v"] or ZERO
+    # Возврат поставщику по накладной закрытого месяца — датой возврата, с
+    # минусом (D-171): сама накладная и закуп её месяца не меняются.
+    back = SupplierReturnLine.objects.filter(ret__in_place=False).exclude(ret__supply__is_opening=True)
+    if d_from:
+        back = back.filter(ret__returned_on__gte=d_from)
+    if d_to:
+        back = back.filter(ret__returned_on__lte=d_to)
+    for row in back.values("ret__returned_on").annotate(v=Sum("cost")):
+        out[row["ret__returned_on"]] -= row["v"] or ZERO
 
     # Всё остальное — одиночные приходы: там суммы нет, есть цена за единицу.
     qs = InventoryLog.objects.filter(

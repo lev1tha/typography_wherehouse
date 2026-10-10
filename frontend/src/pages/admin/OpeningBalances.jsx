@@ -10,6 +10,7 @@ import Field from "../../components/Field.jsx";
 import LoadError from "../../components/LoadError.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { formatDate, formatMoney } from "../../utils/format.js";
+import { useIdempotency } from "../../utils/idempotency.js";
 
 // «Входящие остатки» (волна 2, XL-04/F6/CLI-06): долги и авансы клиентов на
 // дату переезда из Excel. Вставка строк прямо из Excel → предпросмотр (найден
@@ -25,6 +26,7 @@ const STATUS_BADGE = { found: "ok", create: "blue", error: "red" };
 export default function OpeningBalances() {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
+  const idem = useIdempotency();
   const { isAdmin } = useAuth();
   // Отмена одной оплаты входящего долга: {row, payment}.
   const [cancelling, setCancelling] = useState(null);
@@ -76,12 +78,21 @@ export default function OpeningBalances() {
     setBusy(true);
     setError("");
     try {
-      const { data } = await api.post("/clients/opening-balances/", { text, as_of: asOf, note });
-      toast(t("opening.done", { n: data.rows.length, clients: data.created_clients }));
+      // Ключ повтора (CLI-14): ответ потерялся, нажали ещё раз — те же остатки
+      // второй раз не проводятся.
+      const body = { text, as_of: asOf, note };
+      const { data } = await api.post("/clients/opening-balances/", body, {
+        headers: { "Idempotency-Key": idem.keyFor(JSON.stringify(body)) },
+      });
+      idem.done();
+      toast(data.idempotent_replay
+        ? t("clients.repeatIgnored")
+        : t("opening.done", { n: data.rows.length, clients: data.created_clients }));
       setText("");
       setPlan(null);
       load();
     } catch (e) {
+      idem.failed(e);
       setError(apiError(e, t("common.error")));
     } finally {
       setBusy(false);

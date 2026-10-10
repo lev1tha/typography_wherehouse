@@ -75,6 +75,60 @@ def accept_advance(client, amount, *, method="CASH", paid_on: date | None = None
 
 
 @transaction.atomic
+def accept_advance_or_offset(client, amount, *, method="CASH", paid_on: date | None = None,
+                             note="", user=None, offset_debt=True) -> dict:
+    """«Принять аванс» с зачётом в живой долг (RM-N6, D-165).
+
+    Клиент с долгом принёс деньги «вперёд» — по умолчанию они СНАЧАЛА гасят его
+    долг, как общая выплата: входящий долг первым, потом заказы от старых к
+    новым (те же `pay_opening_debts` и `pay_client_debt`, те же записи оплат и
+    кассы). Авансом остаётся только то, что больше долга. `offset_debt=False` —
+    как раньше: всё уходит в аванс, долг висит до зачёта.
+
+    Возвращает `{"advance", "to_debt", "opening", "receipts"}`: аванс (или None,
+    если всё ушло в долг), сколько ушло в долг и разнос по остаткам/заказам.
+    """
+    from sales.models import Receipt
+    from sales.sale_service import pay_client_debt
+
+    from .opening import open_debts_qs, pay_opening_debts
+
+    amount = Decimal(str(amount))
+    if not amount.is_finite() or amount <= 0:
+        raise AdvanceRejected("Сумма аванса должна быть больше нуля.")
+    method = str(method or "CASH").upper()
+    if method not in ClientAdvance.Method.values:
+        raise AdvanceRejected("Способ оплаты: " + ", ".join(ClientAdvance.Method.values) + ".")
+    day = paid_on or timezone.localdate()
+    if day > timezone.localdate():
+        raise AdvanceRejected("Дата оплаты не может быть в будущем.")
+
+    left = amount
+    opening, receipts = [], []
+    if offset_debt:
+        if open_debts_qs().filter(client=client).exists():
+            opening, left = pay_opening_debts(
+                client, left, user=user, paid_on=paid_on, method=method, note=note,
+            )
+        owing = sum((r.debt for r in Receipt.objects.filter(client=client) if r.debt > 0), ZERO)
+        take = min(left, owing)
+        if take > 0:
+            receipts, _change = pay_client_debt(
+                client, take, user=user, paid_on=paid_on, method=method, note=note,
+            )
+            left -= sum((a for _r, a in receipts), ZERO)
+    advance = None
+    if left > 0:
+        advance = accept_advance(client, left, method=method, paid_on=paid_on, note=note, user=user)
+    return {
+        "advance": advance,
+        "to_debt": amount - left,
+        "opening": opening,
+        "receipts": receipts,
+    }
+
+
+@transaction.atomic
 def revert_advance(advance: ClientAdvance, *, user=None) -> ClientAdvance:
     """Отменить ошибочный аванс целиком — пока из него ничего не зачтено.
 

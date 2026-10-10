@@ -34,6 +34,12 @@
 кассовой книги) — зачёт остаётся днём зачёта, и история до него приблизительна;
 сальдо «на сегодня» от этого не зависит.
 
+Отмена оплаты, откат оплаты и уменьшение списания возвратом (D-155, D-158)
+записей не удаляют: оплата остаётся своим днём, а отмена — встречной записью
+`Payment` с минусом днём отмены (строка `payment_cancelled` / `write_off_cancelled`,
+дебет). Сумма записей по чеку от этого «чистая», и «принесено при оформлении»
+не меняется — акт прошлого (в том числе закрытого) месяца не переписывается.
+
 Что в акте не участвует: заказы без признанной выручки (неоплаченный онлайн-счёт,
 D-7/D-37 — «не продажа и не долг»; тот же отбор, что у долга карточки).
 """
@@ -53,6 +59,7 @@ RANK = {
     "opening_payment_cancelled": 6, "opening_write_off_cancelled": 6,
     "order": 0, "change_applied": 1, "refund": 2, "refund_paid": 3, "paid_upfront": 4,
     "payment": 5, "write_off": 6, "offset": 7, "advance_used": 7, "change_given": 8,
+    "payment_cancelled": 8, "write_off_cancelled": 8, "offset_cancelled": 8,
     "advance": 9, "advance_reverted": 10, "adjustment": 11,
 }
 
@@ -136,6 +143,15 @@ def _receipt_rows(receipt, offsets, given, held) -> tuple[list[dict], dict]:
             payment_change += p.amount
         else:
             kind = "payment"
+        if p.amount < 0:
+            # Встречная запись (D-155, D-158): отмена оплаты, откат, списание,
+            # уменьшенное возвратом, — дебет днём отмены. Сама оплата осталась
+            # своим днём: акт прошлого (и закрытого) месяца не переписывается.
+            rows.append(_row(
+                p.paid_on, f"{kind}_cancelled", debit=-p.amount, receipt=receipt,
+                method=method, method_display=p.get_method_display(), note=p.note,
+            ))
+            continue
         row = _row(
             p.paid_on, kind, credit=p.amount, receipt=receipt,
             method=method, method_display=p.get_method_display(), note=p.note,

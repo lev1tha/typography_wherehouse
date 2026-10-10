@@ -85,6 +85,9 @@ export default function PrintAct({ client, onClose, endpoint, initialPreset = "q
       case "refund": return t("print.actRefund", { n });
       case "refund_paid": return t("print.actRefundPaid", { n });
       case "write_off": return t("print.actWriteOff", { n });
+      // Отмена оплаты / списания по заказу (D-155, D-158) — дебетом днём отмены.
+      case "payment_cancelled": return `${t("print.actPaymentCancelled", { n })}${method}`;
+      case "write_off_cancelled": return t("print.actWriteOffCancelled", { n });
       case "change_given": return t("print.actChangeGiven", { n });
       case "advance": return `${t("print.actAdvance")}${method}`;
       case "advance_reverted": return t("print.actAdvanceReverted");

@@ -146,8 +146,17 @@ export default function HeadlineTiles({ headline }) {
           h.why.reasons.map((r) => (
             <div className="why-row" key={r.key}>
               <span>
-                {t(`stmtRows.bridge.${r.key}`, { defaultValue: r.label })}
+                {/* Долг поставщикам здесь — ИЗМЕНЕНИЕ за период; рядом сам
+                    остаток, иначе прирост читался как долг (RU-N6, D-166). */}
+                {r.key === "payables"
+                  ? t("overview.payablesChange")
+                  : t(`stmtRows.bridge.${r.key}`, { defaultValue: r.label })}
                 <Hint text={t(`terms.bridge_${r.key}`, { defaultValue: "" })} />
+                {r.key === "payables" && r.balance !== undefined && (
+                  <span className="muted" style={{ display: "block", fontSize: 12 }}>
+                    {t("overview.payablesNow", { date: ru(r.balance_on), value: som(r.balance) })}
+                  </span>
+                )}
               </span>
               <strong style={{ color: Number(r.amount) >= 0 ? "var(--ok-ink)" : "var(--danger-ink)" }}>
                 {signed(r.amount)}

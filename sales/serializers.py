@@ -111,6 +111,9 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             "machine",
             "machine_display",
             "issued_qty",
+            # Выдано деталей (перепроверка 10.10, RU-N3): у строки с деталями
+            # выдают штуками.
+            "issued_parts",
             "price_is_manual",
             # Договорная цена клиента (волна 2): скидка к строке не применялась.
             "client_price",
@@ -299,7 +302,14 @@ class ReceiptSerializer(serializers.ModelSerializer):
 
     def get_payments(self, obj):
         """Принятые оплаты по заказу: когда и сколько. Дата может быть задним
-        числом — общая выплата по клиенту проводится позже, чем берут деньги."""
+        числом — общая выплата по клиенту проводится позже, чем берут деньги.
+
+        Отменённая оплата остаётся своим днём (`cancelled`), отмена — встречной
+        записью с минусом (`reversal`, D-158): отменять можно только живую."""
+        from .sale_service import live_amounts
+
+        payments = list(obj.payments.all())
+        live = live_amounts(payments)
         return [
             {
                 "id": p.id,
@@ -310,8 +320,10 @@ class ReceiptSerializer(serializers.ModelSerializer):
                 # тоже принимает долг, админ видит это и может отменить.
                 "note": p.note,
                 "created_by_name": p.created_by.username if p.created_by_id else None,
+                "reversal": p.amount < 0,
+                "cancelled": p.amount > 0 and live.get(p.pk, p.amount) <= 0,
             }
-            for p in obj.payments.all()
+            for p in payments
         ]
 
 
@@ -590,6 +602,16 @@ class SaleItemInputSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 f"«{material.name}» продаётся целыми {unit} — {qty} не получится."
             )
+        # Буквы и прочие услуги за штуку — тоже целым числом (RP-N8): «2,5
+        # буквы» продавались и уходили в чек половиной ставки.
+        if (
+            attrs["type"] == TransactionItem.Type.SERVICE and service is not None
+            and (service.uses_pieces or (service.uses_free_measure and mode == TransactionItem.SaleMode.PIECE))
+            and qty != qty.to_integral_value()
+        ):
+            raise serializers.ValidationError(
+                f"«{service.name}» считается штуками — {qty} не получится, только целое число."
+            )
 
         # Резка без длины реза — это работа за ноль. Длину кривой при фигурном
         # резе вводит мастер руками, и пустое поле молча уезжало в чек нулём:
@@ -801,6 +823,18 @@ class SaleCreateSerializer(serializers.Serializer):
     # Заказ оформлен из коммерческого предложения: КП помечается «заказ оформлен».
     quote_id = serializers.IntegerField(required=False, allow_null=True)
     items = SaleItemInputSerializer(many=True)
+
+    def to_internal_value(self, data):
+        # Неизвестные поля заказа — отказ (RP-N8), как и у позиций: опечатка
+        # `is_urgnet` молча давала заказ без срочности.
+        if hasattr(data, "keys"):
+            unknown = sorted(set(data.keys()) - set(self.fields))
+            if unknown:
+                raise serializers.ValidationError({
+                    key: "Неизвестное поле заказа: оно не учитывается при оформлении."
+                    for key in unknown
+                })
+        return super().to_internal_value(data)
 
     def validate(self, attrs):
         if attrs.get("is_warranty"):

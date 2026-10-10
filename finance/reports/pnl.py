@@ -234,15 +234,66 @@ def tax_basis_for(month) -> str:
     return basis
 
 
+def taxed_on_accrual(recognized_at, paid_on) -> bool:
+    """Выручка чека уже обложена «по начислению» (RF-N6, D-163): признана в
+    месяце РАНЬШЕ месяца денег, и в том месяце налог шёл от выручки со ставкой
+    больше нуля. Тогда оплата этого чека в месяце «по кассе» — не новая база,
+    а погашение уже обложенного долга."""
+    if recognized_at is None:
+        return False
+    month = month_start(local_day(recognized_at))
+    if month >= month_start(paid_on):
+        return False
+    return bool(tax_rate_for(month)) and tax_basis_for(month) == TaxRate.Basis.ACCRUAL
+
+
+def _cash_base_entries(d_from, d_to):
+    """Записи кассы базы «по кассе»: (запись, уже обложена по начислению?).
+
+    Не облагаются второй раз приход, сдача и откат оплаты по чеку, выручка
+    которого уже обложена «по начислению» (`taxed_on_accrual`). Возврат клиенту
+    остаётся в базе: он поправляет уже обложенную выручку, как и раньше."""
+    qs = _cash(d_from, d_to, article__in=[A.SALE, A.CHANGE, A.REFUND, A.UNPAY]).select_related(
+        "receipt"
+    ).only(
+        "kind", "amount", "happened_on", "article",
+        "receipt__revenue_recognized_at", "receipt__status",
+    )
+    for e in qs:
+        receipt = e.receipt
+        already = bool(
+            receipt is not None and e.article != A.REFUND
+            and receipt.status != Receipt.Status.CANCELLED
+            and taxed_on_accrual(receipt.revenue_recognized_at, e.happened_on)
+        )
+        yield e, already
+
+
 def cash_received_by_day(d_from, d_to) -> dict:
     """{день: деньги от клиентов нетто} по кассовой книге: оплаты минус сдача,
-    возвраты и откаты — база налога «по кассе»."""
+    возвраты и откаты — база налога «по кассе». Оплаты долгов, выручка
+    которых уже обложена «по начислению», не входят (D-163)."""
     out = defaultdict(lambda: ZERO)
-    for e in _cash(d_from, d_to, article__in=[A.SALE, A.CHANGE, A.REFUND, A.UNPAY]).only(
-        "kind", "amount", "happened_on"
-    ):
-        out[e.happened_on] += e.signed_amount
+    for e, already in _cash_base_entries(d_from, d_to):
+        if not already:
+            out[e.happened_on] += e.signed_amount
     return out
+
+
+@report_scope
+def cash_already_taxed(d_from, d_to) -> Decimal:
+    """Сколько денег периода (нетто) НЕ вошло в базу «по кассе», потому что их
+    выручка уже обложена «по начислению» — только в месяцах «по кассе» со
+    ставкой. Для выгрузки бухгалтеру: «смешанная основа» видна числом."""
+    total = ZERO
+    for month in months_in(d_from, d_to):
+        if not tax_rate_for(month) or tax_basis_for(month) != TaxRate.Basis.CASH:
+            continue
+        first, last = max(month, d_from), min(month_end(month), d_to)
+        for e, already in _cash_base_entries(first, last):
+            if already:
+                total += e.signed_amount
+    return total
 
 
 def _load_expenses():

@@ -129,3 +129,33 @@ def lots_csv(rolls, *, money: bool):
             (supply.number or f"#{supply.pk}") if supply else "",
             num(r.supplier_debt) if money else "",
         ]
+
+
+def _text(value) -> str:
+    """Текст ячейки без формулы: «=…», «+…», «@…» Excel выполнил бы."""
+    text = str(value or "")
+    return "'" + text if text[:1] in ("=", "+", "@", "-") and not text[1:2].isdigit() else text
+
+
+def supplies_csv(supplies, *, money: bool, dupes: dict | None = None):
+    """Список накладных (XL-06, перепроверка 10.10): тот же, что на экране, —
+    с суммой, оплатой, долгом и возвратами. Складовщику суммы пустые (D-118)."""
+    dupes = dupes or {}
+    yield [
+        "Дата", "Номер", "Поставщик", "Позиций", "Валюта", "Курс", "Сумма в валюте",
+        "Сумма, сом", "Возвращено, сом", "Оплачено, сом", "Долг, сом", "Переплата, сом",
+        "Сумма по бумаге", "Начальные остатки", "Похоже на дубль №", "Примечание", "Кто ввёл",
+    ]
+    for s in supplies:
+        returned = sum((r.amount for r in s.returns.all()), Decimal("0"))
+        dup = dupes.get(s.id)
+        yield [
+            cell(s.received_on), _text(s.number), _text(s.supplier.name if s.supplier_id else ""),
+            str(len(s.lines.all())), s.currency, num(s.rate, QTY) if s.is_foreign else "",
+            num(s.total_foreign) if money and s.is_foreign else "",
+            num(s.total_cost) if money else "", num(returned) if money else "",
+            num(s.paid_total) if money else "", num(s.debt) if money else "",
+            num(s.overpaid) if money else "", num(s.stated_total) if money else "",
+            "да" if s.is_opening else "", str(dup) if dup else "", _text(s.note),
+            s.created_by.username if s.created_by_id else "",
+        ]

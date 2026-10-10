@@ -30,11 +30,13 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 
 from accounts.models import Employee
 from services.models import PrintingService
 
 from . import cash
+from .auditing import fmt
 from .models import CashEntry, ExpenseEntry, ExpenseKind, FinanceSettings
 from .payroll_models import (
     PayRate,
@@ -159,12 +161,17 @@ def output(d_from, d_to, directory: Directory | None = None) -> dict:
     """{id сотрудника или None: {вид работы: {"amount", "meters"}}} за период.
 
     `amount` — стоимость работы, как стоит в чеке (вверх до сома по строке),
-    `meters` — погонные метры реза (количество строк резки)."""
+    `meters` — погонные метры реза (количество строк резки).
+
+    Гарантийная переделка (`Receipt.is_warranty`) — НЕ выработка (RF-N1,
+    D-161): ни суммы, ни метров. Иначе виновник брака получал проценты и
+    премию за его же исправление. Загрузку станка («Резка по станкам») она
+    по-прежнему показывает — станок переделку резал."""
     directory = directory or Directory()
     result = defaultdict(lambda: defaultdict(lambda: {"amount": ZERO, "meters": ZERO}))
     for sign, line, _day in service_lines(d_from, d_to):
         work = work_of(line)
-        if work is None:
+        if work is None or line.receipt.is_warranty:
             continue
         slot = result[directory.executor_of(line)][work]
         slot["amount"] += sign * line.sold_total
@@ -337,6 +344,25 @@ def statement(month) -> dict:
 # --- Проведение начислений -----------------------------------------------------------------
 
 
+def manual_salary_entries(month) -> list:
+    """Траты вида «Зарплаты», внесённые за месяц руками или расписанием, — не
+    начисления ведомости (RF-N2, D-162). Месяц — «за какой месяц», у старых
+    трат без него — месяц оплаты (как их видит ОПиУ)."""
+    month = month_start(month)
+    qs = ExpenseEntry.objects.filter(
+        kind__code=ExpenseKind.SALARY, payroll_accrual__isnull=True,
+    )
+    return list(
+        qs.filter(period=month)
+        | qs.filter(period__isnull=True, spent_at__gte=month, spent_at__lte=month_end(month))
+    )
+
+
+def month_has_accrual(month) -> bool:
+    """Месяц ведётся ведомостью: по нему проведено начисление."""
+    return PayrollAccrual.objects.filter(month=month_start(month)).exists()
+
+
 @transaction.atomic
 def accrue(month, user=None) -> dict:
     """Провести начисления за месяц: расход в ОПиУ без движения денег.
@@ -346,6 +372,15 @@ def accrue(month, user=None) -> dict:
     month = month_start(month)
     ensure_month_open(month, "Начислить зарплату за этот месяц")
     kind = ExpenseKind.objects.get(code=ExpenseKind.SALARY)
+    manual = manual_salary_entries(month)
+    if manual:
+        total = sum((e.amount for e in manual), ZERO)
+        raise ValidationError({"detail": (
+            f"За {month:%m.%Y} зарплата уже внесена вручную тратой «{kind.name}»: "
+            f"{len(manual)} шт. на {fmt(total)} сом. Ведомость и ручная трата за один месяц "
+            "задвоят расход в ОПиУ. Удалите ручные траты этого месяца в «Финансах» "
+            "(выданные деньги проведите в ведомости авансом или выплатой) и начислите снова."
+        )})
     stmt = statement(month)
     posted = []
     for row in stmt["rows"]:

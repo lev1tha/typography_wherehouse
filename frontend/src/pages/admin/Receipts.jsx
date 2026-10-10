@@ -508,10 +508,21 @@ function ReceiptsTab() {
           <div className="stat"><div className="label">{t("receipts.statTotal")}</div><div className="value">{stats.total}</div></div>
           <div className="stat"><div className="label">{t("receipts.statWorking")}</div><div className="value">{stats.working}</div></div>
           <div className="stat"><div className="label">{t("receipts.statReady")}</div><div className="value">{stats.ready}</div></div>
+          {/* Долг по ЗАКАЗАМ (с фильтрами списка): входящие долги до переезда
+              сюда не входят, весь долг клиентов — в «Клиентах» (RU-N5). */}
           <div className="stat">
-            <div className="label">{t("receipts.debt")}</div>
+            <div className="label">{t("receipts.debtOrders")}</div>
             <div className="value" style={Number(stats.debt) > 0 ? { color: "var(--danger-ink)" } : undefined}>
               {som(stats.debt)}
+            </div>
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              {t("receipts.debtOrdersNote")}
+              <button
+                type="button" className="ghost" style={{ paddingLeft: 0, height: "auto", fontSize: 12, display: "block" }}
+                onClick={() => navigate("/admin/clients")}
+              >
+                {t("receipts.debtAllInClients")}
+              </button>
             </div>
           </div>
           {/* Сдача — сколько цех должен клиентам. Стоит рядом с долгом: это две

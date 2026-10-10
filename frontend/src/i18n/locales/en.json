@@ -531,7 +531,12 @@
     "bonusUnpayConfirm": "Undo the payout record?",
     "bonusUnpayDone": "Record removed",
     "mergeRing": "Cannot merge: it would close a loop in the referral chain. Change the referrer on one of the cards first.",
-    "mergeAdvance": "Advance moving over"
+    "mergeAdvance": "Advance moving over",
+    "advanceOffset": "Apply to the debt first ({{debt}})",
+    "advanceOffsetHint": "The money closes the client's debt: the opening debt first, then orders from oldest to newest. Only what exceeds the debt stays as an advance.",
+    "advanceOffsetOff": "The whole amount becomes an advance and the debt stays — it can be offset later.",
+    "advanceOffsetDone": "Accepted {{sum}}: {{debt}} to the debt, {{advance}} as an advance",
+    "repeatIgnored": "This operation was already recorded — the repeat was ignored"
   },
   "checkout": {
     "outOfStock": "Out of stock",
@@ -802,7 +807,11 @@
     "cashierShort": "by",
     "costShort": "cost",
     "repeat": "Repeat",
-    "repeatHint": "Build the same order at the till — at today's prices"
+    "repeatHint": "Build the same order at the till — at today's prices",
+    "debtOrders": "Debt on orders",
+    "debtOrdersNote": "excluding opening debts from before the migration",
+    "debtAllInClients": "All client debt — in “Clients” →",
+    "editPairHint": "Cut material: its area is recalculated together with the cut line's size and parts."
   },
   "fulfillment": {
     "PROCESSING": "Processing",
@@ -1386,7 +1395,9 @@
     "actOpeningWriteOff": "Opening debt written off",
     "actOpeningAdvance": "Opening advance at the migration date",
     "actOpeningPaymentCancelled": "Opening-debt payment cancelled",
-    "actOpeningWriteOffCancelled": "Opening-debt write-off cancelled"
+    "actOpeningWriteOffCancelled": "Opening-debt write-off cancelled",
+    "actPaymentCancelled": "Payment cancelled, order No. {{n}}",
+    "actWriteOffCancelled": "Write-off cancelled, order No. {{n}}"
   },
   "supplies": {
     "newDoc": "New delivery note",
@@ -1433,7 +1444,7 @@
     "dateMoved": "Date moved — lots and stock entries followed it",
     "openingBadge": "opening",
     "dupeBadge": "dupe?",
-    "dupeHint": "Looks like invoice #{{n}}: same supplier, date and number (or amount).",
+    "dupeHint": "Looks like invoice #{{n}}: same supplier, date ± 3 days and number (ignoring case, spaces, punctuation and Latin look-alikes) or, without a number, the same amount.",
     "credit": "credit {{sum}}",
     "creditHint": "Paid more than the invoice total — the money sits with the supplier.",
     "creditLabel": "Credit with supplier",
@@ -1861,7 +1872,9 @@
     "whyLead": "Earned {{profit}}, while cash changed by {{flow}}. Main reasons (plus added cash, minus took it):",
     "whyNone": "Profit and cash matched for the period.",
     "whyMore": "Details — “Finance” → “Reconciliation”",
-    "unexplained": "Unexplained: {{value}} — the data contradicts itself, please check."
+    "unexplained": "Unexplained: {{value}} — the data contradicts itself, please check.",
+    "payablesChange": "Supplier debt: change over the period",
+    "payablesNow": "debt outstanding on {{date}}: {{value}}"
   },
   "pager": {
     "label": "Pagination",
@@ -1965,7 +1978,9 @@
     "account": "Refunded to",
     "preview": "Returning goods worth {{value}}; the invoice total becomes {{total}}, its debt — {{debt}}.",
     "creditLeft": "Credit with the supplier: {{sum}}.",
-    "done": "Return to the supplier recorded"
+    "done": "Return to the supplier recorded",
+    "closedHint": "This invoice is in a closed month: its total and that month's purchases stay as they are. The return is booked on the return date — this month's purchases go negative, stock and the invoice debt go down.",
+    "previewClosed": "Returning goods worth {{value}} on the return date; the invoice stays as is, its debt — {{debt}}."
   },
   "staff": {
     "title": "Staff",
@@ -2144,7 +2159,7 @@
     "warrantyReasonNeeded": "Enter the reason for the rework.",
     "confirmAnyway": "Check out anyway?",
     "quotesList": "Quotes",
-    "fromQuote": "Order from a quote: prices were recalculated at today's price list.",
+    "fromQuote": "Order from a quote: while the quote is valid and unchanged, its prices and terms apply; otherwise checkout will show \"was / now\".",
     "unitPrice": "Unit price",
     "somPerUnit": "som / unit",
     "byAgreement": "by agreement",
@@ -2172,7 +2187,9 @@
     "hasAdvance": "Client has an advance: {{sum}} som",
     "advanceApplied": "{{sum}} som of the advance will cover this order — {{left}} som left to pay. No cash moves: the money was already received.",
     "advanceKept": "The advance stays on the client's account.",
-    "advanceUsed": "Covered by advance"
+    "advanceUsed": "Covered by advance",
+    "adminOnlyConfirm": "Only an administrator can confirm this.",
+    "quoteLoadedExpired": "Quote #{{n}} is in the cart, but it has expired: prices are today's, and checkout will show \"was / now\""
   },
   "quote": {
     "title": "Commercial quote",
@@ -2424,13 +2441,15 @@
     "done": "Issue recorded",
     "doneAll": "The order is fully issued",
     "submit": "Issue",
-    "rollbackAsk": "Move the order back? The “issued” marks on all items will be cleared."
+    "rollbackAsk": "Move the order back? The “issued” marks on all items will be cleared.",
+    "partsUnit": "pcs"
   },
   "payCancel": {
     "btn": "Cancel payment",
     "title": "Cancel a payment on receipt #{{number}}",
     "ask": "Cancel the payment of {{amount}} from {{date}}?",
-    "hint": "The payment record is removed and a counter entry goes to the cash book — the original stays in it. Other payments on the order are untouched.",
+    "hint": "The payment stays in the history on its own day; the cancellation is a counter entry dated today — in the cash book and in the reconciliation statement. Other payments on the order are untouched.",
+    "cancelled": "cancelled",
     "reason": "Reason",
     "reasonPh": "e.g. entered against the wrong order",
     "submit": "Cancel payment",

@@ -7,6 +7,7 @@ import Field from "./Field.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 import { formatMoney } from "../utils/format.js";
+import { useIdempotency } from "../utils/idempotency.js";
 
 const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, местная дата
 
@@ -15,28 +16,47 @@ const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, ме�
 // суммы), а окно показывает его ответ рядом с полем или тостом — «кнопка не
 // нажимается» из-за молчаливого 400 здесь невозможна.
 
-/** Принять аванс без заказа: приход в кассу + сальдо в пользу клиента. */
+/** Принять аванс без заказа: приход в кассу + сальдо в пользу клиента.
+ *  У клиента есть долг — по умолчанию деньги сначала гасят его (D-165), авансом
+ *  остаётся только остаток сверх долга. Повтор после обрыва уходит с тем же
+ *  ключом и второй раз не проводится (CLI-14). */
 export function AdvanceModal({ client, isAdmin, onClose, onDone }) {
   const { t } = useTranslation();
   const { toast } = useUI();
+  const debt = Number(client.debt) || 0;
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("CASH");
   const [paidOn, setPaidOn] = useState(today());
   const [note, setNote] = useState("");
+  const [offset, setOffset] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const idem = useIdempotency();
 
   async function submit() {
     if (!(Number(amount) > 0)) return setErr(t("clients.advanceBad"));
     setErr("");
     setBusy(true);
     try {
-      const { data } = await api.post(`/clients/clients/${client.id}/advances/`, {
-        amount, method, note, ...(isAdmin ? { paid_on: paidOn } : {}),
+      const body = {
+        amount, method, note, offset_debt: debt > 0 && offset,
+        ...(isAdmin ? { paid_on: paidOn } : {}),
+      };
+      const { data } = await api.post(`/clients/clients/${client.id}/advances/`, body, {
+        headers: { "Idempotency-Key": idem.keyFor(JSON.stringify([client.id, body])) },
       });
-      toast(t("clients.advanceDone", { sum: formatMoney(data.amount) }));
+      idem.done();
+      if (data.idempotent_replay) toast(t("clients.repeatIgnored"));
+      else if (Number(data.to_debt) > 0) {
+        toast(t("clients.advanceOffsetDone", {
+          sum: formatMoney(data.accepted),
+          debt: formatMoney(data.to_debt),
+          advance: formatMoney(data.advance?.amount || 0),
+        }));
+      } else toast(t("clients.advanceDone", { sum: formatMoney(data.amount) }));
       onDone?.(data);
     } catch (e) {
+      idem.failed(e);
       setErr(apiError(e, t("common.error")));
     } finally {
       setBusy(false);
@@ -79,6 +99,20 @@ export function AdvanceModal({ client, isAdmin, onClose, onDone }) {
       <Field style={{ marginTop: 10 }} label={t("clients.advanceNote")} optional optionalLabel={t("common.optional")}>
         <input value={note} maxLength={255} onChange={(e) => setNote(e.target.value)} />
       </Field>
+      {debt > 0 && (
+        <label className="crow" style={{ cursor: "pointer", alignItems: "flex-start", gap: 10, marginTop: 12 }}>
+          <input
+            type="checkbox" style={{ width: 18, height: 18, minHeight: 0, marginTop: 2 }}
+            checked={offset} onChange={(e) => setOffset(e.target.checked)}
+          />
+          <span>
+            <strong>{t("clients.advanceOffset", { debt: formatMoney(debt) })}</strong>
+            <span className="muted" style={{ display: "block", fontSize: 12 }}>
+              {offset ? t("clients.advanceOffsetHint") : t("clients.advanceOffsetOff")}
+            </span>
+          </span>
+        </label>
+      )}
     </Modal>
   );
 }

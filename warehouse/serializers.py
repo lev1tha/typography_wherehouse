@@ -304,6 +304,7 @@ class MaterialSerializer(serializers.ModelSerializer):
                 return attrs[name]
             return getattr(self.instance, name, None) if self.instance is not None else None
 
+        check_card_numbers(attrs)
         kim = attrs.get("kim_percent")
         if kim is not None and not (Decimal("1") <= kim <= Decimal("100")):
             raise serializers.ValidationError(
@@ -345,6 +346,38 @@ class MaterialSerializer(serializers.ModelSerializer):
                                     "закупки за лист."}
                 )
         return attrs
+
+
+# Цены и ставки карточки не бывают отрицательными, а размер листа и ширина
+# рулона больше 4 м — это сантиметры («122 × 244»), вставленные из Excel
+# (XL-01, перепроверка 10.10). Раньше и то и другое молча сохранялось: рез по
+# −65 сом/пог.м уменьшал сумму заказа, лист 122×244 давал 29 768 кв.м.
+NON_NEGATIVE_FIELDS = (
+    "price_per_sqm", "piece_price", "price_per_unit", "price_per_pm", "purchase_price",
+    "cut_rate_per_pm", "wholesale_price", "wholesale_min_qty", "thickness_mm",
+    "critical_balance",
+)
+METRE_FIELDS = ("sheet_width", "sheet_height", "roll_width")
+MAX_METRES = Decimal("4")
+
+
+def check_card_numbers(attrs) -> None:
+    errors = {}
+    for name in NON_NEGATIVE_FIELDS:
+        value = attrs.get(name)
+        if value is not None and value < 0:
+            errors[name] = "Не может быть меньше нуля."
+    for name in METRE_FIELDS:
+        value = attrs.get(name)
+        if value is not None and value < 0:
+            errors[name] = "Не может быть меньше нуля."
+        elif value is not None and value > MAX_METRES:
+            errors[name] = (
+                f"{format(value.normalize(), 'f')} м — больше 4 м. Размер вводится в метрах: "
+                "122 см — это 1.22."
+            )
+    if errors:
+        raise serializers.ValidationError(errors)
 
 
 def build_ref_index(queryset):
@@ -434,6 +467,7 @@ class MaterialBulkRowSerializer(serializers.ModelSerializer):
         # ширина рулона стоит — значит рулон, размер листа — значит лист. Это
         # тот же приём, которым лист уже определялся, и он экономит колонку в
         # сетке, где их и так одиннадцать.
+        check_card_numbers(attrs)
         has_sheet = attrs.get("sheet_width") and attrs.get("sheet_height")
         has_roll = attrs.get("roll_width")
         if has_roll and has_sheet:
@@ -1070,6 +1104,13 @@ class SupplierSerializer(serializers.ModelSerializer):
         return supplier_balance(obj)
 
 
+NEGATIVE_LINE = (
+    "Сумма строки не может быть меньше нуля. Товар назад поставщику — кнопка «Вернуть "
+    "поставщику» в накладной, по которой он пришёл; у накладной закрытого месяца возврат "
+    "пройдёт датой возврата, открывать месяц не нужно."
+)
+
+
 class SupplyLineSerializer(serializers.ModelSerializer):
     material_name = serializers.CharField(source="material.name", read_only=True)
     unit_cost = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
@@ -1102,8 +1143,13 @@ class SupplyLineSerializer(serializers.ModelSerializer):
             # проверяет накладная целиком: в валюте её считает сервер из
             # `cost_fc` по курсу) и не отрицательна: она идёт в закуп месяца и
             # в себестоимость партии. Ноль допустим явно (подарок поставщика).
-            "cost": {"required": False, "min_value": Decimal("0")},
-            "cost_fc": {"required": False, "allow_null": True, "min_value": Decimal("0")},
+            # Строка с минусом — это возврат: у него своя кнопка, и с 10.10 она
+            # работает и для накладной закрытого месяца (D-171). Подсказка
+            # вместо «больше либо равно 0» (10e перепроверки).
+            "cost": {"required": False, "min_value": Decimal("0"),
+                     "error_messages": {"min_value": NEGATIVE_LINE}},
+            "cost_fc": {"required": False, "allow_null": True, "min_value": Decimal("0"),
+                        "error_messages": {"min_value": NEGATIVE_LINE}},
         }
 
     def _return_info(self, obj):
@@ -1180,15 +1226,15 @@ class SupplierReturnSerializer(serializers.ModelSerializer):
     class Meta:
         model = SupplierReturn
         fields = [
-            "id", "supply", "returned_on", "amount", "refund", "refund_account", "note",
-            "created_by_name", "created_at", "lines",
+            "id", "supply", "returned_on", "amount", "amount_fc", "refund", "refund_account",
+            "note", "in_place", "created_by_name", "created_at", "lines",
         ]
         read_only_fields = fields
 
     def get_lines(self, obj):
         return [
             {"material": l.material_id, "label": l.label, "quantity": l.quantity,
-             "area": l.area, "cost": l.cost}
+             "area": l.area, "cost": l.cost, "cost_fc": l.cost_fc}
             for l in obj.lines.all()
         ]
 
@@ -1204,7 +1250,7 @@ class SupplierOpeningDebtSerializer(serializers.ModelSerializer):
 
 _MONEY_FIELDS = (
     "stated_total", "paid_amount", "paid_account", "total_cost", "discrepancy", "debt",
-    "paid_total", "overpaid", "total_foreign", "paid_foreign", "debt_foreign",
+    "paid_total", "overpaid", "total_foreign", "paid_foreign", "debt_foreign", "returned_after",
 )
 
 
@@ -1224,6 +1270,10 @@ class SupplySerializer(serializers.ModelSerializer):
     total_foreign = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     paid_foreign = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     debt_foreign = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    # Возвращено датой возврата (накладная закрытого месяца не переписана, D-171).
+    returned_after = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    # Месяц накладной закрыт: возврат пойдёт датой возврата, форма это пишет.
+    period_closed = serializers.SerializerMethodField()
     payments = SupplierPaymentSerializer(many=True, read_only=True)
     returns = SupplierReturnSerializer(many=True, read_only=True)
     possible_duplicate_of = serializers.SerializerMethodField()
@@ -1236,7 +1286,7 @@ class SupplySerializer(serializers.ModelSerializer):
             "stated_total", "paid_amount", "paid_account", "note", "lines",
             "is_opening", "currency", "rate",
             "total_cost", "discrepancy", "debt", "paid_total", "overpaid",
-            "total_foreign", "paid_foreign", "debt_foreign",
+            "total_foreign", "paid_foreign", "debt_foreign", "returned_after", "period_closed",
             "payments", "returns", "possible_duplicate_of",
             "created_by", "created_by_name", "created_at",
         ]
@@ -1244,6 +1294,16 @@ class SupplySerializer(serializers.ModelSerializer):
 
     def get_possible_duplicate_of(self, obj):
         return (self.context.get("dupes") or {}).get(obj.id)
+
+    def get_period_closed(self, obj):
+        if obj.received_on is None:
+            return False
+        if "_closed_through" not in self.context:
+            from finance.periods import closed_through
+
+            self.context["_closed_through"] = closed_through()
+        limit = self.context["_closed_through"]
+        return bool(limit and obj.received_on <= limit)
 
     def validate_currency(self, value):
         code = (value or "KGS").strip().upper()

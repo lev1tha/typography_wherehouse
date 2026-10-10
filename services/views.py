@@ -286,6 +286,17 @@ class ResolvedRateView(APIView):
                 material = Material.objects.get(pk=raw)
             except (Material.DoesNotExist, ValueError):
                 return Response({"detail": "Материал не найден."}, status=status.HTTP_404_NOT_FOUND)
+        # Договорная ставка клиента (перепроверка 10.10, S1 №1): окно кассы
+        # подставляет действующую ставку — договорную, если она есть.
+        client_id = request.query_params.get("client")
+        if client_id and str(client_id).isdigit():
+            from sales.sale_service import contract_prices_for, service_contract
+
+            contract = service_contract(contract_prices_for(int(client_id)), service, material)
+            if contract is not None:
+                return Response({
+                    "rate": contract, "base": contract, "source": "client", "coefficient": None,
+                })
         resolved = resolve_rate(service, material)
         return Response({
             "rate": resolved.rate,

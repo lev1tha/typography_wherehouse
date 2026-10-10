@@ -36,7 +36,10 @@ export default function SupplyReturnModal({ supply, onClose, onDone }) {
   const value = picked.reduce((s, r) => s + r.value, 0);
   const anyBad = rows.some((r) => r.bad);
   const paid = Number(supply.paid_total) || 0;
-  const newTotal = Number(supply.total_cost) - value;
+  // Накладная закрытого месяца (D-171): её сумма не меняется, возврат идёт
+  // датой возврата — долг считается от суммы за вычетом таких возвратов.
+  const closed = !!supply.period_closed;
+  const newTotal = Number(supply.total_cost) - (Number(supply.returned_after) || 0) - value;
   // Столько заплачено сверх новой суммы накладной — его и можно получить назад.
   const refundable = Math.max(0, Math.min(value, paid - newTotal));
   const valid = picked.length > 0 && !anyBad && (mode === "CREDIT" || (refundable > 0 && !!account));
@@ -74,6 +77,11 @@ export default function SupplyReturnModal({ supply, onClose, onDone }) {
       }
     >
       <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>{t("supplyReturn.hint")}</p>
+      {closed && (
+        <p role="note" style={{ fontSize: 13, marginTop: 0 }}>
+          <strong>{t("supplyReturn.closedHint")}</strong>
+        </p>
+      )}
       <div className="table-scroll">
         <table className="table plain-table">
           <thead>
@@ -145,10 +153,12 @@ export default function SupplyReturnModal({ supply, onClose, onDone }) {
 
       {value > 0 && (
         <div className="muted" style={{ fontSize: 13, marginTop: 10 }}>
-          {t("supplyReturn.preview", {
-            value: som(value), total: som(newTotal),
-            debt: som(Math.max(0, newTotal - paid)),
-          })}
+          {closed
+            ? t("supplyReturn.previewClosed", { value: som(value), debt: som(Math.max(0, newTotal - paid)) })
+            : t("supplyReturn.preview", {
+              value: som(value), total: som(newTotal),
+              debt: som(Math.max(0, newTotal - paid)),
+            })}
           {mode === "CREDIT" && paid - newTotal > 0 && (
             <strong style={{ color: "var(--ok-ink)" }}> {t("supplyReturn.creditLeft", { sum: som(paid - newTotal) })}</strong>
           )}

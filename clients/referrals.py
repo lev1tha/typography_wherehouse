@@ -40,9 +40,26 @@ def current_rate() -> Decimal:
     return FinanceSettings.load().referral_bonus or ZERO
 
 
+def _written_off_receipts():
+    """id чеков, у которых долг списан — ЧИСТАЯ сумма списаний больше нуля.
+
+    Отменённое списание остаётся записью своим днём, а отмена — встречной
+    записью с минусом (D-158): заказ, у которого списание отменили и который
+    потом оплатили, — снова оплаченный, а не «закрытый списанием»."""
+    from django.db.models import Sum
+
+    from sales.models import Payment
+
+    return (
+        Payment.objects.filter(method=Payment.Method.WRITE_OFF)
+        .values("receipt_id").annotate(net=Sum("amount")).filter(net__gt=0)
+        .values("receipt_id")
+    )
+
+
 def qualifying_receipt(referred: Client):
     """Первый оплаченный и не возвращённый заказ клиента — или None."""
-    from sales.models import Payment, Receipt
+    from sales.models import Receipt
 
     return (
         Receipt.objects.filter(
@@ -50,7 +67,7 @@ def qualifying_receipt(referred: Client):
             status=Receipt.Status.COMPLETED, refunded_amount=0,
             revenue_recognized_at__isnull=False, total_price__gt=0,
         )
-        .exclude(payments__method=Payment.Method.WRITE_OFF)
+        .exclude(pk__in=_written_off_receipts())
         .order_by("revenue_recognized_at", "pk")
         .first()
     )
@@ -107,7 +124,7 @@ def refresh_bonus(referred: Client, *, rate: Decimal | None = None):
 
 
 def receipt_still_ok(row) -> bool:
-    from sales.models import Payment, Receipt
+    from sales.models import Receipt
 
     r = row.receipt
     return bool(
@@ -115,7 +132,7 @@ def receipt_still_ok(row) -> bool:
         and r.payment_status == Receipt.PaymentStatus.PAID
         and r.status == Receipt.Status.COMPLETED
         and r.refunded_amount == 0
-        and not r.payments.filter(method=Payment.Method.WRITE_OFF).exists()
+        and not _written_off_receipts().filter(receipt_id=r.pk).exists()
     )
 
 

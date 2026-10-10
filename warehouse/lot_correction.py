@@ -614,6 +614,30 @@ def preview(*, roll=None, line=None, data) -> dict:
 
 
 @transaction.atomic
+def _reprice_returns(line: SupplyLine, after: dict) -> None:
+    """Возвраты поставщику по этой строке (правленные на месте) — по новой цене
+    единицы (RS-N2, перепроверка 10.10). Выписка поставщика показывает
+    накладную в первоначальной сумме = сумма строки + возвращённое; после
+    исправления цены возврат оставался по старой, и «первоначальная» накладная
+    выходила ни по старой, ни по новой цене. Сальдо от этого не меняется: в
+    нём сумма накладной после возврата."""
+    from .models import SupplierReturn, SupplierReturnLine
+
+    if not after["quantity"]:
+        return
+    touched = set()
+    for row in SupplierReturnLine.objects.select_for_update().filter(supply_line=line, ret__in_place=True):
+        cost = _money(after["purchase_cost"] * row.area / after["quantity"])
+        if cost != row.cost:
+            row.cost = cost
+            row.save(update_fields=["cost"])
+            touched.add(row.ret_id)
+    for ret in SupplierReturn.objects.filter(pk__in=touched).prefetch_related("lines"):
+        ret.amount = sum((r.cost for r in ret.lines.all()), Decimal("0"))
+        ret.save(update_fields=["amount"])
+
+
+@transaction.atomic
 def apply(*, roll=None, line=None, data, user=None) -> dict:
     # Замки: партия, строка, накладная, материал — до расчёта, чтобы план
     # считался по тем же числам, которые будем менять.
@@ -687,6 +711,7 @@ def apply(*, roll=None, line=None, data, user=None) -> dict:
             line.cost_fc = (line.cost / line.supply.rate).quantize(CENT)
             fields.append("cost_fc")
         line.save(update_fields=fields)
+        _reprice_returns(line, after)
 
     material.quantity = (material.quantity or Decimal("0")) + qty_delta
     material.purchase_price = plan["stock"]["purchase_price_after"]

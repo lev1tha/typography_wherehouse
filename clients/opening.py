@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from datetime import date
@@ -242,9 +243,18 @@ def preview(rows: list[dict]) -> dict:
 # --- Проведение ------------------------------------------------------------------------
 
 
+def batch_for_key(record) -> str:
+    """Имя партии для проведения с ключом повтора (CLI-14): из записи ключа, так
+    что повтор находит ту же партию, а ключ, занятый заново через неделю, —
+    уже другую."""
+    raw = f"{record.user_id}:{record.key}:{record.pk}".encode()
+    return "k" + hashlib.sha1(raw).hexdigest()[:11]
+
+
 @transaction.atomic
-def post(text: str, as_of: date, *, user=None, note: str = "") -> dict:
-    """Провести вставку целиком: всё или ничего (строка с ошибкой — отказ)."""
+def post(text: str, as_of: date, *, user=None, note: str = "", batch: str | None = None) -> dict:
+    """Провести вставку целиком: всё или ничего (строка с ошибкой — отказ).
+    `batch` — имя партии (по умолчанию случайное)."""
     if as_of is None:
         raise OpeningRejected("Укажите дату переезда.")
     if as_of > timezone.localdate():
@@ -258,7 +268,7 @@ def post(text: str, as_of: date, *, user=None, note: str = "") -> dict:
             "Исправьте строки с ошибками: " + ", ".join(str(r["line"]) for r in bad[:20])
             + ("…" if len(bad) > 20 else "") + "."
         )
-    batch = uuid.uuid4().hex[:12]
+    batch = batch or uuid.uuid4().hex[:12]
     note = (note or "").strip()[:255]
     created_clients = 0
     made = []

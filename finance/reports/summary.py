@@ -55,7 +55,7 @@ def supplier_debts():
     доказать — владелец спрашивал «за что?», а накладной видно не было."""
     rows = []
     supplies = Supply.objects.select_related("supplier", "created_by").prefetch_related(
-        "lines__material", "lines__roll", "payments"
+        "lines__material", "lines__roll", "payments", "returns"
     )
     for supply in supplies:
         debt = supply.debt
@@ -101,7 +101,8 @@ def supplier_debts():
     # сальдо поставщика и суммой этих долгов (начальный долг — плюс, аванс и
     # переплата, закрывающие долги других накладных, — минус).
     for supplier in Supplier.objects.prefetch_related(
-        "supplies__lines", "supplies__payments", "payments__offsets", "opening_debts",
+        "supplies__lines", "supplies__payments", "supplies__returns", "payments__offsets",
+        "opening_debts",
     ):
         balance = supplier_balance(supplier)
         adjust = balance["owe"] - sum((s.debt for s in supplier.supplies.all()), Decimal("0"))

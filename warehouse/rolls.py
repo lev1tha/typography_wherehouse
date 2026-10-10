@@ -10,8 +10,29 @@ from decimal import Decimal
 
 from django.db import transaction
 
-from .models import InventoryLog, Material, Roll
+from .models import InventoryLog, InventoryLogLot, Material, Roll
 
+
+def record_lot_moves(entry: InventoryLog | None, moves) -> None:
+    """Записать, из каких партий ушла (−) или в какие вернулась (+) запись
+    журнала `entry` — `[(партия или её pk, площадь со знаком)]`.
+
+    По этим строкам считается остаток партии на прошлую дату (склад на дату,
+    снимок, начало и конец периода в «Финансах»): сегодняшний остаток плюс
+    всё, что ушло из партии после даты. Без них приходилось угадывать
+    «с самых свежих», и сентябрь показывал 49 800 вместо 47 400.
+    """
+    if entry is None or entry.pk is None:
+        return
+    total: dict = {}
+    for roll, area in moves or ():
+        pk = getattr(roll, "pk", roll)
+        if pk is None or not area:
+            continue
+        total[pk] = total.get(pk, Decimal("0")) + Decimal(area)
+    rows = [InventoryLogLot(log=entry, roll_id=pk, area=area) for pk, area in total.items() if area]
+    if rows:
+        InventoryLogLot.objects.bulk_create(rows)
 
 
 def _som(value) -> str:
@@ -330,6 +351,7 @@ def consume_area(
         if chosen is not None:
             rolls = [chosen] + [r for r in rolls if r.pk != chosen.pk]
 
+    moves = []
     for roll in rolls:
         if remaining <= 0:
             break
@@ -339,6 +361,7 @@ def consume_area(
         # Закуп × взято / принято — без копеечного хвоста цены кв.м (STK-10).
         cogs += roll.cost_of(take)
         remaining -= take
+        moves.append((roll.pk, -take))
         if trace is not None:
             trace.append((roll.pk, take, None))
 
@@ -373,6 +396,7 @@ def consume_area(
         if happened_at:
             entry.happened_at = happened_at
         entry.save()
+        record_lot_moves(entry, moves)
 
     if was_above and locked.quantity <= locked.critical_balance:
         from integrations.telegram import notify_low_stock
@@ -449,6 +473,7 @@ def consume_metres(
     cogs = Decimal("0")
     area_taken = Decimal("0")
     remaining = need
+    moves = []
     for roll in rolls:
         if remaining <= 0:
             break
@@ -462,6 +487,7 @@ def consume_metres(
         cogs += roll.cost_of(take_area)
         area_taken += take_area
         remaining -= take_m
+        moves.append((roll.pk, -take_area))
         if trace is not None:
             trace.append((roll.pk, take_area, take_m))
 
@@ -483,6 +509,7 @@ def consume_metres(
         if happened_at:
             entry.happened_at = happened_at
         entry.save()
+        record_lot_moves(entry, moves)
 
     if was_above and locked.quantity <= locked.critical_balance:
         from integrations.telegram import notify_low_stock
@@ -530,6 +557,7 @@ def restore_metres(
             rolls = [chosen] + [r for r in rolls if r.pk != chosen.pk]
     remaining = add
     area_added = Decimal("0")
+    moves = []
     by_pk = {r.pk: r for r in rolls}
     for pk, part_area, part_metres in lots or ():
         roll = by_pk.get(pk)
@@ -547,6 +575,7 @@ def restore_metres(
         roll.save(update_fields=["remaining_area"])
         area_added += give_area
         remaining -= give_m
+        moves.append((roll.pk, give_area))
     for roll in rolls:
         if remaining <= 0:
             break
@@ -561,6 +590,7 @@ def restore_metres(
         roll.save(update_fields=["remaining_area"])
         area_added += give_area
         remaining -= give_m
+        moves.append((roll.pk, give_area))
     # Излишек (вернули больше, чем резали) кладём на самый свежий рулон, чтобы
     # остаток материала не разошёлся с суммой рулонов.
     if remaining > 0:
@@ -570,6 +600,7 @@ def restore_metres(
             target.remaining_area += extra_area
             target.save(update_fields=["remaining_area"])
             area_added += extra_area
+            moves.append((target.pk, extra_area))
 
     locked.quantity += area_added
     locked.save(update_fields=["quantity", "updated_at"])
@@ -588,6 +619,7 @@ def restore_metres(
         if happened_at:
             entry.happened_at = happened_at
         entry.save()
+        record_lot_moves(entry, moves)
     material.refresh_from_db()
 
 
@@ -645,7 +677,7 @@ def stocktake_roll(roll: Roll, counted_metres: Decimal, *, reason_code, note="",
     # ЭТОГО рулона. Без неё недомер уходил в «списано без себестоимости» и в
     # прибыль не попадал никогда.
     if delta_area:
-        InventoryLog.objects.create(
+        entry = InventoryLog.objects.create(
             type=InventoryLog.Type.ADJUSTMENT,
             material=material,
             quantity_changed=delta_area,
@@ -660,6 +692,7 @@ def stocktake_roll(roll: Roll, counted_metres: Decimal, *, reason_code, note="",
             cost=locked_roll.cost_of(abs(delta_area)).quantize(Decimal("0.01")),
             created_by=user,
         )
+        record_lot_moves(entry, [(locked_roll.pk, delta_area)])
     return act
 
 
@@ -717,6 +750,7 @@ def write_off_roll(roll: Roll, metres: Decimal, *, reason: str = "", user=None,
     if happened_at:
         entry.happened_at = happened_at
     entry.save()
+    record_lot_moves(entry, [(locked_roll.pk, -area)])
     if was_above and material.quantity <= material.critical_balance:
         from integrations.telegram import notify_low_stock
 
@@ -794,6 +828,7 @@ def restore_area(
         add = max(add, min((add / kim).quantize(Decimal("0.0001")), taken))
     remaining = add
     value = Decimal("0")
+    moves = []
     for pk, part_area, _metres in lots or ():
         roll = by_pk.get(pk)
         if roll is None or remaining <= 0:
@@ -806,6 +841,7 @@ def restore_area(
         roll.save(update_fields=["remaining_area"])
         value += roll.cost_of(give)
         remaining -= give
+        moves.append((roll.pk, give))
     for roll in (reversed(rolls) if newest_first else rolls):
         if remaining <= 0:
             break
@@ -817,16 +853,18 @@ def restore_area(
         roll.save(update_fields=["remaining_area"])
         value += roll.cost_of(give)
         remaining -= give
+        moves.append((roll.pk, give))
     if remaining > 0 and newest is not None:
         newest.remaining_area += remaining
         newest.save(update_fields=["remaining_area"])
         value += newest.cost_of(remaining)
+        moves.append((newest.pk, remaining))
     elif remaining > 0:
         value += remaining * (locked.purchase_price or Decimal("0"))
     locked.quantity += add
     locked.save(update_fields=["quantity", "updated_at"])
     if log_type:
-        InventoryLog.objects.create(
+        entry = InventoryLog.objects.create(
             type=log_type,
             material=locked,
             quantity_changed=add,
@@ -837,6 +875,7 @@ def restore_area(
                   if log_type == InventoryLog.Type.ADJUSTMENT else None),
             **({"happened_at": happened_at} if happened_at else {}),
         )
+        record_lot_moves(entry, moves)
     return value
 
 

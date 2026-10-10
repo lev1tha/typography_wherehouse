@@ -49,11 +49,27 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
   // Состав чека. Возвращённые строки не показываем: их материал уже вернулся на
   // склад, и правкой количества это не описывается — там был возврат, а не
   // опечатка.
+  // Пара реза (перепроверка 10.10, S1 №2): работа с размерами и сразу за ней
+  // материал куска — одна позиция. Детали и размеры правятся у работы, а
+  // материал сервер пересчитает вместе с ней: {id материала: id работы}.
+  const pairWork = (() => {
+    const all = receipt.items || [];
+    const out = {};
+    all.forEach((w, i) => {
+      const m = all[i + 1];
+      if (
+        isCutLine(w) && w.width != null && w.length != null && w.work_material && m &&
+        m.type === "MATERIAL" && String(m.material) === String(w.work_material) && m.sale_mode === "SQM" && !m.roll_area
+      ) out[m.id] = w.id;
+    });
+    return out;
+  })();
   const [lines, setLines] = useState(() =>
     (receipt.items || [])
       .filter((i) => !i.is_returned)
       .map((i) => ({
         id: i.id,
+        pairWork: pairWork[i.id] ?? null,
         name: itemTitle(i),
         unit: i.unit_code ? t(`unit.${i.unit_code}`) : "",
         quantity: String(+Number(i.quantity).toFixed(4)),
@@ -131,6 +147,11 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
         }
       }
       if (l.work && l.price === o.p && l.passes !== o.passes) p = (p / int(o.passes)) * int(l.passes);
+    }
+    // Материал пары реза: площадь — от размеров и деталей строки работы.
+    const w = l.pairWork != null ? lines.find((x) => x.id === l.pairWork) : null;
+    if (o && w && !w.remove && dimsTouched(w) && l.quantity === o.q && num(w.width) > 0 && num(w.length) > 0) {
+      q = Math.round(num(w.width) * num(w.length) * int(w.parts) * 1000 + 1e-7) / 1000;
     }
     return [q, p];
   }
@@ -306,6 +327,9 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
                   {l.remove ? t("receipts.editItemRestore") : t("common.delete")}
                 </button>
               </div>
+              {l.pairWork != null && (
+                <p className="muted" style={{ fontSize: 12, margin: "0 0 6px" }}>{t("receipts.editPairHint")}</p>
+              )}
               {/* Размеры детали: ширина × длина одной детали, сколько деталей,
                   проходов, на каком станке. Количество сервер пересчитает сам. */}
               {l.dims && (

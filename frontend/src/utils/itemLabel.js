@@ -47,6 +47,11 @@ export function itemSpecParts(it, t) {
 /** «выдано 5 из 8 шт» — пока по строке что-то выдали (G1-N4); иначе пустая строка. */
 export function issuedLabel(it, t) {
   if (!(Number(it.issued_qty) > 0)) return "";
+  // Строка с деталями выдаётся штуками (перепроверка 10.10, RU-N3).
+  if (Number(it.parts_count) > 1) {
+    const done = Number(it.issued_qty) >= Number(it.quantity) ? Number(it.parts_count) : Number(it.issued_parts || 0);
+    return t("receiptsV2.issuedOf", { done, total: it.parts_count, unit: t("issue.partsUnit") });
+  }
   const unit = it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "";
   return t("receiptsV2.issuedOf", { done: dim(it.issued_qty), total: dim(it.quantity), unit });
 }

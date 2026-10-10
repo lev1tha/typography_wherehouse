@@ -199,6 +199,9 @@ function cartFromReceipt(items, materials, services, t) {
           width: Number(it.width) || 0, length: Number(it.length) || 0, area: qty,
           parts: Number(it.parts_count) || 1, passes,
           rate: Number(s.rate_flat) || lastPrice(it) / passes, note: it.note || "",
+          // Ставка из старого чека (в каталоге её нет) уходит явно; каталожная —
+          // нет: договорную клиента сервер подставит сам.
+          rateEdited: !(Number(s.rate_flat) > 0),
           ownMaterial: !!it.own_material, qty: 1,
         });
         return;
@@ -455,10 +458,13 @@ function lineToItem(l, isAdmin) {
       cut_rate: l.rate, note: l.note || "",
     };
   if (l.kind === "engraving")
-    // Гравировка: цена за кв.м — та, что стояла в окне (правится всеми).
+    // Гравировка: цена за кв.м правится всеми, но уходит на сервер, только если
+    // её поменяли руками (перепроверка 10.10, S1 №1): нетронутую — договорную
+    // клиента или каталожную — сервер подставит сам, и строка не станет
+    // «ценой вручную».
     return {
       type: "SERVICE", service: l.serviceId, width: l.width, length: l.length,
-      cut_rate: l.rate, note: l.note || "",
+      ...(l.rateEdited ? { cut_rate: l.rate } : {}), note: l.note || "",
       ...partsArg,
       ...passesArg,
       ...(l.ownMaterial ? { own_material: true } : {}),
@@ -720,6 +726,36 @@ export default function Checkout() {
       .catch(() => { setClientChange(0); setClientDebt(0); setClientDiscount(0); setClientAdvance(0); });
   }, [clientId]);
 
+  // Договорные цены выбранного клиента (перепроверка 10.10, S1 №1): окно
+  // позиции подставляет ДЕЙСТВУЮЩУЮ цену — договорную, если она есть, иначе
+  // каталожную. На сервер цена уходит, только если её поменяли руками.
+  const [contracts, setContracts] = useState([]);
+  useEffect(() => {
+    if (!clientId) {
+      setContracts([]);
+      return undefined;
+    }
+    let alive = true;
+    api
+      .get("/clients/client-prices/", { params: { client: clientId } })
+      .then((r) => alive && setContracts(Array.isArray(r.data) ? r.data : r.data.results || []))
+      .catch(() => alive && setContracts([]));
+    return () => {
+      alive = false;
+    };
+  }, [clientId]);
+  // Договорная ставка работы: «услуга + материал», потом «услуга»; null — нет.
+  const contractRate = (serviceId, materialId = null) => {
+    const hit = (m) => contracts.find((c) => String(c.service) === String(serviceId) && String(c.material ?? "") === String(m ?? ""));
+    const row = (materialId != null && hit(materialId)) || hit(null);
+    return row ? Number(row.price) : null;
+  };
+  // Договорная цена материала в единице продажи (SQM / PIECE / METER); null — нет.
+  const contractMaterial = (materialId, mode) => {
+    const row = contracts.find((c) => c.service == null && String(c.material) === String(materialId) && c.sale_mode === mode);
+    return row ? Number(row.price) : null;
+  };
+
   useEffect(() => {
     // Живой поиск клиента по ИМЕНИ (ФИО или название компании), не по телефону.
     const name = (client.type === "OSOO" ? client.company_name : client.full_name) || "";
@@ -880,13 +916,16 @@ export default function Checkout() {
     if (urgentOn) body.is_urgent = true;
     if (overrideOn) body.discount_percent = discountPct;
     if (clientId) body.client_id = clientId;
+    // Заказ из КП: сервер считает его по ценам КП (в срок и того же состава) или
+    // предупреждает «было / сейчас».
+    if (quoteId) body.quote_id = quoteId;
     if (isAdmin && warranty.on) {
       body.is_warranty = true;
       body.warranty_reason = warranty.reason.trim() || "—";
       if (warranty.orderId) body.warranty_of = warranty.orderId;
     }
     return body;
-  }, [cart, isAdmin, urgentOn, overrideOn, discountPct, clientId, warranty.on, warranty.reason, warranty.orderId]);
+  }, [cart, isAdmin, urgentOn, overrideOn, discountPct, clientId, quoteId, warranty.on, warranty.reason, warranty.orderId]);
   const previewKey = previewBody ? JSON.stringify(previewBody) : "";
   const fresh = !!preview && preview.key === previewKey;
   const catalogTotal = fresh ? Number(preview.data.catalog_total) : localCatalogTotal;
@@ -942,16 +981,18 @@ export default function Checkout() {
   // Ставка работы для пары «станок × материал» — у сервера: матрица ставок,
   // ставка станка или материала и коэффициент по толщине (CALC-02, CALC-05).
   // Вписанную руками ставку (`cutRateEdited`) не трогаем.
+  // Договорная ставка клиента — тоже у сервера (`client`): окно подставляет
+  // действующую ставку, и нетронутая она на сервер не уходит.
   const rateKey =
     cut && cut.material && !cut.service && !cut.ownCut && cut.cutServiceId && cut.material.is_roll_material
-      ? `${cut.cutServiceId}:${cut.material.id}`
+      ? `${cut.cutServiceId}:${cut.material.id}:${clientId || ""}`
       : "";
   useEffect(() => {
     if (!rateKey) return undefined;
-    const [sid, mid] = rateKey.split(":");
+    const [sid, mid, cid] = rateKey.split(":");
     let alive = true;
     api
-      .get("/services/rate/", { params: { service: sid, material: mid } })
+      .get("/services/rate/", { params: { service: sid, material: mid, ...(cid ? { client: cid } : {}) } })
       .then((r) => {
         if (!alive) return;
         setCut((c) =>
@@ -1053,9 +1094,11 @@ export default function Checkout() {
     // Гравировка: площадь × цена за кв.м, материала в строке нет. Цену за
     // кв.м правят по заказу — и админ, и складовщик.
     if (p.kind === "service" && p.serviceKind === "ENGRAVING") {
+      // Ставка — действующая: договорная клиента, иначе каталожная.
+      const engRateNow = contractRate(p.id) ?? (p.rate_flat > 0 ? Number(p.rate_flat) : null);
       setCut({
         service: p, engraving: true, width: "", length: "",
-        rate: p.rate_flat > 0 ? String(p.rate_flat) : "", note: "", ownMaterial: false,
+        rate: engRateNow != null ? String(engRateNow) : "", note: "", ownMaterial: false,
       });
       return;
     }
@@ -1071,8 +1114,9 @@ export default function Checkout() {
           length: "",
           running_meters: "",
           qty: "1",
-          matPrice: String(matSqm(m)),
-          piecePrice: String(Number(m.piece_price || 0)),
+          // Цена — действующая: договорная клиента, иначе каталожная.
+          matPrice: String(contractMaterial(m.id, m.sells_by_metre ? "METER" : "SQM") ?? matSqm(m)),
+          piecePrice: String(contractMaterial(m.id, "PIECE") ?? Number(m.piece_price || 0)),
           priceEdited: false,
           cutServiceId: cuttingService?.id ?? "",
           cutRate: rateFor(cuttingService, m),
@@ -1113,7 +1157,8 @@ export default function Checkout() {
       return;
     }
     // Per-piece (exterior install) or fixed service → simple line with stepper.
-    const unit_price = p.uses_pieces ? p.rate_per_piece : p.base_price;
+    // Цена — действующая: договорная клиента, иначе каталожная (не «вручную»).
+    const unit_price = contractRate(p.id) ?? (p.uses_pieces ? p.rate_per_piece : p.base_price);
     addOrInc({ ...p, unit_price });
   }
 
@@ -1212,7 +1257,10 @@ export default function Checkout() {
       setCart((prev) => [...prev, {
         key: `E${cut.service.id}-${prev.length}`, kind: "engraving",
         serviceId: cut.service.id, name: cut.service.name,
-        width: w, length: l, area: cutArea, rate, parts: cutParts, passes: cutPasses,
+        // Пустой каталог — ставку назвали в окне, она уходит явно.
+        width: w, length: l, area: cutArea, rate,
+        rateEdited: !!cut.rateEdited || !(Number(cut.service.rate_flat) > 0),
+        parts: cutParts, passes: cutPasses,
         note: (cut.note || "").trim(), ownMaterial: !!cut.ownMaterial, qty: 1,
       }]);
       setCut(null);
@@ -1449,6 +1497,8 @@ export default function Checkout() {
     }
     setCart(lines);
     setQuoteId(q.id);
+    // Срочность КП переносится в заказ (сервер возьмёт её из КП, пока оно в срок).
+    setIsUrgent(!!q.is_urgent);
     if (q.title) setOrderTitle(q.title);
     if (q.client) {
       setClientId(q.client);
@@ -1470,6 +1520,8 @@ export default function Checkout() {
     toast(
       skipped
         ? t("checkout2.quoteLoadedPartly", { n: q.number, skipped })
+        : q.is_expired
+        ? t("checkout2.quoteLoadedExpired", { n: q.number })
         : t("checkout2.quoteLoaded", { n: q.number })
     );
   }
@@ -2332,6 +2384,9 @@ export default function Checkout() {
                   : w.code === "cost_unknown"
                   ? t("checkout.warnCostUnknown")
                   : w.message || w.code}
+                {/* «Строка выше порога» и «деталь больше листа» складовщик не
+                    подтверждает сам (CALC-06): оформит администратор. */}
+                {w.admin_only && <strong>{" "}{t("checkout2.adminOnlyConfirm")}</strong>}
               </p>
             ))}
           {!fresh && previewErr && cart.length > 0 && (
@@ -3083,7 +3138,7 @@ export default function Checkout() {
                   type="number"
                   step="any"
                   value={cut.rate ?? ""}
-                  onChange={(e) => setCut({ ...cut, rate: e.target.value })}
+                  onChange={(e) => setCut({ ...cut, rate: e.target.value, rateEdited: true })}
                 />
                 {!(engRate > 0) && (
                   <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.engravingNeedRate")}</p>

@@ -45,7 +45,10 @@ class PortalStatementTests(ShopCase):
 
     def test_summary_has_balance_with_advance(self):
         self.client.force_authenticate(self.admin)
-        self.client.post(f"/api/clients/clients/{self.agency.id}/advances/", {"amount": "5000", "method": "CASH"}, format="json")
+        # Без зачёта в долг (D-165: по умолчанию аванс при долге гасит долг) —
+        # здесь проверяется, что кабинет показывает аванс рядом с долгом.
+        self.client.post(f"/api/clients/clients/{self.agency.id}/advances/",
+                         {"amount": "5000", "method": "CASH", "offset_debt": False}, format="json")
         self.client.force_authenticate(None)
         token = mint_customer_token(self.agency)
         r = self.get("/api/customer/summary/", token)

@@ -406,16 +406,19 @@ export default function ReceiptCard({ receipt, onClose, onChange }) {
           <div className="rc-section">
             <h3 className="rc-title">{t("receiptsV2.payments")}</h3>
             {payments.map((p) => (
-              <div className="rc-pay" key={p.id}>
+              <div className={`rc-pay${p.cancelled ? " muted" : ""}`} key={p.id}>
                 <div>
                   <strong>{som(p.amount)}</strong> · {methodLabel(p.method)}
+                  {/* Отменённая оплата остаётся своим днём, отмена — встречной
+                      записью с минусом (D-158). */}
+                  {p.cancelled && <span className="badge warn" style={{ marginLeft: 6 }}>{t("payCancel.cancelled")}</span>}
                   <span className="rc-spec">
                     {formatDate(p.paid_on)}
                     {p.created_by_name && ` · ${t("receiptsV2.acceptedBy", { name: p.created_by_name })}`}
                   </span>
                   {p.note && <span className="rc-spec">{p.note}</span>}
                 </div>
-                {isAdmin && live && (
+                {isAdmin && live && !p.cancelled && !p.reversal && (
                   <button className="ghost row-btn row-danger" onClick={() => setCancelling(p)} disabled={busy}>
                     {t("payCancel.btn")}
                   </button>

@@ -325,53 +325,81 @@ def unpost_supply(supply: Supply, *, user=None) -> None:
     supply.delete()
 
 
+# Латинские буквы, которые на бумаге и на экране не отличить от кириллицы:
+# «H-102» латиницей и «Н-102» кириллицей — один номер (F11/G3-N2).
+_TWINS = str.maketrans({
+    "a": "а", "b": "в", "c": "с", "e": "е", "h": "н", "k": "к", "m": "м",
+    "o": "о", "p": "р", "t": "т", "x": "х", "y": "у", "ё": "е",
+})
+DUPLICATE_DAYS = 3
+
+
+def number_key(number) -> str:
+    """Номер накладной для сравнения: без регистра, пробелов и знаков
+    («Э-102», «э 102», «Э102» — одно), латинские двойники — кириллицей."""
+    text = (number or "").casefold().translate(_TWINS)
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+def _looks_same(a_key, a_total, b_key, b_total) -> bool:
+    """Оба с номером — по номеру; хоть у одной номера нет — по сумме до тыйына."""
+    if a_key and b_key:
+        return a_key == b_key
+    return bool(a_total) and a_total > 0 and a_total == b_total
+
+
 def find_duplicate(*, supplier_id, number, received_on, total, exclude_id=None):
     """Накладная, которая выглядит как повторный ввод этой же (F11, G3-N2).
 
-    Совпадение — «поставщик + номер + дата»; номера нет — «поставщик + сумма +
-    дата». Двойной ввод (бумажную накладную внесли дважды) удваивает склад и
-    закуп и молча остаётся: 20 листов на складе при десяти физических.
+    Совпадение — тот же поставщик, дата ± 3 дня и: номер (без регистра,
+    пробелов и знаков, латиница = кириллица) или, если номера нет у одной из
+    двух, сумма до тыйына. Двойной ввод (бумажную накладную внесли дважды)
+    удваивает склад и закуп и молча остаётся: 20 листов на складе при десяти
+    физических. Раньше ловилось только точное совпадение номера и даты —
+    «H-102» латиницей, «Э102» без дефиса, дата на день позже и накладная без
+    номера на ту же сумму проходили.
     """
-    qs = Supply.objects.filter(received_on=received_on)
+    from datetime import timedelta
+
+    qs = Supply.objects.filter(
+        received_on__gte=received_on - timedelta(days=DUPLICATE_DAYS),
+        received_on__lte=received_on + timedelta(days=DUPLICATE_DAYS),
+    )
     qs = qs.filter(supplier_id=supplier_id) if supplier_id else qs.filter(supplier__isnull=True)
     if exclude_id:
         qs = qs.exclude(pk=exclude_id)
-    number = (number or "").strip()
-    if number:
-        for other in qs.select_related("supplier"):
-            if (other.number or "").strip().casefold() == number.casefold():
-                return other
-        return None
-    total = Decimal(str(total or 0))
-    if total <= 0:
-        return None
-    for other in qs.filter(number="").select_related("supplier").prefetch_related("lines"):
-        if other.total_cost == total:
-            return other
-    return None
+    key = number_key(number)
+    total = Decimal(str(total or 0)).quantize(Decimal("0.01"))
+    found = []
+    for other in qs.select_related("supplier").prefetch_related("lines"):
+        if _looks_same(key, total, number_key(other.number), other.total_cost):
+            found.append(other)
+    # Ближайшая по дате, при равенстве — введённая раньше.
+    found.sort(key=lambda o: (abs((o.received_on - received_on).days), o.pk))
+    return found[0] if found else None
 
 
 def duplicate_map() -> dict:
-    """{id накладной: id похожей на неё} для подсветки возможных дублей в списке."""
+    """{id накладной: id похожей на неё} для подсветки возможных дублей в списке
+    — тем же правилом, что `find_duplicate`."""
     from django.db.models import Sum
 
-    groups: dict = {}
+    by_supplier: dict = {}
     for row in Supply.objects.annotate(total=Sum("lines__cost")).values(
         "id", "supplier_id", "number", "received_on", "total"
     ):
-        number = (row["number"] or "").strip().casefold()
-        key = (
-            ("n", row["supplier_id"], number, row["received_on"]) if number
-            else ("s", row["supplier_id"], row["total"] or Decimal("0"), row["received_on"])
+        by_supplier.setdefault(row["supplier_id"], []).append(
+            (row["received_on"], row["id"], number_key(row["number"]),
+             (row["total"] or Decimal("0")).quantize(Decimal("0.01")))
         )
-        if key[0] == "s" and not key[2]:
-            continue
-        groups.setdefault(key, []).append(row["id"])
     out = {}
-    for ids in groups.values():
-        if len(ids) < 2:
-            continue
-        ids.sort()
-        for i in ids:
-            out[i] = next(j for j in ids if j != i)
+    for rows in by_supplier.values():
+        rows.sort()
+        for i, (day, pk, key, total) in enumerate(rows):
+            for day2, pk2, key2, total2 in rows[i + 1:]:
+                if (day2 - day).days > DUPLICATE_DAYS:
+                    break
+                if _looks_same(key, total, key2, total2):
+                    out.setdefault(pk, pk2)
+                    out.setdefault(pk2, pk)
     return out

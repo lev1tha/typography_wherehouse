@@ -197,16 +197,18 @@ class BulkPayTests(APITestCase):
         self.assertEqual(payment.amount, Decimal("400"))
         self.assertEqual(payment.paid_on, timezone.localdate() - timedelta(days=2))
 
-    def test_unpay_removes_payment_records(self):
-        """Откат означает «денег не брали» — оставшаяся запись показывала бы в
-        истории клиента платёж, которого нет."""
+    def test_unpay_reverses_payment_records(self):
+        """Откат — встречной записью сегодня, а не удалением (D-158): запись
+        оплаты остаётся своим днём (касса её тоже помнит), а сумма записей —
+        ноль, как и принятое после отката."""
         self._pay({"amount": "1000"})
         self.assertEqual(Payment.objects.filter(receipt=self.r1).count(), 1)
 
         self.client.force_authenticate(self.admin)
         resp = self.client.post(f"/api/sales/receipts/{self.r1.id}/unpay/")
         self.assertEqual(resp.status_code, 200, resp.data)
-        self.assertEqual(Payment.objects.filter(receipt=self.r1).count(), 0)
+        amounts = sorted(Payment.objects.filter(receipt=self.r1).values_list("amount", flat=True))
+        self.assertEqual(amounts, [Decimal("-1000"), Decimal("1000")])
         self.assertEqual(self._debt(self.r1), Decimal("1000"))
 
     def test_client_card_lists_payments(self):

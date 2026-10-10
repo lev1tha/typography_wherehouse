@@ -81,7 +81,8 @@ export default function FifoRecalcModal({ material, onClose, onDone }) {
           <p style={{ fontSize: 13 }}>
             {t("stock2.fifoDelta")}: <strong>{formatMoney(plan.cogs_delta, { fraction: 2 })}</strong>
           </p>
-          <table className="table">
+          <div className="table-scroll">
+          <table className="table plain-table">
             <thead>
               <tr>
                 <th>{t("lotFix.date")}</th>
@@ -101,6 +102,7 @@ export default function FifoRecalcModal({ material, onClose, onDone }) {
               ))}
             </tbody>
           </table>
+          </div>
         </>
       ))}
     </Modal>

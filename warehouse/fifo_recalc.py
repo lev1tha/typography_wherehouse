@@ -27,7 +27,8 @@ from django.utils import timezone
 
 from audit.models import AuditLog
 
-from .models import InventoryLog, Material, Roll
+from .models import InventoryLog, InventoryLogLot, Material, Roll
+from .rolls import record_lot_moves
 
 CENT = Decimal("0.01")
 ZERO = Decimal("0")
@@ -196,6 +197,16 @@ def apply(material: Material, since, *, user=None) -> dict:
         TransactionItemLot.objects.bulk_create(
             TransactionItemLot(item=item, roll_id=pk, area=a) for pk, a in plan["new_alloc"][item.pk]
         )
+        # Партии записи журнала этой продажи — туда же: по ним считается
+        # остаток партии на прошлую дату (склад на дату, снимок месяца).
+        sale_logs = list(
+            InventoryLog.objects.filter(
+                receipt_item=item, material=material, type=InventoryLog.Type.SALE,
+            ).order_by("id")
+        )
+        if sale_logs:
+            InventoryLogLot.objects.filter(log__in=sale_logs, roll__material=material).delete()
+            record_lot_moves(sale_logs[0], [(pk, -a) for pk, a in plan["new_alloc"][item.pk]])
     for row in plan["lots"]:
         lot = rolls[row["lot"].pk]
         lot.remaining_area = row["after"]

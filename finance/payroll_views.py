@@ -274,6 +274,8 @@ class RecurringRunView(APIView):
         result = recurring.generate(user=request.user)
         return Response({
             "created": len(result["created"]),
-            "skipped_closed": len(result["skipped"]),
+            "skipped_closed": sum(1 for s in result["skipped"] if s["reason"] == "closed"),
+            # Месяцы правила «Зарплаты», уже начисленные ведомостью (D-162).
+            "skipped_payroll": sum(1 for s in result["skipped"] if s["reason"] == "payroll"),
             "details": result["created"],
         })

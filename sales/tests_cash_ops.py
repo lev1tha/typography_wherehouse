@@ -102,7 +102,11 @@ class CancelOnePaymentTests(CashOpsBase):
         r.refresh_from_db()
         self.assertEqual(r.amount_paid, D("200"))
         self.assertEqual(r.payment_status, Receipt.PaymentStatus.PENDING)
-        self.assertEqual(Payment.objects.filter(receipt=r).count(), 1)
+        # Отменённая оплата остаётся своим днём, отмена — встречной записью с
+        # минусом (D-158): живых оплат одна, сумма записей = принятому после.
+        self.assertEqual(Payment.objects.filter(receipt=r).count(), 3)
+        self.assertEqual(_sum(Payment.objects.filter(receipt=r)), D("200"))
+        self.assertEqual(Payment.objects.get(receipt=r, amount__lt=0).amount, D("-300"))
         # Исходный приход остался в книге, встречная запись — рядом.
         self.assertEqual(_sum(CashEntry.objects.filter(receipt=r, article="SALE", kind="IN")), D("500"))
         back = CashEntry.objects.get(receipt=r, article=CashEntry.Article.UNPAY)

@@ -246,6 +246,8 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
         elif "spent_at" in attrs and inst.period == month_start(inst.spent_at):
             attrs["period"] = month_start(spent_at)
 
+        self._refuse_salary_over_payroll(attrs, inst, kind)
+
         if asset is not None:
             return self._validate_installment(attrs, inst, kind, asset, amount, spent_at)
 
@@ -294,6 +296,33 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
             })
         return attrs
 
+
+    @staticmethod
+    def _refuse_salary_over_payroll(attrs, inst, kind):
+        """Ручная трата «Зарплаты» за месяц, начисленный ведомостью, задвоила бы
+        расход в ОПиУ (RF-N2, D-162): месяц ведётся либо ведомостью, либо
+        тратой. Проверка — когда трата СТАНОВИТСЯ зарплатой этого месяца
+        (новая, смена вида или месяца); прочие правки старых записей проходят."""
+        from .payroll import month_has_accrual
+
+        if kind is None or kind.code != ExpenseKind.SALARY:
+            return
+        if inst is not None and hasattr(inst, "payroll_accrual"):
+            return
+        period = attrs.get("period") or (inst.period if inst else None)
+        if period is None:
+            return
+        if inst is not None and inst.kind_id == kind.id and inst.period == period:
+            return
+        if month_has_accrual(period):
+            raise serializers.ValidationError({
+                "period": (
+                    f"Зарплата за {period:%m.%Y} уже начислена по ведомости — вторая трата "
+                    f"«{kind.name}» задвоит расход в ОПиУ. Выданные деньги проводите в "
+                    "ведомости авансом или выплатой; если ведомость начислена по ошибке — "
+                    "снимите начисление и внесите трату."
+                )
+            })
 
     def _validate_installment(self, attrs, inst, kind, asset, amount, spent_at):
         """Платёж по активу: вид и срок — от карточки, сумма — в пределах цены."""

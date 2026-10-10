@@ -13,24 +13,37 @@ import { formatNumber } from "../utils/format.js";
 // дорезают. Раньше заказ был либо «Готовится», либо «Выдан» целиком, и отдать
 // часть значило соврать системе в одну из сторон.
 //
-// Здесь отмечают, сколько отдали СЕЙЧАС (по умолчанию — всё, что осталось), а
-// статус заказа сервер считает сам: всё выдано — «Выдан», хоть что-то — «Выдан
-// частично». Руками «частично» не ставится: статус не знает, что именно отдали.
+// Здесь отмечают, сколько отдали СЕЙЧАС. По умолчанию — ничего (перепроверка
+// 10.10, RU-N3): раньше окно предлагало выдать всё, и одно нажатие «Выдать»
+// отмечало выданным весь заказ; «Всё оставшееся» — кнопкой. У строки с
+// деталями выдача в ДЕТАЛЯХ (шт), а не в кв.м или пог.м: клиенту отдают
+// таблички, а не 0,3 кв.м. Статус заказа сервер считает сам: всё выдано —
+// «Выдан», хоть что-то — «Выдан частично».
 const round3 = (n) => Math.round(n * 1000) / 1000;
 const trim = (n) => String(+round3(n).toFixed(3));
+// Строка с деталями выдаётся штуками.
+const byParts = (it) => Number(it.parts_count) > 1;
 
 export default function IssueItemsModal({ receipt, onClose, onDone }) {
   const { t } = useTranslation();
   const { toast } = useUI();
   // Возвращённые строки выдавать нельзя — клиент их уже принёс обратно.
   const items = useMemo(() => (receipt.items || []).filter((i) => !i.is_returned), [receipt.items]);
-  const left = (it) => Math.max(0, round3(Number(it.quantity) - Number(it.issued_qty || 0)));
-  const [vals, setVals] = useState(() => Object.fromEntries(items.map((i) => [i.id, trim(left(i))])));
+  // Осталось выдать: у строки с деталями — деталей, у прочих — в единице строки.
+  const left = (it) => {
+    if (byParts(it)) {
+      if (Number(it.issued_qty || 0) >= Number(it.quantity)) return 0;
+      return Math.max(0, Number(it.parts_count) - Number(it.issued_parts || 0));
+    }
+    return Math.max(0, round3(Number(it.quantity) - Number(it.issued_qty || 0)));
+  };
+  const [vals, setVals] = useState(() => Object.fromEntries(items.map((i) => [i.id, ""])));
   const [busy, setBusy] = useState(false);
 
   const bad = (it) => {
     const v = vals[it.id];
     if (v === "" || v == null) return false;
+    if (byParts(it) && !Number.isInteger(Number(v))) return true;
     return !(Number(v) >= 0) || Number(v) > left(it) + 1e-9;
   };
   const picked = items.filter((i) => Number(vals[i.id]) > 0);
@@ -41,7 +54,9 @@ export default function IssueItemsModal({ receipt, onClose, onDone }) {
     setBusy(true);
     try {
       const { data } = await api.post(`/sales/receipts/${receipt.id}/issue/`, {
-        items: picked.map((i) => ({ id: i.id, quantity: Number(vals[i.id]) })),
+        items: picked.map((i) =>
+          byParts(i) ? { id: i.id, parts: Number(vals[i.id]) } : { id: i.id, quantity: Number(vals[i.id]) }
+        ),
       });
       toast(data.fulfillment_status === "ISSUED" ? t("issue.doneAll") : t("issue.done"));
       onDone?.(data);
@@ -88,7 +103,9 @@ export default function IssueItemsModal({ receipt, onClose, onDone }) {
 
       {items.map((it) => {
         const rest = left(it);
-        const unit = it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "";
+        const parts = byParts(it);
+        const unit = parts ? t("issue.partsUnit") : it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "";
+        const total = parts ? Number(it.parts_count) : it.quantity;
         const spec = itemSpecParts(it, t);
         return (
           <div
@@ -100,7 +117,7 @@ export default function IssueItemsModal({ receipt, onClose, onDone }) {
               {itemTitle(it, t)}
               {spec.length > 0 && <span className="rc-spec">{spec.join(" · ")}</span>}
               <span className="rc-spec">
-                {issuedLabel(it, t) || t("issue.ofTotal", { total: formatNumber(it.quantity, { max: 3 }), unit })}
+                {issuedLabel(it, t) || t("issue.ofTotal", { total: formatNumber(total, { max: 3 }), unit })}
                 {rest > 0 && ` · ${t("issue.left", { n: formatNumber(rest, { max: 3 }), unit })}`}
               </span>
             </span>
@@ -114,8 +131,9 @@ export default function IssueItemsModal({ receipt, onClose, onDone }) {
                   type="number"
                   min="0"
                   max={rest}
-                  step="any"
-                  inputMode="decimal"
+                  step={parts ? 1 : "any"}
+                  inputMode={parts ? "numeric" : "decimal"}
+                  placeholder="0"
                   aria-label={`${itemTitle(it, t)} — ${t("issue.now")}`}
                   value={vals[it.id] ?? ""}
                   onChange={(e) => setVals((v) => ({ ...v, [it.id]: e.target.value }))}

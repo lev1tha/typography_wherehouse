@@ -21,6 +21,7 @@ from decimal import Decimal
 
 from django.db.models import DecimalField, Sum
 from django.db.models.functions import Coalesce
+from django.utils import timezone
 
 from sales import reporting
 from sales.models import Receipt, TransactionItem
@@ -32,6 +33,7 @@ from .cashflow import cash_flow
 from .money import pct
 from .pnl import losses_qs, pnl
 from .scope import report_scope
+from .summary import supplier_debts
 
 
 def _line_sum(items) -> Decimal:
@@ -86,6 +88,14 @@ def headline(d_from=None, d_to=None) -> dict:
         (line for line in br["lines"] if line["key"] not in ("net_profit", "unexplained") and line["amount"]),
         key=lambda line: -abs(line["amount"]),
     )[:3]
+    # «Долг поставщикам» в сверке — ИЗМЕНЕНИЕ за период, а читался как остаток
+    # (RU-N6, D-166): рядом с ним — сам остаток долга на сегодня, тем же
+    # расчётом, что карточка «Долг поставщикам» в «Финансах».
+    reasons = [
+        {**line, "balance": supplier_debts()["total"], "balance_on": timezone.localdate()}
+        if line["key"] == "payables" else line
+        for line in reasons
+    ]
     return {
         "period": {"from": p["period"]["from"], "to": p["period"]["to"], "all_time": d_from is None},
         "previous": {"from": prev[0], "to": prev[1]} if prev else None,
@@ -193,6 +203,8 @@ def dashboard(d_from=None, d_to=None) -> dict:
     # погашений, и он идёт способом чека. Ровно так же разносит деньги
     # кассовая книга (`finance.cash.account_for`), поэтому «получено
     # наличными» здесь и наличный остаток кассы — об одном и том же.
+    from sales.sale_service import live_amounts
+
     received = defaultdict(lambda: Decimal("0"))
     debt = defaultdict(lambda: Decimal("0"))
     for r in paid.prefetch_related("payments"):
@@ -203,10 +215,14 @@ def dashboard(d_from=None, d_to=None) -> dict:
         cap = min(r.amount_paid, kept) if kept > 0 else Decimal("0")
         rows = []
         payments = sorted(r.payments.all(), key=lambda p: (p.paid_on, p.id))
-        first = r.amount_paid - sum((p.amount for p in payments), Decimal("0"))
+        # Отменённая оплата остаётся записью, отмена — встречной с минусом
+        # (D-158): считаем только живую часть каждой оплаты, иначе отменённая
+        # MBank «съела» бы потолок раньше живых наличных.
+        live = live_amounts(payments)
+        first = r.amount_paid - sum(live.values(), Decimal("0"))
         if first > 0:
             rows.append((r.payment_method, first))
-        rows += [(p.method, p.amount) for p in payments]
+        rows += [(p.method, live[p.pk]) for p in payments if live.get(p.pk, Decimal("0")) > 0]
         left = cap
         for method, amount in rows:
             if left <= 0:

@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+from decimal import Decimal
+
 from sales import reporting
 from sales.models import Receipt
 
@@ -15,14 +17,39 @@ from ..models import CashEntry, TaxRate
 from .bridge import bridge
 from .cashflow import cash_flow
 from .money import ZERO
-from .pnl import pnl, resolve
+from .pnl import cash_already_taxed, months_in, pnl, resolve, tax_basis_for, tax_rate_for
 
 CASH, BANK = CashEntry.Account.CASH, CashEntry.Account.BANK
 BASIS = {
     TaxRate.Basis.ACCRUAL: "по начислению (от выручки)",
     TaxRate.Basis.CASH: "по кассе (от полученных денег)",
-    "MIXED": "менялась внутри периода",
+    "MIXED": "смешанная основа",
 }
+
+
+def basis_label(p, d_from, d_to) -> tuple[str, Decimal]:
+    """Подпись основы налога и сколько денег не обложено повторно (D-163).
+
+    «Смешанная основа» — если в периоде месяцы с разной основой ИЛИ в месяцах
+    «по кассе» есть оплаты долгов, выручка которых уже обложена «по
+    начислению» раньше (основа менялась до периода). Месяцы — какая основа в
+    каком, чтобы бухгалтер не гадал."""
+    excluded = cash_already_taxed(d_from, d_to)
+    if p["tax_basis"] != "MIXED" and not excluded:
+        return BASIS.get(p["tax_basis"], p["tax_basis"]), excluded
+    parts: dict[str, list] = {}
+    for month in months_in(d_from, d_to):
+        if tax_rate_for(month):
+            parts.setdefault(tax_basis_for(month), []).append(month)
+    spans = []
+    for basis in (TaxRate.Basis.ACCRUAL, TaxRate.Basis.CASH):
+        months = parts.get(basis)
+        if months:
+            span = f"{months[0]:%m.%Y}" if len(months) == 1 else f"{months[0]:%m.%Y}–{months[-1]:%m.%Y}"
+            spans.append(f"{BASIS[basis].split(' (')[0]} — {span}")
+    if excluded and TaxRate.Basis.ACCRUAL not in parts:
+        spans.append("раньше — по начислению")
+    return f"{BASIS['MIXED']}: " + "; ".join(spans), excluded
 
 
 def period_rows(d_from, d_to) -> list[list]:
@@ -34,9 +61,17 @@ def period_rows(d_from, d_to) -> list[list]:
     cash_receipts = Receipt.objects.filter(payment_method="CASH")
     revenue_cash = reporting.revenue(d_from, d_to, receipts=cash_receipts)
 
+    basis, excluded = basis_label(p, d_from, d_to)
     rows: list[list] = [
         ["Отчёт за период", d_from, d_to],
-        ["Основа налога", BASIS.get(p["tax_basis"], p["tax_basis"])],
+        ["Основа налога", basis],
+    ]
+    if excluded:
+        rows.append([
+            "Не облагается по кассе: оплаты долгов, выручка которых уже обложена по начислению",
+            excluded,
+        ])
+    rows += [
         [],
         ["ОПиУ", "Сумма, сом"],
         ["Выручка", p["revenue"]],

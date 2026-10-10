@@ -462,58 +462,28 @@ def stock_value_total(upto=None) -> Decimal:
     прихода, — выручка 0, закуп 0, а склад 1 184 614. Цифра из другого времени
     стояла среди месячных и читалась как месячная.
 
-    Как считаем. Остаток на дату — это СУММА ДВИЖЕНИЙ ЖУРНАЛА по этот день
-    включительно, а не сегодняшний остаток минус движения после. Разница видна
-    там, где остаток журналом не объясняется: на проде такой хвост 0.084 кв.м,
-    и при счёте «назад от сегодня» он протягивался в любой прошлый месяц —
-    август показывал 48 сомов вместо нуля. Журнал же начинается 1 сентября, и
-    до него склада не было вовсе.
+    Как считаем — `warehouse.snapshots`, ОДНОЙ функцией с «Складом на дату» и
+    снимком закрытия (RS-N1, перепроверка 10.10). Остаток материала на дату —
+    СУММА ДВИЖЕНИЙ ЖУРНАЛА по этот день включительно (на проде хвост 0.084
+    кв.м без движений иначе протягивался в любой прошлый месяц). Остаток
+    партии на дату — сегодняшний плюс то, что ушло из неё после даты, по
+    движениям, привязанным к партии (`InventoryLogLot`). Раньше здесь брали
+    партии «с самых свежих» на их ПОЛНУЮ площадь: продали пять листов из
+    свежей партии — а склад на конец сентября оценивался так, будто продали из
+    старой (49 800 вместо 47 400).
 
-    Оцениваем по партиям, пришедшим не позже этой даты, и с самых СВЕЖИХ:
-    старые уходят первыми (FIFO), значит на полке остаются последние.
-
-    Это РЕКОНСТРУКЦИЯ, а не снимок: система не хранит, сколько оставалось в
-    каждой партии на каждый день. Порядок списания мог быть не строго FIFO
-    (инвентаризация и отход умеют брать конкретную партию), поэтому цифра
-    прошлого месяца — близкая, но не до копейки. «Сейчас» считается точно, по
-    остаткам самих партий.
+    Снимок на эту дату (STK-04) — замороженная цифра: снят при закрытии
+    месяца или командой, от поставок задним числом не плывёт.
     """
-    if upto is None or upto >= timezone.localdate():
-        return sum(
-            (m.stock_value for m in Material.objects.filter(quantity__gt=0).prefetch_related("rolls")),
-            Decimal("0"),
-        )
+    from .snapshots import stock_value_on
 
-    # Снимок на эту дату (STK-04, волна 2) — замороженная цифра: снят при
-    # закрытии месяца или командой, от поставок задним числом не плывёт.
+    today = timezone.localdate()
+    if upto is None or upto >= today:
+        return stock_value_on(today)
     snapshot = StockSnapshot.objects.filter(as_of=upto).values_list("value", flat=True).first()
     if snapshot is not None:
         return snapshot
-
-    moved = {
-        row["material"]: row["v"] or Decimal("0")
-        for row in InventoryLog.objects.filter(happened_at__date__lte=upto)
-        .values("material")
-        .annotate(v=models.Sum("quantity_changed"))
-    }
-    total = Decimal("0")
-    for material in Material.objects.prefetch_related("rolls"):
-        left = moved.get(material.id, Decimal("0"))
-        if left <= 0:
-            continue
-        lots = [
-            roll for roll in material.rolls.all()
-            if timezone.localtime(roll.received_at).date() <= upto
-        ]
-        for roll in sorted(lots, key=lambda r: r.received_at, reverse=True):
-            if left <= 0:
-                break
-            take = min(roll.initial_area, left)
-            total += roll.cost_of(take)
-            left -= take
-        # Остаток сверх партий — по последней закупочной, как и «сейчас».
-        total += left * (material.purchase_price or Decimal("0"))
-    return total.quantize(Decimal("0.01"))
+    return stock_value_on(upto)
 
 
 class MaterialPriceTier(models.Model):
@@ -967,6 +937,34 @@ class Roll(models.Model):
         return f"{label} — {self.material.name}: {self.remaining_area}/{self.initial_area} кв.м"
 
 
+class InventoryLogLot(models.Model):
+    """Сколько записи журнала склада ушло из партии (или вернулось в неё).
+
+    Остаток партии на прошлую дату (RS-N1/STK-04, перепроверка 10.10) — это
+    сегодняшний остаток плюс то, что ушло из неё ПОСЛЕ даты, минус то, что
+    вернулось. Запись журнала знала материал и количество, но не партии:
+    недостача, отход и продажа берут из нескольких партий сразу, а возврат
+    продажи стирает «из каких партий брали» (`TransactionItemLot`). Склад
+    на 30.09 реконструировали «с самых свежих» и получали 49 800 вместо
+    47 400. Эта строка живёт вместе с записью журнала: удалили запись (правка
+    состава чека, отмена) — ушла и она.
+
+    ``area`` со знаком, как `InventoryLog.quantity_changed`: минус — взято из
+    партии, плюс — вернулось в неё.
+    """
+
+    log = models.ForeignKey(InventoryLog, on_delete=models.CASCADE, related_name="lot_moves")
+    roll = models.ForeignKey(Roll, on_delete=models.CASCADE, related_name="log_moves")
+    area = models.DecimalField(_("кв.м (шт), со знаком"), max_digits=16, decimal_places=6)
+
+    class Meta:
+        verbose_name = _("партия движения склада")
+        verbose_name_plural = _("партии движений склада")
+
+    def __str__(self) -> str:
+        return f"{self.log_id}: партия {self.roll_id} {self.area}"
+
+
 class LotPlacement(models.Model):
     """Часть остатка партии, лежащая НЕ на площадке партии (STK-05, волна 2).
 
@@ -1219,11 +1217,31 @@ class Supply(models.Model):
         return (self.paid_amount or Decimal("0")) + self.payments_settled
 
     @property
+    def returned_after(self) -> Decimal:
+        """Возвращено поставщику ДАТОЙ ВОЗВРАТА (накладная закрытого месяца не
+        переписывалась, `SupplierReturn.in_place=False`), сом. Сумма накладной и
+        закуп её месяца прежние, а должны мы по ней меньше на это."""
+        return sum((r.amount for r in self.returns.all() if not r.in_place), Decimal("0"))
+
+    @property
+    def returned_after_foreign(self) -> Decimal:
+        """То же в валюте накладной."""
+        total = Decimal("0")
+        for r in self.returns.all():
+            if r.in_place:
+                continue
+            if r.amount_fc is not None:
+                total += r.amount_fc
+            elif self.rate:
+                total += (r.amount / self.rate).quantize(Decimal("0.01"))
+        return total
+
+    @property
     def debt(self) -> Decimal:
         """Сколько мы ещё должны поставщику по этой накладной, сом."""
         if self.is_opening:
             return Decimal("0")
-        owed = self.total_cost - self.paid_total
+        owed = self.total_cost - self.returned_after - self.paid_total
         return owed if owed > 0 else Decimal("0")
 
     @property
@@ -1232,7 +1250,7 @@ class Supply(models.Model):
         у поставщика, сом."""
         if self.is_opening:
             return Decimal("0")
-        extra = self.paid_total - self.total_cost
+        extra = self.paid_total - (self.total_cost - self.returned_after)
         return extra if extra > 0 else Decimal("0")
 
     @property
@@ -1254,7 +1272,10 @@ class Supply(models.Model):
         """Долг в валюте накладной; для сомовой накладной — None."""
         if not self.is_foreign or self.is_opening:
             return None
-        left = (self.total_foreign or Decimal("0")) - (self.paid_foreign or Decimal("0"))
+        left = (
+            (self.total_foreign or Decimal("0")) - self.returned_after_foreign
+            - (self.paid_foreign or Decimal("0"))
+        )
         # Долг в сомах закрыт — в валюте тоже ноль, даже если на копейки не сошлось.
         if self.debt <= 0:
             return Decimal("0")
@@ -1449,6 +1470,19 @@ class SupplierReturn(models.Model):
         _("возвращено деньгами, сом"), max_digits=14, decimal_places=2, default=Decimal("0"),
     )
     refund_account = models.CharField(max_length=10, blank=True)
+    # Как проведён возврат (G1-N2, перепроверка 10.10). True — накладная
+    # правится на месте: строка, закуп её месяца, приход в журнале (D-113).
+    # False — накладная из ЗАКРЫТОГО месяца: её не трогаем, а возврат идёт
+    # датой возврата, как строка с минусом в Excel: закуп этого месяца
+    # меньше на `amount`, склад уменьшается записью «Возврат поставщику», долг
+    # по накладной — на `amount` (`Supply.returned_after`).
+    in_place = models.BooleanField(_("накладная правится на месте"), default=True)
+    # Стоимость возвращённого в валюте накладной — у возврата датой возврата
+    # (у правки на месте валюта уже в строке накладной).
+    amount_fc = models.DecimalField(
+        _("стоимость возвращённого в валюте"), max_digits=14, decimal_places=2,
+        null=True, blank=True,
+    )
     note = models.CharField(_("примечание"), max_length=255, blank=True)
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
@@ -1472,6 +1506,10 @@ class SupplierReturnLine(models.Model):
     quantity = models.DecimalField(_("возвращено, в единицах строки"), max_digits=14, decimal_places=4)
     area = models.DecimalField(_("возвращено, кв.м или шт"), max_digits=14, decimal_places=4)
     cost = models.DecimalField(_("стоимость, сом"), max_digits=14, decimal_places=2)
+    # Стоимость в валюте накладной — у возврата датой возврата (D-171).
+    cost_fc = models.DecimalField(
+        _("стоимость в валюте"), max_digits=14, decimal_places=2, null=True, blank=True,
+    )
 
     class Meta:
         ordering = ["id"]

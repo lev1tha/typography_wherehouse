@@ -142,7 +142,8 @@ export default function RepriceModal({ types, onClose, onDone }) {
       {rows != null && (rows.length === 0 ? (
         <p className="muted">{t("stock2.repriceNothing")}</p>
       ) : (
-        <table className="table">
+        <div className="table-scroll">
+        <table className="table plain-table">
           <thead>
             <tr>
               <th />
@@ -173,6 +174,7 @@ export default function RepriceModal({ types, onClose, onDone }) {
             )}
           </tbody>
         </table>
+        </div>
       ))}
     </Modal>
   );

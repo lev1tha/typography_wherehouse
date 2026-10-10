@@ -29,6 +29,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from finance.periods import ensure_open
+from sales import idempotency
 from accounts.permissions import IsAdmin, IsAdminOrAccountantRead, IsNotAccountant
 from audit.models import AuditLog
 
@@ -648,17 +649,51 @@ class ClientViewSet(viewsets.ModelViewSet):
         method = request.data.get("method") or None
         offset_only = _truthy(request.data.get("offset_only"))
         use_change = _truthy(request.data.get("use_change")) or offset_only
-        if use_change and str(method or "").upper() == "WRITE_OFF":
+        writing_off = str(method or "").upper() == "WRITE_OFF"
+        if use_change and writing_off:
             return Response(
                 {"detail": "Списание долга и зачёт сдачи — разные операции."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Лишний ноль (RM-N5, D-164): «37 000 при долге 3 700» — сначала вопрос,
+        # как у оплаты одного заказа (`/pay/`). До ключа повтора: вопрос — не
+        # операция, подтверждение уйдёт новой попыткой.
+        try:
+            entered = parse_amount(request.data.get("amount"))
+        except PaymentRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        if (
+            entered is not None and not writing_off and not offset_only
+            and not _truthy(request.data.get("confirm_overpay"))
+        ):
+            owed = _chosen_debt(client, receipt_ids, opening_ids, use_change=use_change)
+            if owed > 0 and entered >= owed * OVERPAY_TIMES:
+                return _overpay_response(entered, owed)
+
+        try:
+            idem_key = idempotency.key_from(request)
+        except idempotency.InvalidKey as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         offset_pairs, via_change, via_advance = [], Decimal("0"), Decimal("0")
         opening_alloc = []
         note = str(request.data.get("note") or "").strip()[:255]
         try:
             with transaction.atomic():
+                if idem_key:
+                    _record, replay = idempotency.claim(
+                        request.user, f"pay-debt:{client.pk}", idem_key,
+                        response_status=status.HTTP_200_OK,
+                    )
+                    if replay:
+                        return _replay(
+                            "Эта выплата уже принята — повтор запроса ничего не провёл.",
+                            {
+                                "paid": None, "change": None, "debt": client_debt(Client.objects.get(pk=client.pk)),
+                                "offset": None, "allocations": [],
+                            },
+                        )
                 amount = parse_amount(request.data.get("amount"))
                 if use_change:
                     offset_pairs, via_change, via_advance = offset_debts(
@@ -773,11 +808,17 @@ class ClientViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get", "post"], url_path="advances", permission_classes=[IsAuthenticated])
     def advances(self, request, pk=None):
-        """GET — авансы клиента; POST {amount, method, paid_on?, note?} — принять аванс.
+        """GET — авансы клиента; POST {amount, method, paid_on?, note?,
+        offset_debt?} — принять аванс.
 
         Деньги принимает тот же круг, что и оплату долга (`CanTakeDebt`).
+        `offset_debt` (по умолчанию да, RM-N6/D-165): у клиента есть долг —
+        деньги сначала гасят его (входящий долг, потом заказы от старых), авансом
+        остаётся только остаток сверх долга. Повтор с тем же `Idempotency-Key`
+        ничего не проводит второй раз (CLI-14).
         """
-        from .advances import AdvanceRejected, accept_advance
+        from .advances import AdvanceRejected, accept_advance_or_offset
+        from .models import ClientAdvance
         from sales.sale_service import PaymentRejected, parse_paid_on
 
         client = get_object_or_404(Client, pk=pk)
@@ -789,22 +830,93 @@ class ClientViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         try:
+            idem_key = idempotency.key_from(request)
+        except idempotency.InvalidKey as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        raw_offset = request.data.get("offset_debt")
+        offset_debt = True if raw_offset in (None, "") else _truthy(raw_offset)
+        try:
             paid_on = parse_paid_on(request.data.get("paid_on"))
             if not request.user.is_admin_role and paid_on not in (None, timezone.localdate()):
                 raise AdvanceRejected("Принять аванс прошлой датой может только администратор.")
             ensure_open(paid_on or timezone.localdate(), "Принять аванс этой датой")
-            advance = accept_advance(
-                client, request.data.get("amount"), method=request.data.get("method") or "CASH",
-                paid_on=paid_on, note=request.data.get("note") or "", user=request.user,
-            )
-        except (AdvanceRejected, PaymentRejected, InvalidOperation, TypeError) as e:
+            with transaction.atomic():
+                if idem_key:
+                    record, replay = idempotency.claim(
+                        request.user, f"advance:{client.pk}", idem_key,
+                        response_status=status.HTTP_201_CREATED,
+                    )
+                    if replay:
+                        first = (
+                            ClientAdvance.objects.filter(
+                                client=client, created_by=request.user, is_opening=False,
+                                created_at__gte=record.created_at,
+                                created_at__lte=record.created_at + timedelta(minutes=1),
+                            ).order_by("id").first()
+                        )
+                        fresh = Client.objects.get(pk=client.pk)
+                        return _replay(
+                            "Этот аванс уже принят — повтор запроса ничего не провёл.",
+                            {
+                                **(advance_row(first) if first else {"id": None}),
+                                "advance": advance_row(first) if first else None,
+                                "debt": client_debt(fresh),
+                            },
+                            code=record.response_status,
+                        )
+                result = accept_advance_or_offset(
+                    client, request.data.get("amount"), method=request.data.get("method") or "CASH",
+                    paid_on=paid_on, note=str(request.data.get("note") or ""), user=request.user,
+                    offset_debt=offset_debt,
+                )
+        except (AdvanceRejected, PaymentRejected, OpeningRejected, InvalidOperation, TypeError) as e:
             detail = str(e) if not isinstance(e, (InvalidOperation, TypeError)) else "Некорректная сумма."
             return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
-        AuditLog.record(
-            request.user,
-            f"Принят аванс от клиента «{client.display_name}»: {advance.amount} сом ({advance.get_method_display()})",
+
+        advance, to_debt = result["advance"], result["to_debt"]
+        accepted = to_debt + (advance.amount if advance else Decimal("0"))
+        method_display = dict(ClientAdvance.Method.choices).get(
+            str(request.data.get("method") or "CASH").upper(), ""
         )
-        return Response(advance_row(advance), status=status.HTTP_201_CREATED)
+        what = f"Принят аванс от клиента «{client.display_name}»: {accepted} сом ({method_display})"
+        if to_debt:
+            numbers = (["входящий долг"] if result["opening"] else []) + [
+                f"№{r.order_number}" for r, _a in result["receipts"]
+            ]
+            what += f", из них в долг {to_debt} сом ({', '.join(numbers)}), авансом " + (
+                f"{advance.amount} сом" if advance else "0 сом"
+            )
+        AuditLog.record(request.user, what)
+
+        fresh = Client.objects.get(pk=client.pk)
+        payload = advance_row(advance) if advance else {
+            "id": None, "amount": Decimal("0"), "remaining": Decimal("0"),
+            "method": str(request.data.get("method") or "CASH").upper(),
+            "method_display": method_display, "paid_on": paid_on or timezone.localdate(),
+            "note": "", "reverted": False, "used": Decimal("0"),
+        }
+        return Response(
+            {
+                # Прежние поля аванса — как раньше (аванса нет — сумма 0).
+                **payload,
+                "accepted": accepted,
+                "to_debt": to_debt,
+                "advance": advance_row(advance) if advance else None,
+                "debt": client_debt(fresh),
+                "allocations": [
+                    *[
+                        {"opening": ob.pk, "order_number": None, "amount": a, "debt_after": ob.remaining}
+                        for ob, a in result["opening"]
+                    ],
+                    *[
+                        {"receipt": str(r.id), "order_number": r.order_number, "amount": a,
+                         "debt_after": r.debt}
+                        for r, a in result["receipts"]
+                    ],
+                ],
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(
         detail=True, methods=["post"], url_path=r"advances/(?P<advance_id>\d+)/revert",
@@ -831,6 +943,61 @@ class ClientViewSet(viewsets.ModelViewSet):
 
 def _truthy(value) -> bool:
     return value is True or str(value).lower() in ("1", "true", "yes", "on")
+
+
+# «Общая выплата» в N и больше раз выше выбранного долга — сначала вопрос
+# (RM-N5, D-164): лишний ноль (37 000 вместо 3 700) не уходит молча в сдачу.
+OVERPAY_TIMES = 3
+
+
+def _chosen_debt(client, receipt_ids, opening_ids, *, use_change=False) -> Decimal:
+    """Долг, который гасит общая выплата: выбранные заказы (или все с долгом) и
+    выбранный входящий долг (или весь — если списка нет). С зачётом сдачи и
+    аванса — за их вычетом: деньгами закрывается только остаток."""
+    from sales.models import Receipt
+
+    from .advances import advance_available
+
+    wanted = None if receipt_ids is None else {str(x) for x in receipt_ids}
+    owed = sum(
+        (r.debt for r in Receipt.objects.filter(client=client)
+         if r.debt > 0 and (wanted is None or str(r.id) in wanted)),
+        Decimal("0"),
+    )
+    if opening_ids is None or opening_ids:
+        qs = open_debts_qs().filter(client=client)
+        if opening_ids:
+            qs = qs.filter(pk__in=opening_ids)
+        owed += sum((ob.remaining for ob in qs), Decimal("0"))
+    if use_change:
+        from sales.sale_service import client_change_available
+
+        owed -= advance_available(client) + client_change_available(client)
+    return max(owed, Decimal("0"))
+
+
+def _overpay_response(amount: Decimal, owed: Decimal) -> Response:
+    """409 «точно столько?» — тот же ответ, что у `/pay/` (фронт его уже знает)."""
+    warning = {
+        "code": "overpay", "amount": amount, "debt": owed,
+        "message": (
+            f"Вы вводите {amount} сом при долге {owed} сом — больше в "
+            f"{(amount / owed).quantize(Decimal('0.1'))} раза. Излишек останется "
+            "сдачей клиенту. Всё верно?"
+        ),
+    }
+    return Response(
+        {"detail": warning["message"], "needs_confirmation": True, "warnings": [warning]},
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
+def _replay(detail: str, payload: dict, code=status.HTTP_200_OK) -> Response:
+    """Повтор с уже занятым `Idempotency-Key` (CLI-14): операция не проводится,
+    ответ — текущее состояние и пометка повтора (как у `/pay/`)."""
+    response = Response({**payload, "detail": detail, "idempotent_replay": True}, status=code)
+    response["Idempotent-Replay"] = "true"
+    return response
 
 
 def advance_row(a) -> dict:
@@ -932,7 +1099,9 @@ class OpeningBalanceViewSet(viewsets.ViewSet):
         return Response(_plain(plan))
 
     def create(self, request):
-        from .opening import OpeningRejected, balances_payload, post
+        """Провести вставку. Повтор с тем же `Idempotency-Key` (CLI-14) ничего не
+        проводит второй раз и отдаёт ту же партию: её имя выводится из ключа."""
+        from .opening import OpeningRejected, balances_payload, batch_for_key, post
         from .models import OpeningBalance
         from .statement import _plain
 
@@ -940,10 +1109,41 @@ class OpeningBalanceViewSet(viewsets.ViewSet):
         if as_of is None:
             return Response({"as_of": ["Укажите дату переезда."]}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            result = post(
-                str(request.data.get("text") or ""), as_of, user=request.user,
-                note=str(request.data.get("note") or ""),
-            )
+            idem_key = idempotency.key_from(request)
+        except idempotency.InvalidKey as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                batch = None
+                if idem_key:
+                    record, replay = idempotency.claim(
+                        request.user, "opening-balances", idem_key,
+                        response_status=status.HTTP_201_CREATED,
+                    )
+                    batch = batch_for_key(record)
+                    if replay:
+                        made = OpeningBalance.objects.filter(batch=batch)
+                        if not made.exists():
+                            return Response(
+                                {"detail": "Запрос с этим ключом уже выполнялся. Повторите "
+                                           "проведение с новым ключом."},
+                                status=status.HTTP_409_CONFLICT,
+                            )
+                        rows = balances_payload(made)
+                        return _replay(
+                            "Эти остатки уже проведены — повтор запроса ничего не провёл.",
+                            _plain({
+                                "batch": batch, "created_clients": None,
+                                "debt": sum((b.amount for b in made if b.kind == "DEBT"), Decimal("0")),
+                                "advance": sum((b.amount for b in made if b.kind == "ADVANCE"), Decimal("0")),
+                                "rows": rows,
+                            }),
+                            code=status.HTTP_201_CREATED,
+                        )
+                result = post(
+                    str(request.data.get("text") or ""), as_of, user=request.user,
+                    note=str(request.data.get("note") or ""), batch=batch,
+                )
         except OpeningRejected as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         AuditLog.record(

@@ -276,11 +276,13 @@ export default function StoreReceipts() {
           <div className="stat"><div className="label">{t("receipts.statTotal")}</div><div className="value">{stats.total}</div></div>
           <div className="stat"><div className="label">{t("receipts.statWorking")}</div><div className="value">{stats.working}</div></div>
           <div className="stat"><div className="label">{t("receipts.statReady")}</div><div className="value">{stats.ready}</div></div>
+          {/* Долг по ЗАКАЗАМ: входящие долги до переезда сюда не входят (RU-N5). */}
           <div className="stat">
-            <div className="label">{t("receipts.debt")}</div>
+            <div className="label">{t("receipts.debtOrders")}</div>
             <div className="value" style={Number(stats.debt) > 0 ? { color: "var(--danger-ink)" } : undefined}>
               {formatMoney(stats.debt)}
             </div>
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("receipts.debtOrdersNote")}</div>
           </div>
         </div>
       )}

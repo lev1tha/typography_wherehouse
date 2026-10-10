@@ -29,7 +29,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from . import auditing, cash
-from .models import ExpenseEntry, RecurringExpense
+from .models import ExpenseEntry, ExpenseKind, RecurringExpense
 from .periods import add_months, is_closed, month_start
 
 MAX_MONTHS_PER_RUN = 60
@@ -57,6 +57,8 @@ def due_months(rule: RecurringExpense, today: date) -> list[date]:
 @transaction.atomic
 def generate(today: date | None = None, user=None) -> dict:
     """Завести недостающие траты по всем действующим правилам."""
+    from .payroll import month_has_accrual
+
     today = today or timezone.localdate()
     created, skipped = [], []
     for rule in RecurringExpense.objects.filter(is_active=True).select_related("kind"):
@@ -69,6 +71,11 @@ def generate(today: date | None = None, user=None) -> dict:
             day = day_in(month, rule.day)
             if is_closed(day) or is_closed(month_start(month)):
                 skipped.append({"rule": rule.id, "month": month, "reason": "closed"})
+                continue
+            if rule.kind.code == ExpenseKind.SALARY and month_has_accrual(month):
+                # Старое правило «Зарплаты» (до D-162): месяц уже начислен
+                # ведомостью — вторая трата задвоила бы расход.
+                skipped.append({"rule": rule.id, "month": month, "reason": "payroll"})
                 continue
             entry = ExpenseEntry.objects.create(
                 kind=rule.kind, name=rule.name, amount=rule.amount, account=rule.account,

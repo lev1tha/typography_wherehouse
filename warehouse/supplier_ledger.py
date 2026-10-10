@@ -350,7 +350,9 @@ def supplier_balance(supplier: Supplier) -> dict:
     минус — деньги лежат у поставщика (аванс, переплата)."""
     supplies = list(supplier.supplies.all())
     real = [s for s in supplies if not s.is_opening]
-    invoices = sum((s.total_cost for s in real), ZERO)
+    # Возврат датой возврата (накладная закрытого месяца не переписана) —
+    # минус к накладным: как строка с минусом в Excel.
+    invoices = sum((s.total_cost - s.returned_after for s in real), ZERO)
     legacy_paid = sum((s.paid_amount or ZERO for s in real), ZERO)
     payments = list(supplier.payments.all())
     paid_rows = sum((p.supplier_effect for p in payments), ZERO)
@@ -392,7 +394,9 @@ def statement(supplier: Supplier, d_from=None, d_to=None) -> dict:
     for s in supplier.supplies.all():
         if s.is_opening:
             continue
-        returned = sum((r.amount for r in s.returns.all()), ZERO)
+        # Накладная — в ПЕРВОНАЧАЛЬНОЙ сумме: возврат на месте её уменьшил,
+        # возврат датой возврата (закрытый месяц) — нет.
+        returned = sum((r.amount for r in s.returns.all() if r.in_place), ZERO)
         label = f"Накладная {_label(s)}"
         if s.is_foreign:
             label += f" ({s.total_foreign} {s.currency} по {s.rate})"
