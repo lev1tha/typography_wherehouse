@@ -5,6 +5,8 @@
 from datetime import timedelta
 from decimal import Decimal as D
 
+from django.utils import timezone
+
 from audit.models import AuditLog
 from finance import cash
 from finance.models import CashEntry, ExpenseEntry, ExpenseKind, PeriodLock
@@ -412,8 +414,8 @@ class RefundExtrasTests(CashOpsBase):
         self.post(r, "undo-refund", {})
         sales = list(InventoryLog.objects.filter(receipt=r, type="SALE").order_by("id"))
         self.assertEqual(len(sales), 2)
-        self.assertEqual(sales[0].happened_at.date(), old)                  # исходная продажа
-        self.assertEqual(sales[1].happened_at.date(), self.today)           # повторное списание
+        self.assertEqual(timezone.localtime(sales[0].happened_at).date(), old)         # исходная продажа
+        self.assertEqual(timezone.localtime(sales[1].happened_at).date(), self.today)  # повторное списание
 
     def test_undo_refund_of_an_unpaid_order(self):
         r = self.sale(10, paid=D("0"), client=self.ivan)

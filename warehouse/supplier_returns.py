@@ -156,7 +156,7 @@ def return_to_supplier(supply: Supply, items, *, returned_on=None, mode="CREDIT"
             raise SupplyError("Одна и та же строка накладной указана дважды.")
         seen.add(line_id)
         try:
-            line = SupplyLine.objects.select_for_update().select_related("material", "roll").get(
+            line = SupplyLine.objects.select_for_update(of=("self",)).select_related("material", "roll").get(
                 pk=line_id, supply=supply,
             )
         except SupplyLine.DoesNotExist:

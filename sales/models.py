@@ -494,6 +494,10 @@ class TransactionItem(models.Model):
     class Meta:
         verbose_name = _("позиция чека")
         verbose_name_plural = _("позиции чека")
+        # Строки чека — в порядке, в котором их пробили. Без явного порядка
+        # Postgres отдаёт их как лягут (после правки строка «уезжает» вниз),
+        # и чек на экране и в печати перемешивается.
+        ordering = ["id"]
         indexes = [
             models.Index(fields=["returned_at"], name="item_returned_at_idx"),
             models.Index(fields=["receipt", "is_returned"], name="item_receipt_ret_idx"),
