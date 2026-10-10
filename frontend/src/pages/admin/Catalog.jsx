@@ -11,6 +11,13 @@ import Icon from "../../components/Icon.jsx";
 import Modal from "../../components/Modal.jsx";
 import ReceiveStockModal from "../../components/ReceiveStockModal.jsx";
 import LotsModal from "../../components/LotsModal.jsx";
+import MarkupHint from "../../components/MarkupHint.jsx";
+import RepriceModal from "../../components/RepriceModal.jsx";
+import ReorderPanel from "../../components/ReorderPanel.jsx";
+import TransferModal from "../../components/TransferModal.jsx";
+import PriceTiersEditor from "../../components/PriceTiersEditor.jsx";
+import { parseNumber } from "../../utils/pasteTable.js";
+import { downloadFile } from "../../utils/download.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import RefSelect from "../../components/RefSelect.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
@@ -59,7 +66,7 @@ function suggestedName(m, types) {
 //
 // Толщина и размеры листа МОГУТ быть не заданы (у крепежа нет ни того, ни
 // другого) — там пустое значение осмысленно и уходит как null.
-const NULLABLE_NUMS = ["thickness_mm", "sheet_width", "sheet_height"];
+const NULLABLE_NUMS = ["thickness_mm", "sheet_width", "sheet_height", "kim_percent", "min_stock"];
 // Цены и остатки null не принимают. Стёртая цена означает ноль — так её и
 // отправляем, вместо того чтобы молча оставить прежнюю.
 const ZERO_NUMS = [
@@ -70,6 +77,14 @@ const ZERO_NUMS = [
 
 function withNumbersFixed(material) {
   const out = { ...material };
+  // Наценка (STK-03): пусто — подсказки нет; «12,5» с запятой — как в Excel.
+  out.markup_percent = parseNumber(out.markup_percent);
+  // Ступени опта (CLI-02): пустые строки не шлём, числа — с запятой как в Excel.
+  if (Array.isArray(out.price_tiers)) {
+    out.price_tiers = out.price_tiers
+      .map((r) => ({ min_qty: parseNumber(r.min_qty), price: parseNumber(r.price) }))
+      .filter((r) => r.min_qty != null && r.price != null);
+  }
   for (const key of NULLABLE_NUMS) {
     if (out[key] === "" || out[key] === undefined) out[key] = null;
   }
@@ -184,6 +199,8 @@ export default function Catalog({ embedded = false }) {
   const [receiving, setReceiving] = useState(null);
   const [adjusting, setAdjusting] = useState(null);
   const [bulk, setBulk] = useState(false);
+  const [repricing, setRepricing] = useState(false);
+  const [transferring, setTransferring] = useState(null);
 
   function load() {
     // page_size: без него приезжает первая страница из 25 материалов, и
@@ -521,6 +538,16 @@ export default function Catalog({ embedded = false }) {
               ещё ничего не приходило. Красное — когда материал заканчивается,
               то есть остаток есть, но упал до порога; ноль — спокойный факт.
               Касса это уже различает, теперь и склад говорит так же. */}
+          {/* Где лежит (STK-05): остаток по площадкам хранения. */}
+          {m.by_site?.length > 0 && (
+            <div className="muted" style={{ fontSize: 12 }}>
+              {m.by_site.map((row, i) => (
+                <span key={row.site ?? "none"}>
+                  {i > 0 ? " · " : ""}{row.name || t("stock2.noSite")}: {qty(row.area)}
+                </span>
+              ))}
+            </div>
+          )}
           {Number(m.quantity) <= 0 ? (
             <span className="badge" style={{ marginLeft: 6 }}>
               {t("checkout.outOfStock")}
@@ -536,7 +563,15 @@ export default function Catalog({ embedded = false }) {
       ),
     },
     // Порог — тем же форматом, что остаток: «2», а не «2.00» рядом с «0 кв.м».
-    { key: "critical_balance", label: t("warehouse.critical"), render: (m) => qty(m.critical_balance) },
+    // Минимум — в единицах материала (STK-06): «5 лист.», а не «14,88 кв.м».
+    {
+      key: "critical_balance",
+      label: t("warehouse.critical"),
+      render: (m) =>
+        m.stock_units && m.stock_units.kind !== "unit"
+          ? `${qty(m.stock_units.min)} ${m.stock_units.label}`
+          : qty(m.critical_balance),
+    },
     // У закупочной цены единицы не было ВООБЩЕ: «980.00 сом» — за лист или за
     // квадрат? Рядом стояла розничная «1470 сом/кв.м», и две цифры выглядели
     // сравнимыми, хотя без единицы сравнивать их нельзя. Теперь единица есть у
@@ -577,6 +612,12 @@ export default function Catalog({ embedded = false }) {
             <span className="muted">
               {t("warehouse.perUnitShort", { unit: t("unit.METER") })}
             </span>
+            {/* Вторая цена рулона — за кв.м изделия (CALC-10). */}
+            {Number(m.price_per_sqm) > 0 && (
+              <div className="muted" style={{ fontSize: 12 }}>
+                {ceilSom(m.price_per_sqm)} {t("warehouse.perUnitShort", { unit: t("unit.SQM") })}
+              </div>
+            )}
           </>
         ) : (
           <PriceCell
@@ -586,6 +627,27 @@ export default function Catalog({ embedded = false }) {
             t={t}
           />
         ),
+    },
+    // Маржа текущей цены от закупа последней партии (STK-03). Красным — цена
+    // ниже закупа: пришла партия дороже, а карточка продаёт по-старому.
+    {
+      key: "margin",
+      label: t("stock2.margin"),
+      render: (m) =>
+        m.pricing ? (
+          <>
+            {m.pricing.margin_percent != null && (
+              <span style={Number(m.pricing.margin_percent) < 0 ? { color: "var(--danger-ink)" } : undefined}>
+                {formatNumber(m.pricing.margin_percent, { max: 1 })}%
+              </span>
+            )}
+            {m.pricing.below_cost?.length > 0 && (
+              <span className="badge red" style={{ marginLeft: 6 }} title={t("stock2.belowCostHint")}>
+                {t("stock2.belowCostBadge")}
+              </span>
+            )}
+          </>
+        ) : null,
     },
     {
       key: "actions",
@@ -644,6 +706,11 @@ export default function Catalog({ embedded = false }) {
               <Icon name="inbox" size={14} /> {t("lotFix.lots")}
             </button>
           )}
+          {Number(m.quantity) > 0 && (
+            <button className="secondary row-btn" onClick={() => setTransferring(m)}>
+              {t("stock2.transfer")}
+            </button>
+          )}
           <button className="secondary row-btn" onClick={() => setEditing(m)}>
             <Icon name="pencil" size={14} /> {t("common.edit")}
           </button>
@@ -666,6 +733,10 @@ export default function Catalog({ embedded = false }) {
           {/* Пачкой — основной способ завести каталог: полсотни материалов
               модалкой по одной не заводят. */}
           <button className="secondary" onClick={() => setBulk(true)}>{t("grid.open")}</button>
+          {/* Переоценка «× %» по отбору (XL-05/CALC-09) — вместо десятков правок. */}
+          {isAdmin && (
+            <button className="secondary" onClick={() => setRepricing(true)}>{t("stock2.repriceOpen")}</button>
+          )}
           <button onClick={() => setEditing({ ...EMPTY })}>+ {t("warehouse.newMaterial")}</button>
         </div>
       </div>
@@ -697,6 +768,18 @@ export default function Catalog({ embedded = false }) {
             ))}
           </select>
         )}
+        {/* Каталог с остатками и ценами — в Excel, с теми же фильтрами (XL-06). */}
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => downloadFile("/warehouse/materials/", {
+            export: "csv", ordering,
+            ...(search ? { search } : {}), ...(typeId ? { type: typeId } : {}),
+            ...(color ? { color } : {}), ...(form ? { form } : {}),
+          }, "katalog.csv")}
+        >
+          {t("stock2.toExcel")}
+        </button>
         <select value={ordering} onChange={(e) => setOrdering(e.target.value)}>
           <option value="name">{t("common.name")}</option>
           <option value="quantity">{t("common.quantity")}</option>
@@ -705,10 +788,15 @@ export default function Catalog({ embedded = false }) {
         </select>
       </div>
 
+      {/* «К заказу» (STK-06): что упало до минимума и сколько докупить. */}
+      <ReorderPanel reloadKey={materials} />
+
       <DataTable
         columns={columns}
         rows={materials}
-        rowClass={(m) => (Number(m.quantity) > 0 && m.is_below_critical ? "warn" : "")}
+        rowClass={(m) => (
+          (Number(m.quantity) > 0 && m.is_below_critical) || m.pricing?.below_cost?.length ? "warn" : ""
+        )}
       />
 
       {gallery && (
@@ -765,6 +853,22 @@ export default function Catalog({ embedded = false }) {
             load();
           }}
         />
+      )}
+
+      {transferring && (
+        <TransferModal
+          material={transferring}
+          sites={sites}
+          onClose={() => setTransferring(null)}
+          onDone={() => {
+            loadRolls();
+            load();
+          }}
+        />
+      )}
+
+      {repricing && (
+        <RepriceModal types={types} onClose={() => setRepricing(false)} onDone={load} />
       )}
 
       {bulk && (
@@ -1014,9 +1118,16 @@ export default function Catalog({ embedded = false }) {
                       {t("warehouse.rollWidthRequired")}
                     </p>
                   )}
+                  {/* Вторая цена рулона — за кв.м ИЗДЕЛИЯ (CALC-10): баннер
+                      1×2 м по 220 = 440, со склада — вся ширина × длина.
+                      Необязательна: пусто — рулон продаётся только метрами. */}
                   <div className="row">
+                    <NumField grow label={t("rollArea.catalogField")} value={editing.price_per_sqm} onChange={setF("price_per_sqm")} />
                     <NumField grow label={t("pricing.cutRatePm")} value={editing.cut_rate_per_pm} onChange={setF("cut_rate_per_pm")} />
                   </div>
+                  <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
+                    {t("rollArea.catalogHint")}
+                  </p>
                 </>
               ) : (
                 <>
@@ -1047,7 +1158,11 @@ export default function Catalog({ embedded = false }) {
                   )}
                   <div className="row">
                     <NumField grow label={t("pricing.cutRatePm")} value={editing.cut_rate_per_pm} onChange={setF("cut_rate_per_pm")} />
+                    {/* КИМ раскроя (STK-07): кусок списывается площадью ÷ КИМ,
+                        обрезки — в себестоимость заказа. Пусто — как раньше. */}
+                    <NumField grow label={t("stock2.kim")} value={editing.kim_percent} onChange={setF("kim_percent")} />
                   </div>
+                  <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("stock2.kimHint")}</p>
                 </>
               )}
               {/* Подсказка про пересчёт по площади ЛИСТА — только у листа.
@@ -1067,7 +1182,15 @@ export default function Catalog({ embedded = false }) {
                   {t("warehouse.sheetSizeRequired")}
                 </p>
               )}
-              <NumField label={`${t("warehouse.critical")} (кв.м)`} value={editing.critical_balance} onChange={setF("critical_balance")} />
+              {/* Минимум — листами у листа и метрами у рулона (STK-06), а не
+                  в кв.м: «5 листов» раньше пересчитывали в 14,88 в уме. */}
+              <NumField
+                label={t("stock2.minStock", { unit: matForm === "ROLL" ? t("unit.METER") : sheetArea > 0 ? t("warehouse.unitSheet") : t("unit.SQM") })}
+                value={editing.min_stock}
+                placeholder={editing.stock_units ? qty(editing.stock_units.min) : ""}
+                onChange={setF("min_stock")}
+              />
+              <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("stock2.minStockHint")}</p>
 
               {/* Опт рулону не нужен: его единица продажи — погонный метр, а
                   «оптом от 5 рулонов» никто не считает. Сама цена за лист
@@ -1081,10 +1204,17 @@ export default function Catalog({ embedded = false }) {
                 <NumField grow label={t("warehouse.wholesaleMin", { unit: wholeUnit })} value={editing.wholesale_min_qty} onChange={setF("wholesale_min_qty")} />
               </div>
               <p className="muted" style={{ fontSize: 12 }}>{t("warehouse.wholesaleHint")}</p>
+              <PriceTiersEditor
+                tiers={editing.price_tiers}
+                unit={wholeUnit}
+                onChange={(price_tiers) => setEditing({ ...editing, price_tiers })}
+              />
                 </>
               )}
             </>
           )}
+
+          <MarkupHint editing={editing} setEditing={setEditing} />
 
           {editing.id != null && (
             <p className="muted" style={{ fontSize: 12, marginTop: 14 }}>

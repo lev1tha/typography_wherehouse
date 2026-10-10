@@ -3,10 +3,13 @@ import io
 from decimal import Decimal
 
 import qrcode
+from django.db.models import Sum
 from rest_framework import serializers
 
+from accounts.models import Employee
 from clients.models import Client
 from services.models import PrintingService
+from services.pricing import resolve_rate
 from warehouse.models import Material, Roll
 
 from .models import Receipt, TransactionItem
@@ -22,6 +25,11 @@ def _qr_data_uri(text: str) -> str:
     img.save(buf, format="PNG")
     encoded = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+def sells_roll_by_area(material) -> bool:
+    """Рулон с ценой за кв.м изделия (CALC-10): второй способ продажи — SQM."""
+    return material is not None and material.sells_roll_by_area
 
 
 def _is_admin(context) -> bool:
@@ -45,7 +53,14 @@ class TransactionItemSerializer(serializers.ModelSerializer):
     roll_label = serializers.SerializerMethodField()
     # Обрезок: сколько списанного до клиента не дошло и во сколько это обошлось.
     offcut_area = serializers.DecimalField(max_digits=14, decimal_places=4, read_only=True)
-    offcut_cost = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    # Во сколько обрезок обошёлся — закупочная цифра, мастеру её не показываем
+    # (STAFF-07), как и себестоимость строки.
+    offcut_cost = serializers.SerializerMethodField()
+    # Материал, под который посчитана работа, и станок — для «Наряда мастеру»,
+    # печати и подписей в чеке (XL-11).
+    work_material_name = serializers.CharField(source="work_material.name", read_only=True, default=None)
+    machine = serializers.CharField(source="service.machine", read_only=True, default=None)
+    machine_display = serializers.CharField(source="service.get_machine_display", read_only=True, default=None)
     # Единица измерения строки — для печатных форм: в накладной и счёте колонка
     # «Ед.» обязательна, а вывести её на фронте не из чего: у резки количество
     # в погонных метрах, у листа — в штуках, у куска — в квадратных.
@@ -59,6 +74,7 @@ class TransactionItemSerializer(serializers.ModelSerializer):
     # (точнее — стоимости строки, и у возвращённой тоже).
     catalog_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     sold_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    executor_name = serializers.CharField(source="executor.full_name", read_only=True, default=None)
 
     class Meta:
         model = TransactionItem
@@ -76,6 +92,8 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             "roll",
             "roll_label",
             "used_width",
+            # Рулон по площади изделия (CALC-10): размеры изделия — width×length.
+            "roll_area",
             "offcut_area",
             "offcut_cost",
             "unit_label",
@@ -83,10 +101,26 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             "sale_mode",
             "width",
             "length",
+            # Деталей, проходы и коэффициент толщины (CALC-02/-04), материал
+            # работы, станок и выданное количество (XL-11, G1-N4).
+            "parts_count",
+            "passes",
+            "thickness_coef",
+            "work_material",
+            "work_material_name",
+            "machine",
+            "machine_display",
+            "issued_qty",
+            "price_is_manual",
+            # Договорная цена клиента (волна 2): скидка к строке не применялась.
+            "client_price",
             # Материал клиента и комментарий к работе: по ним строку без
             # материала узнают в чеке («Резка · акрил 3 мм клиента»).
             "own_material",
             "note",
+            # Исполнитель работы (волна 2): id сотрудника и его ФИО.
+            "executor",
+            "executor_name",
             "is_returned",
             # Правила прайса (2026-10-10): цена до правил, минимум, проценты.
             "catalog_price",
@@ -100,6 +134,9 @@ class TransactionItemSerializer(serializers.ModelSerializer):
 
     def get_cost_total(self, obj):
         return obj.cost_total if _is_admin(self.context) else None
+
+    def get_offcut_cost(self, obj):
+        return obj.offcut_cost if _is_admin(self.context) else None
 
     def get_roll_label(self, obj):
         """Человеческое имя партии: маркировка, если её писали, иначе номер."""
@@ -167,6 +204,14 @@ class ReceiptSerializer(serializers.ModelSerializer):
     payments = serializers.SerializerMethodField()
     # Сумма строк по каталогу, до правил прайса — для «каталог → итог».
     catalog_total = serializers.SerializerMethodField()
+    # Гарантия/переделка: исходный заказ, во сколько переделки обошлись и маржа
+    # исходного заказа после них — деньги, только тем, кто видит деньги.
+    warranty_of_number = serializers.IntegerField(source="warranty_of.order_number", read_only=True, default=None)
+    warranty_cost = serializers.SerializerMethodField()
+    margin_net = serializers.SerializerMethodField()
+    # Часть `change_applied`, закрытая АВАНСОМ клиента (волна 2): в окне чека
+    # «зачтено сдачей» и «из аванса» — разными строками.
+    advance_applied = serializers.SerializerMethodField()
 
     class Meta:
         model = Receipt
@@ -191,8 +236,10 @@ class ReceiptSerializer(serializers.ModelSerializer):
             "debt",
             # Сдача, которую клиенту ещё не отдали — долг цеха перед ним.
             "change_due",
-            # Часть заказа, закрытая сдачей с прошлых заказов этого клиента.
+            # Часть заказа, закрытая сдачей с прошлых заказов этого клиента
+            # (вместе с авансом; аванс отдельно — `advance_applied`).
             "change_applied",
+            "advance_applied",
             "payment_reference",
             "payment_url",
             "payment_qr",
@@ -203,6 +250,14 @@ class ReceiptSerializer(serializers.ModelSerializer):
             "urgency_percent",
             "discount_percent",
             "catalog_total",
+            "is_warranty",
+            "warranty_of",
+            "warranty_of_number",
+            "warranty_reason",
+            "warranty_culprit",
+            "warranty_cost",
+            "margin_net",
+            "buyer_name",
             "items",
             "payments",
             "created_at",
@@ -224,6 +279,24 @@ class ReceiptSerializer(serializers.ModelSerializer):
     def get_margin(self, obj):
         return obj.margin if _is_admin(self.context) else None
 
+    def get_warranty_cost(self, obj):
+        return obj.warranty_cost if _is_admin(self.context) else None
+
+    def get_margin_net(self, obj):
+        return obj.margin_net if _is_admin(self.context) else None
+
+    def get_advance_applied(self, obj):
+        annotated = obj.__dict__.get("_advance_applied")
+        if annotated is not None:
+            return annotated
+        if not obj.client_id or obj.change_applied <= 0:
+            return Decimal("0")
+        from clients.models import BalanceOffset
+
+        return BalanceOffset.objects.filter(
+            receipt=obj, source=BalanceOffset.Source.ADVANCE,
+        ).aggregate(v=Sum("amount"))["v"] or Decimal("0")
+
     def get_payments(self, obj):
         """Принятые оплаты по заказу: когда и сколько. Дата может быть задним
         числом — общая выплата по клиенту проводится позже, чем берут деньги."""
@@ -233,6 +306,10 @@ class ReceiptSerializer(serializers.ModelSerializer):
                 "amount": p.amount,
                 "method": p.method,
                 "paid_on": p.paid_on,
+                # Кто принял оплату и с каким примечанием: складовщик теперь
+                # тоже принимает долг, админ видит это и может отменить.
+                "note": p.note,
+                "created_by_name": p.created_by.username if p.created_by_id else None,
             }
             for p in obj.payments.all()
         ]
@@ -267,12 +344,18 @@ class SaleItemInputSerializer(serializers.Serializer):
         choices=["PIECE", "SQM", "METER"], required=False, allow_null=True
     )
     # Cutting / area-service: dimensions (width × length = area).
+    # Размеры детали — три знака после запятой (0.455 м): два знака округляли
+    # деталь до сантиметра и меняли цену (CALC-06 / XL-08).
     width = serializers.DecimalField(
-        max_digits=8, decimal_places=2, min_value=0, required=False, allow_null=True
+        max_digits=8, decimal_places=3, min_value=0, required=False, allow_null=True
     )
     length = serializers.DecimalField(
-        max_digits=8, decimal_places=2, min_value=0, required=False, allow_null=True
+        max_digits=8, decimal_places=3, min_value=0, required=False, allow_null=True
     )
+    # «Деталей, шт»: площадь и длина реза умножаются на число одинаковых деталей.
+    parts_count = serializers.IntegerField(min_value=1, max_value=1000, required=False, default=1)
+    # Проходов гравировки/реза: ставка за кв.м умножается на их число.
+    passes = serializers.IntegerField(min_value=1, max_value=20, required=False, default=1)
     # Cutting only: length of the cut in running metres (drives the work price).
     running_meters = serializers.DecimalField(
         max_digits=10, decimal_places=2, min_value=0, required=False, allow_null=True
@@ -288,6 +371,92 @@ class SaleItemInputSerializer(serializers.Serializer):
     # резки/гравировки × сколько отрезано, что резали — в `note`.
     own_material = serializers.BooleanField(required=False, default=False)
     note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    # Исполнитель работы (волна 2, STAFF-02): сотрудник цеха. Не выбран —
+    # выработку разбирает ведомость по-старому (учётка кассира, станок).
+    executor = serializers.PrimaryKeyRelatedField(
+        queryset=Employee.objects.all(), required=False, allow_null=True
+    )
+
+    def validate_executor(self, value):
+        if value is not None and not value.is_active:
+            raise serializers.ValidationError("Сотрудник отключён — выберите работающего.")
+        return value
+
+    def to_internal_value(self, data):
+        # Неизвестные поля позиции — отказ, а не молчание: `materials=[…]` или
+        # `price_per_item` раньше уходили в никуда, и заказ оформлялся не так,
+        # как его набрали (G4-N2, CALC-07).
+        if isinstance(data, dict):
+            unknown = sorted(set(data) - set(self.fields))
+            if unknown:
+                raise serializers.ValidationError({
+                    key: "Неизвестное поле позиции: оно не учитывается при расчёте."
+                    for key in unknown
+                })
+        return super().to_internal_value(data)
+
+    def _reject_unused(self, attrs, service, material):
+        """Поля, которые для этой позиции ничего не значат, — отказ с причиной.
+
+        Раньше они принимались и молча терялись: `quantity=12` у реза с
+        размерами давал цену одной детали, ставка у монтажа — каталожную цену,
+        размеры у штучной услуги — просто пропадали. Кассир был уверен, что
+        заказ собран так, как он ввёл, а он был собран иначе.
+        """
+        def given(key):
+            return attrs.get(key) not in (None, "", False)
+
+        is_material = attrs["type"] == TransactionItem.Type.MATERIAL
+        area_service = service is not None and service.uses_area
+        # Рулон по площади изделия (CALC-10): размеры — ширина и длина ИЗДЕЛИЯ,
+        # площадь из них считает сервер.
+        roll_area = is_material and attrs.get("mode") == TransactionItem.SaleMode.SQM and sells_roll_by_area(material)
+        errors = {}
+        if is_material:
+            for key in ("width", "length", "running_meters", "cut_rate", "own_material"):
+                if roll_area and key in ("width", "length"):
+                    continue
+                if given(key):
+                    errors[key] = "У материала этого поля нет — размеры куска задаёт услуга реза."
+            if roll_area:
+                if given("used_width"):
+                    errors["used_width"] = (
+                        "У изделия из рулона по кв.м ширина изделия — поле width; used_width — "
+                        "только у продажи метрами."
+                    )
+                if given("width") and given("length") and Decimal(str(attrs.get("quantity") or 0)) > 0:
+                    errors["quantity"] = (
+                        "Площадь изделия считается из ширины и длины (width × length) — "
+                        "количество не указывается."
+                    )
+            if attrs.get("parts_count", 1) != 1 or attrs.get("passes", 1) != 1:
+                errors["parts_count"] = "«Деталей» и «проходы» бывают только у реза и гравировки."
+            if given("executor"):
+                errors["executor"] = "Исполнитель бывает только у работы, не у материала."
+        else:
+            if given("used_width"):
+                errors["used_width"] = "Ширина изделия — только у рулона, проданного метрами."
+            if not area_service and not (service and service.uses_free_measure):
+                for key in ("width", "length", "running_meters"):
+                    if given(key):
+                        errors[key] = "У этой услуги размеров нет: цена за штуку или фикс."
+            if area_service:
+                if attrs.get("parts_count", 1) > 1 and not (given("width") and given("length")):
+                    errors["parts_count"] = "Несколько деталей считаются от размеров: укажите ширину и длину."
+                if given("width") and given("length") and Decimal(str(attrs.get("quantity") or 0)) > 0:
+                    errors["quantity"] = (
+                        "При размерах количество не используется — число одинаковых "
+                        "деталей задаёт поле parts_count."
+                    )
+                if given("running_meters") and not service.uses_running_meter:
+                    errors["running_meters"] = "Длина реза бывает только у резки."
+            else:
+                if attrs.get("parts_count", 1) != 1 or attrs.get("passes", 1) != 1:
+                    errors["parts_count"] = "«Деталей» и «проходы» бывают только у реза и гравировки."
+            if given("mode") and not (service and service.uses_free_measure):
+                errors["mode"] = "Мерка (mode) задаётся только у отходов."
+        if errors:
+            raise serializers.ValidationError(errors)
 
     def validate(self, attrs):
         if attrs["type"] == TransactionItem.Type.MATERIAL and not attrs.get("material"):
@@ -298,6 +467,7 @@ class SaleItemInputSerializer(serializers.Serializer):
         material = attrs.get("material")
         mode = attrs.get("mode")
         service = attrs.get("service")
+        self._reject_unused(attrs, service, material)
 
         # Материал клиента — только у площадной услуги (резка, гравировка) и
         # БЕЗ материала со склада: две правды об одном куске («чужой» и «наш»)
@@ -343,10 +513,29 @@ class SaleItemInputSerializer(serializers.Serializer):
                     f"«{material.name}»: укажите способ продажи — лист (PIECE), "
                     f"площадь (SQM) или длина (METER)."
                 )
-            # Рулон продаётся ТОЛЬКО метрами: у него нет ни цены за кв.м, ни цены
-            # за штуку, и площадь молча продала бы его за 0 сом (так и было при
+            # Рулон продаётся метрами: у него нет цены за штуку, и площадь без
+            # цены за кв.м молча продала бы его за 0 сом (так и было при
             # «повторить заказ»: 1 пог.м превращался в 1 кв.м по нулевой цене).
-            if material.sells_by_metre and mode != TransactionItem.SaleMode.METER:
+            #
+            # CALC-10 (D-140): если у рулона задана цена за кв.м, второй способ —
+            # площадь ИЗДЕЛИЯ: ширина × длина × цена за кв.м (баннер 1×2 по 220 =
+            # 440), а со склада — вся ширина × длина. Размеры изделия
+            # обязательны: без длины не узнать, сколько рулона отрезали.
+            if material.sells_by_metre and mode == TransactionItem.SaleMode.SQM and sells_roll_by_area(material):
+                width, length = attrs.get("width"), attrs.get("length")
+                if not (width and length and width > 0 and length > 0):
+                    raise serializers.ValidationError(
+                        f"«{material.name}» по кв.м изделия: укажите ширину и длину изделия, м "
+                        f"(width и length) — по длине со склада уходит рулон."
+                    )
+                roll = attrs.get("roll")
+                full = roll.width if roll is not None and roll.width else material.roll_width
+                if full and width > full:
+                    raise serializers.ValidationError(
+                        f"«{material.name}»: изделие {width} м шире рулона {full} м — так не "
+                        f"отрезать. Продайте полосы метрами или выберите рулон шире."
+                    )
+            elif material.sells_by_metre and mode != TransactionItem.SaleMode.METER:
                 raise serializers.ValidationError(
                     f"«{material.name}» продаётся погонными метрами: укажите длину "
                     f"(режим METER), а не площадь или штуки."
@@ -385,6 +574,13 @@ class SaleItemInputSerializer(serializers.Serializer):
         # спокойно продавала и списывала, оставляя на складе дробный хвост.
         # Килограммы, литры и метры дробными быть могут — их не трогаем.
         qty = Decimal(str(attrs.get("quantity") or 0))
+        if (
+            attrs["type"] == TransactionItem.Type.MATERIAL
+            and mode == TransactionItem.SaleMode.SQM
+            and sells_roll_by_area(material)
+        ):
+            # Рулон по кв.м изделия: количество строки — площадь изделия.
+            qty = _area(attrs["width"], attrs["length"])
         piecewise = material is not None and (
             attrs.get("mode") == TransactionItem.SaleMode.PIECE
             or material.unit == Material.Unit.PIECE
@@ -484,9 +680,9 @@ class SaleItemInputSerializer(serializers.Serializer):
                 )
             if attrs.get("cut_rate") is None:
                 if service.uses_running_meter:
-                    rate = service.rate_per_pm or (
-                        material.cut_rate_per_pm if material else Decimal("0")
-                    )
+                    # Ставка — матрица / станок / материал (+ коэффициент толщины):
+                    # одна функция с кассой (`services.pricing.resolve_rate`).
+                    rate = resolve_rate(service, material).rate
                     if attrs.get("own_material"):
                         # Чужой материал: ставки материала нет по определению,
                         # цену называет тот, кто оформляет, — и складовщик тоже.
@@ -506,7 +702,7 @@ class SaleItemInputSerializer(serializers.Serializer):
                             f"Ставка резки не задана {where} — работа ушла бы в чек "
                             f"бесплатно. {fix}"
                         )
-                elif not service.rate_flat or service.rate_flat <= 0:
+                elif resolve_rate(service, material).rate <= 0:
                     fix = (
                         "впишите цену за кв.м в окне или задайте её в «Ценах и услугах»"
                         if service.staff_sets_rate
@@ -531,14 +727,14 @@ class SaleItemInputSerializer(serializers.Serializer):
         elif service is not None and service.uses_pieces:
             # Наружная установка: цена только за букву из каталога (ручной
             # цены у этой строки нет), нулевая — это пустой справочник.
-            if not service.rate_per_piece or service.rate_per_piece <= 0:
+            if attrs.get("cut_rate") is None and (not service.rate_per_piece or service.rate_per_piece <= 0):
                 raise serializers.ValidationError(
                     f"«{service.name}»: не задана ставка за букву — задайте её в "
                     f"«Ценах и услугах», иначе установка уйдёт в чек бесплатно."
                 )
         elif service is not None:
             # Фиксированные услуги («Прочее», установка): цена — из каталога.
-            if not service.base_price or service.base_price <= 0:
+            if attrs.get("cut_rate") is None and (not service.base_price or service.base_price <= 0):
                 raise serializers.ValidationError(
                     f"«{service.name}»: не задана фиксированная цена — задайте её "
                     f"в «Ценах и услугах», иначе услуга уйдёт в чек бесплатно."
@@ -570,6 +766,9 @@ class SaleCreateSerializer(serializers.Serializer):
     # же клиента. Деньги за неё уже в кассе, поэтому она и не входит в
     # `amount_paid`, который присылает касса.
     use_change = serializers.BooleanField(required=False, default=False)
+    # «Зачесть аванс» (волна 2, D-93): остаток заказа после сдачи закрывается
+    # авансом клиента. Деньги аванса уже в кассе — касса не двигается.
+    use_advance = serializers.BooleanField(required=False, default=False)
     # «Клиент гасит и старый долг»: одной продажей и заказ оформляется, и долги
     # прошлых заказов закрываются. Раньше за этим приходилось идти в «Клиенты →
     # Погасить долг», то есть бросать наполовину собранный чек.
@@ -585,7 +784,35 @@ class SaleCreateSerializer(serializers.Serializer):
         max_digits=5, decimal_places=2, min_value=Decimal("0"), max_value=Decimal("100"),
         required=False, allow_null=True,
     )
+    # Имя покупателя для заказа В ДОЛГ без карточки клиента: долг без имени
+    # взыскать не с кого (CLI-03).
+    buyer_name = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    # Коды предупреждений, которые кассир подтвердил («да, строка на 120 000»).
+    confirmed_warnings = serializers.ListField(
+        child=serializers.CharField(max_length=40), required=False, default=list,
+    )
+    # Гарантия / переделка (G2-N3): заказ за счёт цеха со ссылкой на исходный.
+    is_warranty = serializers.BooleanField(required=False, default=False)
+    warranty_of = serializers.PrimaryKeyRelatedField(
+        queryset=Receipt.objects.all(), required=False, allow_null=True,
+    )
+    warranty_reason = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    warranty_culprit = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    # Заказ оформлен из коммерческого предложения: КП помечается «заказ оформлен».
+    quote_id = serializers.IntegerField(required=False, allow_null=True)
     items = SaleItemInputSerializer(many=True)
+
+    def validate(self, attrs):
+        if attrs.get("is_warranty"):
+            if not (attrs.get("warranty_reason") or "").strip():
+                raise serializers.ValidationError(
+                    {"warranty_reason": "Укажите причину переделки."}
+                )
+        elif attrs.get("warranty_of") or attrs.get("warranty_reason") or attrs.get("warranty_culprit"):
+            raise serializers.ValidationError(
+                {"is_warranty": "Исходный заказ, причина и виновник бывают только у гарантийного заказа."}
+            )
+        return attrs
 
     def validate_items(self, value):
         if not value:
@@ -621,3 +848,40 @@ class RefundSerializer(serializers.Serializer):
     item_ids = serializers.ListField(
         child=serializers.IntegerField(), required=False, allow_empty=True
     )
+    # С какого счёта отдали деньги (cash-02): пусто — с того, куда они пришли.
+    method = serializers.ChoiceField(
+        choices=Receipt.PaymentMethod.choices, required=False, allow_null=True, allow_blank=True,
+    )
+    # Причина возврата — обязательна для не-админа, если заказ оплачен (STAFF-08);
+    # пишется в журнал действий.
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    # Частичный возврат КОЛИЧЕСТВА строки (cash-09, волна 2): [{id, quantity}].
+    # Часть отделяется в новую строку и возвращается она; сумма заказа не
+    # меняется ни на сом (`sale_service.split_line_for_refund`).
+    quantities = serializers.ListField(child=serializers.DictField(), required=False, allow_empty=True)
+
+    def validate_quantities(self, value):
+        out = {}
+        for row in value:
+            if set(row) - {"id", "quantity"} or "id" not in row or "quantity" not in row:
+                raise serializers.ValidationError("Каждая позиция: {id, quantity}.")
+            if row["id"] in out:
+                raise serializers.ValidationError("Строка указана дважды.")
+            out[row["id"]] = row["quantity"]
+        return out
+
+    def to_internal_value(self, data):
+        # Лишние поля — отказ. `quantity` раньше принимался и молча возвращал
+        # строку целиком (cash-09); часть количества — полем `quantities`.
+        if isinstance(data, dict):
+            unknown = sorted(set(data) - set(self.fields))
+            if unknown:
+                hint = (
+                    " Часть количества строки возвращается полем quantities: "
+                    "[{id, quantity}]."
+                    if "quantity" in unknown else ""
+                )
+                raise serializers.ValidationError({
+                    key: f"Неизвестное поле возврата.{hint}" for key in unknown
+                })
+        return super().to_internal_value(data)

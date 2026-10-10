@@ -267,3 +267,56 @@ class CustomerOrdersView(APIView):
             .order_by("-created_at")
         )
         return Response(CustomerOrderSerializer(receipts, many=True).data)
+
+
+class CustomerStatementView(APIView):
+    """GET /api/customer/statement/?date_from=&date_to= — акт сверки клиента сам себе.
+
+    Тот же расчёт, что у сотрудников (`clients.statement`), только про этого
+    клиента и без внутренних примечаний к платежам.
+    """
+
+    authentication_classes = [CustomerJWTAuthentication]
+    permission_classes = [IsCustomer]
+
+    def get(self, request):
+        from datetime import date
+
+        from .statement import statement_payload
+
+        try:
+            d_from = date.fromisoformat(request.query_params["date_from"]) if request.query_params.get("date_from") else None
+            d_to = date.fromisoformat(request.query_params["date_to"]) if request.query_params.get("date_to") else None
+        except ValueError:
+            return Response({"detail": "Некорректная дата."}, status=status.HTTP_400_BAD_REQUEST)
+        if d_from and d_to and d_from > d_to:
+            return Response({"detail": "Начало периода позже конца."}, status=status.HTTP_400_BAD_REQUEST)
+        data = statement_payload(request.user.client, d_from, d_to)
+        for row in data["rows"]:
+            row.pop("note", None)
+        return Response(data)
+
+
+class CustomerSummaryView(APIView):
+    """GET /api/customer/summary/ — долг, сдача, аванс и сальдо клиента одним ответом."""
+
+    authentication_classes = [CustomerJWTAuthentication]
+    permission_classes = [IsCustomer]
+
+    def get(self, request):
+        from decimal import Decimal
+
+        from .advances import advance_available
+
+        client = request.user.client
+        from .serializers import client_debt
+
+        receipts = list(Receipt.objects.filter(client=client))
+        # Та же функция, что карточка: чеки + входящий долг (волна 2).
+        debt = client_debt(client)
+        change = sum((r.change_due for r in receipts), Decimal("0"))
+        advance = advance_available(client)
+        return Response({
+            "debt": debt, "change_due": change, "advance_balance": advance,
+            "balance": debt - change - advance,
+        })

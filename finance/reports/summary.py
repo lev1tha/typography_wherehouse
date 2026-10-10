@@ -15,20 +15,24 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
+from django.db.models import Q
 from django.utils import timezone
 
-from accounts.models import User
+from accounts.models import Employee, User
 from sales import reporting
 from sales.models import Receipt, TransactionItem
 from services.models import PrintingService
-from warehouse.models import Material, Roll, Supply, stock_value_total
+from warehouse.models import Material, Roll, Supplier, Supply, stock_value_total
+from warehouse.supplier_ledger import supplier_balance
 
 from ..material_sheet import purchases_from_stock, q2
 from ..models import ExpenseEntry, ExpenseKind
 from .money import SUM as _SUM
 from .pnl import pnl
+from .work import by_service
+from .work import machine_table as work_table
 
 
 def _supply_line_label(line) -> str:
@@ -51,7 +55,7 @@ def supplier_debts():
     доказать — владелец спрашивал «за что?», а накладной видно не было."""
     rows = []
     supplies = Supply.objects.select_related("supplier", "created_by").prefetch_related(
-        "lines__material", "lines__roll"
+        "lines__material", "lines__roll", "payments"
     )
     for supply in supplies:
         debt = supply.debt
@@ -63,8 +67,11 @@ def supplier_debts():
                 "supplier": supply.supplier.name if supply.supplier_id else "",
                 "date": supply.received_on,
                 "total": supply.total_cost,
-                "paid": supply.paid_amount,
+                # Старое поле накладной + платежи-строки (2026-10-10).
+                "paid": supply.paid_total,
                 "debt": debt,
+                "currency": supply.currency,
+                "debt_foreign": supply.debt_foreign,
                 "note": supply.note,
                 "created_by": supply.created_by.username if supply.created_by_id else "",
                 "lines": [
@@ -88,6 +95,29 @@ def supplier_debts():
                 {"material": lot.material.name, "what": lot.dimensions_label, "cost": lot.purchase_cost}
             ],
         })
+    # Начальные долги, авансы и переплаты поставщикам — той же формулой, что
+    # карточка поставщика: сальдо = начальный долг + накладные − платежи.
+    # Строки накладных выше — их долги по документам; здесь разница между
+    # сальдо поставщика и суммой этих долгов (начальный долг — плюс, аванс и
+    # переплата, закрывающие долги других накладных, — минус).
+    for supplier in Supplier.objects.prefetch_related(
+        "supplies__lines", "supplies__payments", "payments__offsets", "opening_debts",
+    ):
+        balance = supplier_balance(supplier)
+        adjust = balance["owe"] - sum((s.debt for s in supplier.supplies.all()), Decimal("0"))
+        if adjust:
+            rows.append({
+                "kind": "LEDGER",
+                "id": supplier.id,
+                "label": "Начальный долг и взаимозачёт аванса" if adjust > 0 else "Аванс и переплата поставщику",
+                "supplier": supplier.name,
+                "date": min(
+                    [d.as_of for d in supplier.opening_debts.all()]
+                    + [p.paid_on for p in supplier.payments.all()] + [timezone.localdate()]
+                ),
+                "total": balance["opening"], "paid": balance["paid"], "debt": adjust,
+                "note": "", "created_by": "", "lines": [],
+            })
     rows.sort(key=lambda r: (r["date"], r["kind"], r["id"]))
     return {"total": sum((r["debt"] for r in rows), Decimal("0")), "rows": rows}
 
@@ -130,8 +160,10 @@ def finance_summary(d_from=None, d_to=None) -> dict:
     #   покупка в «Инвестициях», уплата налога, закуп, долг материала —
     #   ОПЛАЧЕНО за период (по дате траты): у них в ОПиУ своя строка или нет её.
     spent_by_kind = defaultdict(lambda: Decimal("0"))
+    # Записи без денег (карточка актива в рассрочку, начисление зарплаты) в
+    # «оплачено» не входят: деньги по ним идут платежами и выплатами.
     for row in (
-        by_spent(ExpenseEntry.objects.all())
+        by_spent(ExpenseEntry.objects.filter(is_cashless=False))
         .values("kind_id")
         .annotate(v=_SUM("amount"))
     ):
@@ -180,6 +212,8 @@ def finance_summary(d_from=None, d_to=None) -> dict:
                 # строка ОПиУ (амортизация, налог) или нет её вовсе.
                 "in_profit": k.role == Role.OPEX,
                 "role": k.role,
+                # Трата этого вида двигает кассу? (BAD_DEBT — нет.)
+                "moves_cash": k.moves_cash,
                 # По какой дате сумма: начислено («за какой месяц») или
                 # оплачено (дата траты).
                 "basis": "accrued" if k.role in ExpenseKind.PROFIT_ROLES else "paid",
@@ -231,7 +265,9 @@ def finance_summary(d_from=None, d_to=None) -> dict:
     # Себестоимость проданного: закупочная стоимость материала и расходников,
     # ушедших в продажи периода (FIFO, снимок в момент продажи), минус
     # возвращённое в периоде. Потери материала — отдельно (`losses`).
-    cogs = p["cogs_material"] + p["cogs_services"]
+    # Гарантийные переделки (волна 2) — часть себестоимости своей строкой ОПиУ;
+    # в цепочке склада они тоже ушли с полок, поэтому складываются обратно.
+    cogs = p["cogs_material"] + p["cogs_services"] + p["cogs_warranty"]
 
     # --- Блок «Материалы» ------------------------------------------------
     # Себестоимость проданного в итог блока НЕ входит (решение владельца,
@@ -241,6 +277,8 @@ def finance_summary(d_from=None, d_to=None) -> dict:
     materials = {
         "spend": materials_spend,            # операционные строки блока
         "cogs": cogs,                        # СПРАВОЧНО: в итог блока не входит
+        # Из неё — себестоимость гарантийных переделок (своя строка ОПиУ).
+        "cogs_warranty": p["cogs_warranty"],
         "rows": material_rows,
         "total": materials_spend,
     }
@@ -378,6 +416,18 @@ def finance_summary(d_from=None, d_to=None) -> dict:
             client_debt += owed
             if not r.client_id:
                 anonymous_debt += owed
+    # Входящий долг на дату переезда из Excel (волна 2): не выручка, но долг —
+    # в плитке он стоит в периоде, куда попала дата переезда (как заказ — днём
+    # заказа). Отдельной цифрой тоже: откуда долг без продаж.
+    from clients.opening import open_debts_qs
+
+    opening = open_debts_qs()
+    if d_from:
+        opening = opening.filter(as_of__gte=d_from)
+    if d_to:
+        opening = opening.filter(as_of__lte=d_to)
+    opening_debt = opening.aggregate(v=_SUM("remaining"))["v"] or Decimal("0")
+    client_debt += opening_debt
 
     # Резка — по СТАНКАМ: ЧПУ и лазер. Раньше строки были по типу материала
     # (Акрил / Форекс / Оргстекло), но заказчик считает работу цеха станками:
@@ -410,7 +460,8 @@ def finance_summary(d_from=None, d_to=None) -> dict:
     offcut_cost = Decimal("0")
     for item in (
         by_sold(
-            TransactionItem.objects.filter(used_width__isnull=False),
+            # Рулон по кв.м изделия (CALC-10) — ширина изделия в `width`.
+            TransactionItem.objects.filter(Q(used_width__isnull=False) | Q(roll_area=True)),
             field="receipt__revenue_recognized_at",
         )
         .select_related("material", "roll", "receipt")
@@ -445,8 +496,16 @@ def finance_summary(d_from=None, d_to=None) -> dict:
         )
         .distinct()
         .select_related("cashier")
-        .prefetch_related("items__material__type", "items__service", "items__roll")
+        .prefetch_related("items__material__type", "items__service", "items__roll", "items__executor")
     )
+
+    def worker(line, receipt):
+        """Кому строка резки в «Резке по сотрудникам»: исполнитель строки
+        (волна 2), а у строк без него — как раньше, кто оформил заказ."""
+        if line.executor_id:
+            return f"e{line.executor_id}"
+        return receipt.cashier_id
+
     for r in cut_receipts:
         items = list(r.items.all())
         # Строки работы мастера. Их количество — это и есть длина реза в
@@ -479,6 +538,11 @@ def finance_summary(d_from=None, d_to=None) -> dict:
                 # значение по умолчанию для приёмки).
                 if i.roll_width:
                     area += i.quantity * i.roll_width
+            elif i.roll_area:
+                # Рулон по кв.м изделия (CALC-10): через станок прошла длина
+                # изделия на всю ширину рулона — как у продажи метрами.
+                if i.roll_width and i.length:
+                    area += i.length * i.roll_width
             elif i.material.unit in (Material.Unit.SQM, Material.Unit.METER):
                 # «По площади»: количество строки — это и есть кв.м, но только
                 # у листового/рулонного материала (кв.м, пог.м). Штучный
@@ -487,6 +551,7 @@ def finance_summary(d_from=None, d_to=None) -> dict:
                 area += i.quantity
 
         receipt_pm = sum((i.quantity for i in cut_lines), Decimal("0"))
+        workers = {worker(line, r) for line in cut_lines}
         for idx, line in enumerate(cut_lines):
             machine = line.service.machine or ""
             # ТА ЖЕ сумма, что стоит в чеке: строка округляется вверх до
@@ -514,11 +579,17 @@ def finance_summary(d_from=None, d_to=None) -> dict:
                 share = Decimal("1") / Decimal(len(cut_lines))
             area_by_machine[machine] += area * share
             # Сотруднику площадь отдаём целиком и один раз: чек оформил один
-            # человек, и дробить её между строками того же чека незачем.
-            if idx == 0:
-                area_by_user[r.cashier_id] += area
-            pm_by_user[r.cashier_id] += line.quantity
-            rev_by_user[r.cashier_id] += rev
+            # человек, и дробить её между строками того же чека незачем. Если у
+            # строк чека РАЗНЫЕ исполнители — площадь делится так же, как между
+            # станками (по длине реза).
+            who = worker(line, r)
+            if len(workers) == 1:
+                if idx == 0:
+                    area_by_user[who] += area
+            else:
+                area_by_user[who] += area * share
+            pm_by_user[who] += line.quantity
+            rev_by_user[who] += rev
         cutting_area += area
 
     # Возвраты работы, оформленные в периоде, по заказам ПРОШЛЫХ периодов:
@@ -530,7 +601,7 @@ def finance_summary(d_from=None, d_to=None) -> dict:
         machine = line.service.machine or ""
         cut_by_machine[machine] -= line.sold_total
         cutting_total -= line.sold_total
-        rev_by_user[line.receipt.cashier_id] -= line.sold_total
+        rev_by_user[worker(line, line.receipt)] -= line.sold_total
 
     # Строки — станки, по которым в периоде что-то резали. «Без станка» —
     # старые чеки, оформленные до разделения, если у их услуги станок не
@@ -547,16 +618,31 @@ def finance_summary(d_from=None, d_to=None) -> dict:
     master_pct = PricingSettings.load().master_commission_percent or Decimal("0")
 
     def master_share(amount):
-        return (amount * master_pct / Decimal("100")).quantize(Decimal("1"))
+        # Целый сом, половина вверх (STAFF-14): 58,5 — это 59, а не 58, как давало
+        # банковское округление по умолчанию.
+        return (amount * master_pct / Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
 
     # Сортируем строки по ПЛОЩАДИ, а не по сумме: главная величина блока —
     # квадратные метры, и порядок строк должен объяснять именно её.
-    machines = set(cut_by_machine) | set(area_by_machine)
-    user_names = dict(
-        User.objects.filter(id__in=[u for u in area_by_user if u]).values_list(
-            "id", "username"
-        )
+    # Работы по станкам целиком (STAFF-03/-04): гравировка и монтаж — колонкой
+    # «прочие работы», возврат — колонкой, ряд по дням. Станок, у которого вся
+    # резка периода возвращена, остаётся строкой: возврат не стирает станок.
+    table = work_table(d_from, d_to)
+    machines = (
+        set(cut_by_machine) | set(area_by_machine) | set(table["cutting"]) | set(table["other"])
     )
+    user_names = dict(
+        User.objects.filter(
+            id__in=[u for u in area_by_user if u and not isinstance(u, str)]
+        ).values_list("id", "username")
+    )
+    # Исполнители строк (волна 2) — ключ «e<id сотрудника>», имя — ФИО.
+    user_names.update({
+        f"e{eid}": name
+        for eid, name in Employee.objects.filter(
+            id__in=[int(u[1:]) for u in area_by_user if isinstance(u, str)]
+        ).values_list("id", "full_name")
+    })
     cutting = {
         "total": cutting_total,
         "area": q2(cutting_area),
@@ -571,19 +657,34 @@ def finance_summary(d_from=None, d_to=None) -> dict:
                 "amount": cut_by_machine.get(machine, Decimal("0")),
                 "area": q2(area_by_machine.get(machine, Decimal("0"))),
                 "running_meters": q2(pm_by_machine.get(machine, Decimal("0"))),
+                # Резка, проданная в периоде (в том числе возвращённая позже или
+                # в нём же), и возвраты резки периода: amount = sold − returned.
+                "sold": table["cutting"].get(machine, {}).get("sold", Decimal("0")),
+                "returned": table["cutting"].get(machine, {}).get("returned", Decimal("0")),
+                # Прочие работы станка (гравировка, монтаж…), нетто возвратов.
+                "other_amount": (
+                    table["other"].get(machine, {}).get("sold", Decimal("0"))
+                    - table["other"].get(machine, {}).get("returned", Decimal("0"))
+                ),
+                "other_returned": table["other"].get(machine, {}).get("returned", Decimal("0")),
             }
             for machine in sorted(
-                machines, key=lambda m: -area_by_machine.get(m, Decimal("0"))
+                machines, key=lambda m: (-area_by_machine.get(m, Decimal("0")), m)
             )
         ],
-        # Кто сколько отрезал. Считается по тому, КТО ОФОРМИЛ ЗАКАЗ —
-        # отдельного поля «мастер за станком» в системе нет, и выдавать
-        # одно за другое нельзя. В цехе на двух человек это обычно один и
-        # тот же человек; если понадобится именно резчик — это отдельное
-        # поле в кассе, и вводить его придётся на каждый рез.
+        # Ряд по дням: что сделано каждым станком, прочие работы, возвраты, итог.
+        "days": table["days"],
+        "other_total": sum(
+            (v["sold"] - v["returned"] for v in table["other"].values()), Decimal("0")
+        ),
+        # Кто сколько отрезал. С волны 2 — по ИСПОЛНИТЕЛЮ строки резки
+        # (`TransactionItem.executor`, ключ «e<id>», имя — ФИО сотрудника), а
+        # у строк без исполнителя — как раньше, по тому, КТО ОФОРМИЛ ЗАКАЗ
+        # (ключ — id учётки, имя — логин).
         "by_user": [
             {
                 "id": uid,
+                "kind": "employee" if isinstance(uid, str) else "user",
                 "name": user_names.get(uid) or "Без сотрудника",
                 "area": q2(area),
                 "running_meters": q2(pm_by_user.get(uid, Decimal("0"))),
@@ -649,12 +750,17 @@ def finance_summary(d_from=None, d_to=None) -> dict:
         # Она ВНУТРИ `client_debt`, а не рядом — иначе итог долга
         # пришлось бы складывать глазами.
         "anonymous_debt": anonymous_debt,
+        # Часть долга — входящий долг на дату переезда (внутри `client_debt`).
+        "opening_debt": opening_debt,
         # ЧИСТАЯ ПРИБЫЛЬ ОПиУ (2026-10-07): валовая − расходы ± касса −
         # амортизация − проценты − налог. Шестая редакция формулы.
         "profit": p["net_profit"],
         # Всё ОПиУ периода — строки, маржи, EBITDA, налог.
         "pnl": p,
         "cutting": cutting,
+        # Выручка и маржа по видам услуг (PNL-06): резка, гравировка, установка,
+        # буквы, отходы, прочее — и каждая услуга внутри вида отдельно.
+        "services": by_service(d_from, d_to, p),
         # Долг поставщикам НА СЕГОДНЯ — зеркало долга клиентов: сколько
         # цех должен за материал, взятый в долг. Раньше приход «в долг»
         # не оставлял следа, а оплату было некуда провести.

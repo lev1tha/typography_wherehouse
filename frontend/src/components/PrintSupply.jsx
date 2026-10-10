@@ -24,6 +24,9 @@ export default function PrintSupply({ supply, onClose }) {
   const { dialogProps, titleId } = useDialog({ onClose, guardInput: false });
 
   const lines = supply.lines || [];
+  // Складовщику сервер не отдаёт цены и суммы (STAFF-07): лист приёмки у него
+  // — позиции и количества, без денег.
+  const hasMoney = supply.total_cost != null;
   const total = Number(supply.total_cost || 0);
   const stated = supply.stated_total == null ? null : Number(supply.stated_total);
   const diff = Number(supply.discrepancy || 0);
@@ -75,8 +78,8 @@ export default function PrintSupply({ supply, onClose }) {
                 <th>{t("print.colName")}</th>
                 <th style={{ width: "13%" }}>{t("print.colQty")}</th>
                 <th style={{ width: "9%" }}>{t("print.colUnit")}</th>
-                <th style={{ width: "15%" }}>{t("supplies.unitCost")}</th>
-                <th style={{ width: "16%" }}>{t("print.colSum")}</th>
+                {hasMoney && <th style={{ width: "15%" }}>{t("supplies.unitCost")}</th>}
+                {hasMoney && <th style={{ width: "16%" }}>{t("print.colSum")}</th>}
                 <th style={{ width: "14%" }}>{t("supply.rollCode")}</th>
               </tr>
             </thead>
@@ -87,27 +90,33 @@ export default function PrintSupply({ supply, onClose }) {
                   <td>{l.material_name}</td>
                   <td className="r">{qty(l.quantity)}</td>
                   <td className="c">{l.unit_code ? t(`unit.${l.unit_code}`) : l.unit}</td>
-                  <td className="r">{money(l.unit_cost)}</td>
-                  <td className="r">{money(l.cost)}</td>
+                  {hasMoney && <td className="r">{money(l.unit_cost)}</td>}
+                  {hasMoney && <td className="r">{money(l.cost)}</td>}
                   <td className="c">{l.code || "—"}</td>
                 </tr>
               ))}
             </tbody>
           </table>
 
-          <div className="doc-total">
-            <span>{t("print.total")}</span>
-            <strong>{money(total)} {t("print.currency")}</strong>
-          </div>
-          <p className="doc-line">
-            {t("print.accepted")} {lines.length} {nameWord} {t("print.forSum")} {money(total)} {t("print.currency")}
-          </p>
-          <p className="doc-line">
-            <b>{t("print.inWords")}:</b> {amountInWords(total, lang)}
-          </p>
+          {hasMoney ? (
+            <>
+              <div className="doc-total">
+                <span>{t("print.total")}</span>
+                <strong>{money(total)} {t("print.currency")}</strong>
+              </div>
+              <p className="doc-line">
+                {t("print.accepted")} {lines.length} {nameWord} {t("print.forSum")} {money(total)} {t("print.currency")}
+              </p>
+              <p className="doc-line">
+                <b>{t("print.inWords")}:</b> {amountInWords(total, lang)}
+              </p>
+            </>
+          ) : (
+            <p className="doc-line">{t("print.accepted")} {lines.length} {nameWord}</p>
+          )}
 
           {/* Сверка с бумагой поставщика — ради неё лист и печатают. */}
-          {stated != null && (
+          {hasMoney && stated != null && (
             <table className="doc-bank" style={{ marginTop: 12 }}>
               <tbody>
                 <tr>
@@ -126,9 +135,9 @@ export default function PrintSupply({ supply, onClose }) {
             </table>
           )}
 
-          {Number(supply.paid_amount) > 0 || Number(supply.debt) > 0 ? (
+          {hasMoney && (Number(supply.paid_total) > 0 || Number(supply.debt) > 0) ? (
             <p className="doc-line" style={{ marginTop: 10 }}>
-              {t("supplies.paidTo")}: {money(supply.paid_amount)} {t("print.currency")}
+              {t("supplies.paidTo")}: {money(supply.paid_total)} {t("print.currency")}
               {Number(supply.debt) > 0 && ` · ${t("supplies.debt")}: ${money(supply.debt)} ${t("print.currency")}`}
             </p>
           ) : null}

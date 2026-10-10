@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Payment, Receipt, TransactionItem
+from .models import Payment, Quote, Receipt, TransactionItem
 
 
 class TransactionItemInline(admin.TabularInline):
@@ -49,3 +49,10 @@ class PaymentAdmin(admin.ModelAdmin):
     list_display = ("receipt", "amount", "method", "paid_on", "created_by", "created_at")
     list_filter = ("method", "paid_on")
     date_hierarchy = "paid_on"
+
+
+@admin.register(Quote)
+class QuoteAdmin(admin.ModelAdmin):
+    list_display = ("number", "client", "client_name", "title", "total_price", "status", "valid_until", "created_at")
+    list_filter = ("status",)
+    readonly_fields = ("number", "cart", "lines", "receipt")

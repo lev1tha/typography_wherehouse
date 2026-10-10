@@ -14,11 +14,12 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { downloadFile } from "../utils/download.js";
 import DataTable from "./DataTable.jsx";
 import MonthPicker from "./MonthPicker.jsx";
 import Field from "./Field.jsx";
 
-const TYPES = ["SUPPLY", "SALE", "RETURN", "WRITE_OFF", "ADJUSTMENT", "CORRECTION"];
+const TYPES = ["SUPPLY", "SALE", "RETURN", "WRITE_OFF", "ADJUSTMENT", "CORRECTION", "TRANSFER"];
 
 /** Причина без того, что уже написано в соседних колонках.
  *
@@ -179,6 +180,19 @@ export default function StockJournal() {
           </select>
         </Field>
         <MonthPicker value={period} onChange={filter(setPeriod)} />
+        {/* Выгрузка журнала в Excel — с теми же фильтрами (XL-06). */}
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => downloadFile("/warehouse/inventory-logs/", {
+            export: "csv",
+            ...(type ? { type } : {}),
+            ...(material ? { material } : {}),
+            ...(period.month ? { year: period.year, month: period.month } : {}),
+          }, "zhurnal-sklada.csv")}
+        >
+          {t("stock2.toExcel")}
+        </button>
       </div>
 
       <DataTable columns={columns} rows={rows} empty={loading ? t("common.loading") : t("journal.empty")} />

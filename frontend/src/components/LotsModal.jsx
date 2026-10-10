@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { downloadFile } from "../utils/download.js";
 import { apiError } from "../api/errors.js";
 import { formatDate, formatMoney, formatNumber } from "../utils/format.js";
+import FifoRecalcModal from "./FifoRecalcModal.jsx";
 import LotCorrectionModal from "./LotCorrectionModal.jsx";
 import Modal from "./Modal.jsx";
 import Pager from "./Pager.jsx";
@@ -38,6 +40,7 @@ export default function LotsModal({ material, onClose, onChanged }) {
   const [page, setPage] = useState(1);
   const [error, setError] = useState("");
   const [fixing, setFixing] = useState(null);
+  const [recalc, setRecalc] = useState(false);
 
   const load = useCallback(() => {
     api
@@ -62,6 +65,23 @@ export default function LotsModal({ material, onClose, onChanged }) {
         {error && <p className="field-error" role="alert">{error}</p>}
         {!error && rows.length === 0 && <p className="muted">{t("lotFix.noLots")}</p>}
         {rows.length > 0 && (
+          <div className="row" style={{ justifyContent: "flex-end", margin: "0 0 8px" }}>
+            {/* Приход внесли задним числом — пересчитать себестоимость по FIFO (PNL-08). */}
+            {!material.sells_by_metre && (
+              <button type="button" className="secondary row-btn" onClick={() => setRecalc(true)}>
+                {t("stock2.fifoTitle")}
+              </button>
+            )}
+            <button
+              type="button"
+              className="secondary row-btn"
+              onClick={() => downloadFile("/warehouse/rolls/", { export: "csv", material: material.id }, "partii.csv")}
+            >
+              {t("stock2.toExcel")}
+            </button>
+          </div>
+        )}
+        {rows.length > 0 && (
           <div className="table-scroll">
             <table className="table plain-table">
               <thead>
@@ -81,6 +101,16 @@ export default function LotsModal({ material, onClose, onChanged }) {
                     <td>
                       <strong>{r.code || `№${r.id}`}</strong>{" "}
                       <span className="muted">{r.dimensions_label}</span>
+                      {/* Где лежит (STK-05): площадка партии и перевезённые части. */}
+                      {r.placements?.some((p) => p.site) && (
+                        <div className="muted" style={{ fontSize: 12 }}>
+                          {r.placements.map((p, i) => (
+                            <span key={p.site ?? "none"}>
+                              {i > 0 ? " · " : ""}{p.name || t("stock2.noSite")}: {formatNumber(p.area, { max: 2 })}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </td>
                     <td>
                       {formatNumber(r.remaining_area, { max: 2 })} / {formatNumber(r.initial_area, { max: 2 })}{" "}
@@ -101,6 +131,16 @@ export default function LotsModal({ material, onClose, onChanged }) {
         )}
         <Pager page={page} count={count} pageSize={PAGE} onPage={setPage} />
       </Modal>
+      {recalc && (
+        <FifoRecalcModal
+          material={material}
+          onClose={() => setRecalc(false)}
+          onDone={() => {
+            load();
+            onChanged?.();
+          }}
+        />
+      )}
       {fixing && (
         <LotCorrectionModal
           lot={lotForCorrection(fixing, material, t)}

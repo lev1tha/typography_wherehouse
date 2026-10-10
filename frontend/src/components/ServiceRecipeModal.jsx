@@ -60,7 +60,8 @@ export default function ServiceRecipeModal({ service, materials, onClose, onSave
     }
   }
 
-  const unitOf = (mode) => (mode === "PER_SQM" ? t("recipes.perSqm") : t("recipes.perOrder"));
+  const unitOf = (mode) =>
+    mode === "PER_SQM" ? t("recipes.perSqm") : mode === "PER_PM" ? t("recipes.perPm") : t("recipes.perOrder");
 
   return (
     <Modal
@@ -120,6 +121,7 @@ export default function ServiceRecipeModal({ service, materials, onClose, onSave
             onChange={(e) => setForm({ ...form, consumption_mode: e.target.value })}
           >
             <option value="PER_SQM">{t("recipes.modePerSqm")}</option>
+            <option value="PER_PM">{t("recipes.modePerPm")}</option>
             <option value="FIXED">{t("recipes.modeFixed")}</option>
           </select>
         </Field>
@@ -128,7 +130,11 @@ export default function ServiceRecipeModal({ service, materials, onClose, onSave
           на кв.м при куске 0,5 кв.м — это 0,05, сколько бы метров его ни
           резали. Формула одна и здесь, и в обзоре. */}
       <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
-        {form.consumption_mode === "PER_SQM" ? t("recipes.modePerSqmHint") : t("recipes.modeFixedHint")}
+        {form.consumption_mode === "PER_SQM"
+          ? t("recipes.modePerSqmHint")
+          : form.consumption_mode === "PER_PM"
+          ? t("recipes.modePerPmHint")
+          : t("recipes.modeFixedHint")}
       </p>
 
       <button style={{ marginTop: 12 }} onClick={add} disabled={busy}>

@@ -33,7 +33,7 @@ class EdgeWholesaleTests(APITestCase):
     def _checkout(self, items):
         return self.client.post(
             "/api/sales/receipts/checkout/",
-            {"payment_method": "CASH", "items": items},
+            {"payment_method": "CASH", "items": items, "buyer_name": "Покупатель"},
             format="json",
         )
 

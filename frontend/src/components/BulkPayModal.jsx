@@ -22,6 +22,9 @@ export default function BulkPayModal({ client, orders: initialOrders, onClose, o
   const { toast } = useUI();
 
   const [orders, setOrders] = useState(initialOrders || []);
+  // Входящий долг на дату переезда (волна 2): сервер гасит его ПЕРВЫМ, в списке
+  // он тоже первый — id «opening:<id>» уходит вместе с id заказов.
+  const [opening, setOpening] = useState([]);
   // `null` = выбраны все — так список не приходится досинхронизировать, когда
   // приезжают заказы за пределами выбранного периода.
   const [picked, setPicked] = useState(null);
@@ -37,17 +40,29 @@ export default function BulkPayModal({ client, orders: initialOrders, onClose, o
   useEffect(() => {
     api
       .get(`/clients/clients/${client.id}/`)
-      .then((r) => setOrders(r.data.orders || []))
+      .then((r) => {
+        setOrders(r.data.orders || []);
+        setOpening(
+          (r.data.opening_balances || [])
+            .filter((b) => b.kind === "DEBT" && Number(b.remaining) > 0)
+            .map((b) => ({
+              id: `opening:${b.id}`, opening: true, order_number: null,
+              title: t("opening.kind_DEBT"), created_at: b.as_of, debt: b.remaining,
+            }))
+        );
+      })
       .catch(() => {});
   }, [client.id]);
 
   // Заказы с долгом, от старых к новым — в том же порядке их гасит бэкенд.
   const debtors = useMemo(
-    () =>
-      (orders || [])
+    () => [
+      ...opening,
+      ...(orders || [])
         .filter((o) => Number(o.debt) > 0)
         .sort((a, b) => new Date(a.created_at) - new Date(b.created_at)),
-    [orders],
+    ],
+    [orders, opening],
   );
 
   const chosen = picked === null ? debtors : debtors.filter((o) => picked.includes(o.id));
@@ -139,8 +154,8 @@ export default function BulkPayModal({ client, orders: initialOrders, onClose, o
                       onChange={() => toggle(o.id)}
                     />
                     <span>
-                      <strong>№{o.order_number}</strong>
-                      {o.title ? <span className="muted"> · {o.title}</span> : null}
+                      <strong>{o.opening ? t("opening.kind_DEBT") : `№${o.order_number}`}</strong>
+                      {o.title && !o.opening ? <span className="muted"> · {o.title}</span> : null}
                       <span className="muted" style={{ fontSize: 12 }}>
                         {" · "}
                         {formatDate(o.created_at)}

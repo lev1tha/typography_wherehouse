@@ -56,6 +56,7 @@ def receive_lot(
     production=None,
     paid_account=None,
     on_credit=False,
+    site=None,
 ) -> Roll:
     """Receive a new lot (roll or sheets). Computes area from dimensions unless
     `area` is given directly; then creates the lot and refreshes material stock.
@@ -78,6 +79,8 @@ def receive_lot(
         # оттуда же, и заставлять выбирать одно и то же на каждой приёмке
         # значит добавить ручного ввода там, где система знает ответ.
         production=production if production is not None else locked.production,
+        # Площадка хранения (STK-05): где партия будет лежать. Пусто — не указана.
+        site=site,
         form=form,
         width=width,
         length=length,
@@ -199,6 +202,54 @@ class InsufficientStock(Exception):
     pass
 
 
+# Хвост округления площади (XL-03/STK-08): остаток, который меньше сотки
+# квадратного метра, — это не материал на полке, а след старого округления до
+# сотых («6 листов» записывались как 17.86 вместо 17.8608). Списание последнего
+# листа такой хвост забирает в ноль, а продажа последнего листа не спотыкается
+# о недостающие 0.0008 кв.м.
+TAIL_SQM = Decimal("0.01")
+
+
+def kim_factor(material: Material, area) -> Decimal | None:
+    """Доля КИМ (0 < к < 1), если раскрой этой площади её касается, иначе None.
+
+    КИМ — у листового площадного материала (рулон режут на всю ширину, обрезок
+    у него и так считается). Целые листы (площадь кратна площади листа)
+    продаются как есть: лист целиком — это не раскрой. Пусто или 100 % — как
+    раньше (STK-07/G4-N1).
+    """
+    kim = material.kim_percent
+    if not kim or kim <= 0 or kim >= 100:
+        return None
+    if not material.is_roll_material or material.sells_by_metre:
+        return None
+    area = Decimal(str(area))
+    if area <= 0:
+        return None
+    if material.piece_area and material.piece_area > 0 and area % material.piece_area == 0:
+        return None
+    return Decimal(kim) / Decimal("100")
+
+
+def snap_tail(material: Material, qty) -> Decimal:
+    """Количество к списанию с учётом хвоста округления.
+
+    Только у площадного материала (кв.м): если после списания осталось бы
+    0 < остаток ≤ 0.01 кв.м — списываем всё; если просят больше остатка не
+    более чем на 0.01 кв.м — тоже всё, что есть. Иначе — как просили.
+    """
+    qty = Decimal(str(qty))
+    if not material.is_roll_material:
+        return qty
+    have = material.quantity or Decimal("0")
+    if have <= 0:
+        return qty
+    rest = have - qty
+    if -TAIL_SQM <= rest <= TAIL_SQM and rest != 0:
+        return have
+    return qty
+
+
 @transaction.atomic
 def consume_area(
     material: Material,
@@ -240,10 +291,30 @@ def consume_area(
     need = Decimal(area)
     if need <= 0:
         return Decimal("0")
+    if (
+        locked.quantity < need and locked.is_roll_material and locked.quantity > 0
+        and need - locked.quantity <= TAIL_SQM
+    ):
+        # Последний лист после старого округления до сотых (XL-03): на полке
+        # 6 листов, в системе 17.86 вместо 17.8608 — забираем всё, что есть.
+        need = locked.quantity
     if locked.quantity < need:
         raise InsufficientStock(
             f"Недостаточно «{locked.name}»: нужно {need} кв.м, в наличии {locked.quantity}."
         )
+    # КИМ раскроя (STK-07): у продажи куска со склада уходит площадь деталей ÷
+    # КИМ — обрезки идут в себестоимость ЭТОЙ строки, а не в общие потери. Не
+    # больше, чем лежит: деталь, которая влезла в последний лист, продаётся.
+    kim = kim_factor(locked, need) if log_type == InventoryLog.Type.SALE else None
+    kim_extra = Decimal("0")
+    if kim:
+        kim_extra = max(min((need / kim).quantize(Decimal("0.0001")), locked.quantity) - need, Decimal("0"))
+        need += kim_extra
+        if kim_extra:
+            reason = (
+                f"{reason} (КИМ {locked.kim_percent.normalize():f} %: "
+                f"+{kim_extra.normalize():f} кв.м обрезков)"
+            ).strip()
 
     was_above = locked.quantity > locked.critical_balance
     cogs = Decimal("0")
@@ -265,7 +336,8 @@ def consume_area(
         take = min(roll.remaining_area, remaining)
         roll.remaining_area -= take
         roll.save(update_fields=["remaining_area"])
-        cogs += take * roll.cost_per_sqm
+        # Закуп × взято / принято — без копеечного хвоста цены кв.м (STK-10).
+        cogs += roll.cost_of(take)
         remaining -= take
         if trace is not None:
             trace.append((roll.pk, take, None))
@@ -387,7 +459,7 @@ def consume_metres(
         take_area = take_m * roll.width
         roll.remaining_area -= take_area
         roll.save(update_fields=["remaining_area"])
-        cogs += take_area * roll.cost_per_sqm
+        cogs += roll.cost_of(take_area)
         area_taken += take_area
         remaining -= take_m
         if trace is not None:
@@ -583,11 +655,9 @@ def stocktake_roll(roll: Roll, counted_metres: Decimal, *, reason_code, note="",
                 f"было {expected} м, намерено {counted} м "
                 f"({act.get_reason_code_display()})"
             ),
-            cost=(
-                (-delta_area * locked_roll.cost_per_sqm).quantize(Decimal("0.01"))
-                if delta_area < 0
-                else None
-            ),
+            # Излишек промера — тоже деньги (PNL-04): по цене этого рулона, со
+            # знаком «+» (`quantity_changed` > 0). ОПиУ считает потери нетто.
+            cost=locked_roll.cost_of(abs(delta_area)).quantize(Decimal("0.01")),
             created_by=user,
         )
     return act
@@ -637,8 +707,10 @@ def write_off_roll(roll: Roll, metres: Decimal, *, reason: str = "", user=None,
         quantity_changed=-area,
         metres_changed=-metres,
         reason=f"{reason} Рулон {label}: {metres.normalize():f} м".strip(),
-        # Метрами по цене метра ЭТОГО рулона — в чём считал поставщик.
-        cost=(metres * locked_roll.cost_per_pm).quantize(Decimal("0.01")),
+        # По цене ЭТОГО рулона: закуп × списанная площадь / принятая (STK-10) —
+        # для целых метров то же, что метры × цена метра, но без хвоста
+        # округления цены метра и с хвостом рулона, ушедшим целиком.
+        cost=locked_roll.cost_of(area).quantize(Decimal("0.01")),
         created_by=user,
     )
     # Дата самой операции: отход, как и приход, вносят задним числом.
@@ -665,8 +737,21 @@ def restore_area(
     happened_at=None,
     preferred_roll=None,
     lots=None,
-) -> None:
+    newest_first: bool = False,
+) -> Decimal:
     """Return `area` кв.м back to stock (refund).
+
+    Возвращает СТОИМОСТЬ вернувшегося по партиям, куда он лёг (закуп ×
+    площадь / принято; сверх партий — по последней закупочной, как его
+    оценивает `Material.stock_value`). У инвентаризации (`log_type` =
+    ADJUSTMENT) она пишется в журнал: излишек — это деньги, и ОПиУ гасит им
+    недостачу (F5/PNL-04).
+
+    ``newest_first`` — излишек инвентаризации: доливаем партии с САМОЙ СВЕЖЕЙ,
+    у которой есть место. Недостача уходит FIFO со старейшей непустой, значит
+    «ошибся — поправил» должен вернуть материал туда же; при доливе со
+    старейшей он лёг бы в давно пустую партию по другой цене, и убыток
+    остался бы разницей цен.
 
     ``lots`` — `(партия, площадь, …)`, записанные при продаже этой строки:
     каждая партия получает обратно ровно то, что с неё взяли. Продажа из двух
@@ -688,17 +773,27 @@ def restore_area(
     locked = Material.objects.select_for_update().get(pk=material.pk)
     add = Decimal(area)
     if add <= 0:
-        return
+        return Decimal("0")
     rolls = list(
         Roll.objects.select_for_update().filter(material=locked).order_by("received_at", "pk")
     )
+    newest = rolls[-1] if rolls else None
     if preferred_roll is not None:
         pk = getattr(preferred_roll, "pk", preferred_roll)
         chosen = next((r for r in rolls if r.pk == pk), None)
         if chosen is not None:
             rolls = [chosen] + [r for r in rolls if r.pk != chosen.pk]
-    remaining = add
     by_pk = {r.pk: r for r in rolls}
+    # Возврат строки, проданной с КИМ (STK-07): её списание было площадь ÷ КИМ,
+    # и в себестоимости строки сидят обрезки. Возврат сторнирует себестоимость
+    # строки целиком — значит и на склад возвращается всё, что она забрала, а
+    # не одна площадь деталей; иначе обрезки пропадали бы со склада без следа.
+    kim = kim_factor(locked, add) if log_type == InventoryLog.Type.RETURN and lots else None
+    if kim:
+        taken = sum((a for pk, a, _m in lots if pk in by_pk), Decimal("0"))
+        add = max(add, min((add / kim).quantize(Decimal("0.0001")), taken))
+    remaining = add
+    value = Decimal("0")
     for pk, part_area, _metres in lots or ():
         roll = by_pk.get(pk)
         if roll is None or remaining <= 0:
@@ -709,8 +804,9 @@ def restore_area(
             continue
         roll.remaining_area += give
         roll.save(update_fields=["remaining_area"])
+        value += roll.cost_of(give)
         remaining -= give
-    for roll in rolls:
+    for roll in (reversed(rolls) if newest_first else rolls):
         if remaining <= 0:
             break
         headroom = roll.initial_area - roll.remaining_area
@@ -719,11 +815,14 @@ def restore_area(
         give = min(headroom, remaining)
         roll.remaining_area += give
         roll.save(update_fields=["remaining_area"])
+        value += roll.cost_of(give)
         remaining -= give
-    if remaining > 0 and rolls:
-        newest = rolls[-1]
+    if remaining > 0 and newest is not None:
         newest.remaining_area += remaining
         newest.save(update_fields=["remaining_area"])
+        value += newest.cost_of(remaining)
+    elif remaining > 0:
+        value += remaining * (locked.purchase_price or Decimal("0"))
     locked.quantity += add
     locked.save(update_fields=["quantity", "updated_at"])
     if log_type:
@@ -734,8 +833,11 @@ def restore_area(
             reason=reason,
             receipt=receipt,
             created_by=user,
+            cost=(value.quantize(Decimal("0.01"))
+                  if log_type == InventoryLog.Type.ADJUSTMENT else None),
             **({"happened_at": happened_at} if happened_at else {}),
         )
+    return value
 
 
 def has_lots(material: Material) -> bool:
@@ -827,14 +929,18 @@ def reconcile_with_lots(material: Material, *, user=None) -> Decimal:
             f"«{locked.name}»: остаток сходится с рулонами ({target} кв.м) — сводить нечего."
         )
     # Снятый хвост оценивался последней закупочной (`Material.stock_value`) —
-    # по ней же и уходит: иначе склад дешевеет, а в «Списано» ноль.
+    # по ней же и уходит: иначе склад дешевеет, а в «Списано» ноль. Поднятый
+    # (партии знали больше числа) — тем, на сколько подорожал склад: это
+    # излишек, ОПиУ гасит им потери (F5/PNL-04).
+    before = Material.objects.prefetch_related("rolls").get(pk=locked.pk).stock_value
+    locked.quantity = target
+    locked.save(update_fields=["quantity", "updated_at"])
+    after = Material.objects.prefetch_related("rolls").get(pk=locked.pk).stock_value
     tail_cost = (
         (-delta * (locked.purchase_price or Decimal("0"))).quantize(Decimal("0.01"))
         if delta < 0
-        else None
+        else (after - before)
     )
-    locked.quantity = target
-    locked.save(update_fields=["quantity", "updated_at"])
     InventoryLog.objects.create(
         type=InventoryLog.Type.ADJUSTMENT,
         material=locked,

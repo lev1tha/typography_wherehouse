@@ -11,7 +11,13 @@
   + Рост долга поставщикам                     материал пришёл, не оплачен
   (в отчёте строки названы нейтрально — «Долг клиентов», «Запасы на складе», —
   а знак значит влияние на деньги)
-  + Расходы начислены, но не оплачены          «за сентябрь» оплачено в октябре (D-2)
+  + Расходы начислены, но не оплачены          «за сентябрь» оплачено в октябре (D-2);
+                                               сюда же — зарплата, начисленная по
+                                               ведомости, но ещё не выплаченная
+  + Списанные долги клиентов                   расход без денег (BAD_DEBT)
+  ± Входящие остатки клиентов                  деньги за долг, висевший до переезда из
+                                               Excel, минус траты аванса, принятого до
+                                               переезда (волна 2)
   + Налог начислен, но не уплачен
   − Покупка оборудования и цеха                деньги ушли целиком, в прибыль — частями
   ± Финансовая деятельность                    владелец и займы
@@ -45,6 +51,7 @@ from ..periods import local_day, month_end
 from .cashflow import cash_flow, entries
 from .money import ZERO, q2, total
 from .pnl import pnl, resolve
+from .quarters import add_quarters, quarter_meta
 from .scope import once, report_scope
 
 A = CashEntry.Article
@@ -61,6 +68,8 @@ LABELS = {
     "inventory": "Запасы на складе",
     "payables": "Долг поставщикам",
     "accrued": "Расходы начислены, но не оплачены",
+    "written_off": "Списанные долги клиентов (деньги не двигались)",
+    "opening_balances": "Входящие остатки клиентов (долг и аванс до переезда)",
     "tax_payable": "Налог начислен, но не уплачен",
     "capex": "Покупка оборудования и цеха",
     "financing": "Деньги владельца и займы",
@@ -121,15 +130,60 @@ def _client_ledger():
         .select_related("receipt").only("quantity", "price_per_item", "returned_at",
                                         "receipt__revenue_recognized_at", "receipt_id")
     ]
+    # Оплаты входящего долга (волна 2) — не долг и не деньги клиентов системы:
+    # они идут строкой «Входящие остатки» (`opening_flows`), здесь их нет.
+    from clients.opening import opening_advance_uses, opening_cash_entry_ids
+
+    opening_cash = opening_cash_entry_ids()
     cash = [
         (group_of.get(rid, "deleted") if rid else "deleted", day,
          amount if kind == CashEntry.Kind.IN else -amount)
-        for rid, day, kind, amount in CashEntry.objects.filter(
+        for pk, rid, day, kind, amount in CashEntry.objects.filter(
             article__in=CLIENT_ARTICLES
-        ).values_list("receipt_id", "happened_on", "kind", "amount")
+        ).values_list("pk", "receipt_id", "happened_on", "kind", "amount")
+        if pk not in opening_cash
     ]
+    # Траты аванса, принятого ДО переезда: заказ оплачен деньгами, которых в
+    # кассе системы нет, — для клиента это оплата, а в сверке строка «Входящие
+    # остатки» (минусом).
+    for client_id, used_on, amount in opening_advance_uses():
+        cash.append((f"c{client_id}", used_on, amount))
+    # Аванс клиента (D-93) пишется в кассу без чека и попадал в общую группу
+    # «без клиента»: долг и деньги клиентов в подсказке сверки завышались на
+    # потраченный аванс. Переносим его в группу клиента (волна 2) — парой
+    # «минус там, плюс здесь» того же дня, поэтому сумма позиций, а с ней и
+    # «Не объяснено», не меняется.
+    from clients.models import ClientAdvance
+
+    for client_id, paid_on, amount, reverted_at in ClientAdvance.objects.filter(
+        is_opening=False,       # входящий аванс кассовой записи не имеет
+    ).values_list("client_id", "paid_on", "amount", "reverted_at"):
+        cash.append((f"c{client_id}", paid_on, amount))
+        cash.append(("deleted", paid_on, -amount))
+        if reverted_at:
+            back_on = local_day(reverted_at)
+            cash.append((f"c{client_id}", back_on, -amount))
+            cash.append(("deleted", back_on, amount))
 
     return sold, returned, cash
+
+
+def opening_flows(d_from, d_to):
+    """Строка «Входящие остатки» за период: деньги, принесённые за входящий долг
+    (приходы минус откаты по их записям кассы), минус траты входящего аванса."""
+    from clients.opening import opening_advance_uses, opening_cash_entry_ids
+
+    value = ZERO
+    ids = opening_cash_entry_ids()
+    if ids:
+        for kind, amount in CashEntry.objects.filter(
+            pk__in=ids, happened_on__gte=d_from, happened_on__lte=d_to,
+        ).values_list("kind", "amount"):
+            value += amount if kind == CashEntry.Kind.IN else -amount
+    for _client, used_on, amount in opening_advance_uses():
+        if d_from <= used_on <= d_to:
+            value -= amount
+    return value
 
 
 @report_scope
@@ -156,6 +210,8 @@ def bridge(d_from=None, d_to=None) -> dict:
             continue
         if e.article == A.SUPPLY or (e.expense_id and e.expense.kind.role == ExpenseKind.Role.INVENTORY):
             supplier_paid -= e.signed_amount
+        elif e.article == A.PAYROLL and not e.expense_id:
+            expenses_paid -= e.signed_amount        # выплата по ведомости гасит начисление
         elif e.expense_id and mapping.pnl in (chart.OPEX, chart.INTEREST):
             expenses_paid -= e.signed_amount
         elif e.expense_id and e.expense.kind.role == ExpenseKind.Role.TAX:
@@ -170,7 +226,11 @@ def bridge(d_from=None, d_to=None) -> dict:
         ("client_money", held1 - held0),
         ("inventory", -(purchases - p["cogs_total"])),
         ("payables", purchases - supplier_paid),
-        ("accrued", p["opex"]["total"] + p["interest"] - expenses_paid),
+        # Списание безнадёжного долга — расход, у которого денег не было и не
+        # будет: он не «ждёт оплаты», а гасит долг клиента (отдельной строкой).
+        ("accrued", p["opex"]["total"] + p["interest"] - expenses_paid - p["opex_noncash"]),
+        ("written_off", p["opex_noncash"]),
+        ("opening_balances", opening_flows(d_from, d_to)),
         ("tax_payable", p["tax"] - tax_paid),
         ("capex", cf["sections"][chart.INVESTING]["total"]),
         ("financing", cf["sections"][chart.FINANCING]["total"]),
@@ -202,6 +262,8 @@ def bridge_year(year: int) -> dict:
     for i, key in enumerate(keys):
         values = [b["lines"][i]["amount"] for b in per]
         kind = "total" if key == "net_profit" else ("warn" if key == "unexplained" else "row")
+        if key in ("written_off", "opening_balances") and not any(values):
+            continue                      # редкая строка: пустой год её не показывает
         rows.append({
             "key": key, "label": LABELS[key], "kind": kind, "level": 0 if key == "net_profit" else 1,
             "values": values, "total": total(values), "hint": f"bridge_{key}",
@@ -211,11 +273,14 @@ def bridge_year(year: int) -> dict:
         "key": "net_cash_flow", "label": LABELS["net_cash_flow"], "kind": "grand", "level": 0,
         "values": flow, "total": total(flow), "hint": "net_cash_flow",
     })
+    month_info = [
+        {"month": first.month, "from": first, "to": last, "future": first > today}
+        for first, last in months
+    ]
+    add_quarters(rows)
     return {
         "year": year,
-        "months": [
-            {"month": first.month, "from": first, "to": last, "future": first > today}
-            for first, last in months
-        ],
+        "months": month_info,
+        "quarters": quarter_meta(month_info),
         "rows": rows,
     }

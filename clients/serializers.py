@@ -4,7 +4,7 @@ from django.db.models import Count, Q, Sum
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Client
+from .models import Client, ClientSettings
 
 
 # Продажа, которая состоялась: у неоплаченного онлайн-счёта выручка не признана
@@ -28,8 +28,12 @@ def client_ltv(client) -> Decimal:
 
 def client_debt(client) -> Decimal:
     """Сколько клиент должен = Σ долга по его чекам (Receipt.debt уже учитывает
-    отмену/оплату/возвраты). Использует prefetch'нутые receipts — без доп. запросов."""
-    return sum((r.debt for r in client.receipts.all()), Decimal("0"))
+    отмену/оплату/возвраты) + неоплаченный ВХОДЯЩИЙ долг на дату переезда из
+    Excel (волна 2, `clients.opening`). Чеки — из prefetch, входящий долг —
+    одним запросом. Эта же функция — у кассы (`credit`) и у кабинета клиента."""
+    from .opening import opening_debt
+
+    return sum((r.debt for r in client.receipts.all()), Decimal("0")) + opening_debt(client)
 
 
 def client_change_due(client) -> Decimal:
@@ -51,6 +55,16 @@ class ClientSerializer(serializers.ModelSerializer):
     debt = serializers.SerializerMethodField()
     change_due = serializers.SerializerMethodField()
     orders_count = serializers.SerializerMethodField()
+    # Дебиторка и аналитика (CLI-01, -03, -05, -10). `balance` — долг минус
+    # сдача и аванс: плюс — клиент должен, минус — цех должен клиенту.
+    effective_credit_limit = serializers.SerializerMethodField()
+    advance_balance = serializers.SerializerMethodField()
+    balance = serializers.SerializerMethodField()
+    oldest_debt_at = serializers.SerializerMethodField()
+    overdue_days = serializers.SerializerMethodField()
+    last_order_at = serializers.SerializerMethodField()
+    days_since_last_order = serializers.SerializerMethodField()
+    margin = serializers.SerializerMethodField()
 
     class Meta:
         model = Client
@@ -70,12 +84,92 @@ class ClientSerializer(serializers.ModelSerializer):
             "referrals_count",
             # Постоянная скидка, % — касса подставляет её сама (2026-10-10).
             "discount_percent",
+            # Лимит долга: свой (пусто — общий) и действующий (D-92).
+            "credit_limit",
+            "effective_credit_limit",
             "debt",
             "change_due",
+            "advance_balance",
+            "balance",
+            "oldest_debt_at",
+            "overdue_days",
+            "last_order_at",
+            "days_since_last_order",
+            "margin",
             "orders_count",
             "created_at",
         ]
         read_only_fields = ["telegram_chat_id", "created_at"]
+
+    # --- аналитика: из аннотаций списка, а без них (одна карточка) — расчётом ---
+    def _metric(self, obj, name):
+        if hasattr(obj, name):
+            return getattr(obj, name)
+        cache = getattr(obj, "_metrics_cache", None)
+        if cache is None:
+            from .analytics import metrics_for
+
+            cache = obj._metrics_cache = metrics_for(obj)
+        return cache[name]
+
+    def get_effective_credit_limit(self, obj):
+        # Общие настройки читаем один раз на запрос, а не на каждую строку списка.
+        if obj.credit_limit is not None:
+            return obj.credit_limit
+        if "_default_limit" not in self.context:
+            self.context["_default_limit"] = ClientSettings.load().default_credit_limit
+        return self.context["_default_limit"]
+
+    def get_advance_balance(self, obj):
+        return self._metric(obj, "advance_total")
+
+    def get_balance(self, obj):
+        annotated = getattr(obj, "balance", None)
+        if annotated is not None:
+            return annotated
+        return self.get_debt(obj) - self.get_change_due(obj) - self._metric(obj, "advance_total")
+
+    def get_oldest_debt_at(self, obj):
+        from .analytics import local_date
+
+        day = local_date(self._metric(obj, "oldest_debt_at"))
+        return day.isoformat() if day else None
+
+    def get_overdue_days(self, obj):
+        from .analytics import age_days
+
+        return age_days(self._metric(obj, "oldest_debt_at"))
+
+    def get_last_order_at(self, obj):
+        from .analytics import local_date
+
+        day = local_date(self._metric(obj, "last_order_at"))
+        return day.isoformat() if day else None
+
+    def get_days_since_last_order(self, obj):
+        from .analytics import age_days
+
+        return age_days(self._metric(obj, "last_order_at"))
+
+    def get_margin(self, obj):
+        return self._metric(obj, "margin_total")
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Маржа — закупочная цифра: видят админ и бухгалтер, складовщик — нет.
+        request = self.context.get("request")
+        if not (request and getattr(request.user, "sees_money", False)):
+            data.pop("margin", None)
+        return data
+
+    def validate_credit_limit(self, value):
+        """Лимит долга задаёт только админ — как скидку (CLI-03)."""
+        current = getattr(self.instance, "credit_limit", None)
+        if value != current:
+            request = self.context.get("request")
+            if not (request and getattr(request.user, "is_admin_role", False)):
+                raise serializers.ValidationError("Лимит долга задаёт только администратор.")
+        return value
 
     def get_referrals_count(self, obj):
         # Вьюсет считает аннотацией (`referrals_total`); без неё — запросом.
@@ -120,6 +214,17 @@ class ClientSerializer(serializers.ModelSerializer):
                     break
                 seen.add(node.pk)
                 node, hops = node.referred_by, hops + 1
+        # Клиенту с историей заказов реферера проставляет только админ: иначе
+        # складовщик «привязывал» давнего клиента к знакомому и начислял тому
+        # бонус (CLI-07). Касса вызывает эту проверку и для клиента, найденного
+        # по телефону, поэтому правило действует и при оформлении.
+        if value and self.instance and self.instance.pk and self.instance.referred_by_id != value.pk:
+            request = self.context.get("request")
+            is_admin = bool(request and getattr(request.user, "is_admin_role", False))
+            if not is_admin and self.instance.receipts.exists():
+                raise serializers.ValidationError(
+                    "Реферера клиенту с историей заказов ставит только администратор."
+                )
         # Реферер зафиксирован после установки: складовщик его не меняет и не
         # очищает, админ — меняет напрямую в карточке. Очередь заявок на смену
         # убрана по просьбе владельца (2026-09-27): ей почти не пользовались.
@@ -229,6 +334,9 @@ class ClientDetailSerializer(ClientSerializer):
     referrals = serializers.SerializerMethodField()
     orders = serializers.SerializerMethodField()
     payments = serializers.SerializerMethodField()
+    advances = serializers.SerializerMethodField()
+    # Входящие остатки на дату переезда из Excel (волна 2): долг и аванс.
+    opening_balances = serializers.SerializerMethodField()
 
     class Meta(ClientSerializer.Meta):
         fields = ClientSerializer.Meta.fields + [
@@ -236,6 +344,24 @@ class ClientDetailSerializer(ClientSerializer):
             "referrals",
             "orders",
             "payments",
+            "advances",
+            "opening_balances",
+        ]
+
+    def get_opening_balances(self, obj):
+        from .opening import balances_payload
+
+        return balances_payload(obj.opening_balances.filter(reverted_at__isnull=True))
+
+    def get_advances(self, obj):
+        """Авансы клиента без заказа: сколько внёс, сколько ещё не зачтено."""
+        return [
+            {
+                "id": a.id, "amount": a.amount, "remaining": a.remaining, "method": a.method,
+                "method_display": a.get_method_display(), "paid_on": a.paid_on, "note": a.note,
+                "reverted": a.reverted_at is not None,
+            }
+            for a in obj.advances.order_by("-paid_on", "-id")[:50]
         ]
 
     def get_payments(self, obj):
@@ -247,6 +373,8 @@ class ClientDetailSerializer(ClientSerializer):
         """
         from sales.models import Payment
 
+        from .models import BalanceOffset
+
         d_from = self.context.get("date_from")
         d_to = self.context.get("date_to")
         qs = Payment.objects.filter(receipt__client=obj).select_related("receipt")
@@ -254,7 +382,7 @@ class ClientDetailSerializer(ClientSerializer):
             qs = qs.filter(paid_on__gte=d_from)
         if d_to:
             qs = qs.filter(paid_on__lte=d_to)
-        return [
+        rows = [
             {
                 "id": p.id,
                 "amount": p.amount,
@@ -268,6 +396,28 @@ class ClientDetailSerializer(ClientSerializer):
             # а карточка показывает последние оплаты.
             for p in qs[:50]
         ]
+        # Зачёт аванса в оплату заказа — тоже «оплата» в истории (деньги внесены
+        # раньше, см. `ClientAdvance`): без него долг уменьшился, а в списке
+        # оплат записи нет.
+        uses = BalanceOffset.objects.filter(client=obj, source=BalanceOffset.Source.ADVANCE)
+        if d_from:
+            uses = uses.filter(used_on__gte=d_from)
+        if d_to:
+            uses = uses.filter(used_on__lte=d_to)
+        rows += [
+            {
+                "id": f"adv{o.id}",
+                "amount": o.amount,
+                "method": "ADVANCE",
+                "method_display": "Зачёт аванса",
+                "paid_on": o.used_on,
+                "order_number": o.order_number,
+                "order_title": "",
+            }
+            for o in uses.order_by("-used_on", "-id")[:50]
+        ]
+        rows.sort(key=lambda r: r["paid_on"], reverse=True)
+        return rows[:50]
 
     def get_orders(self, obj):
         """Заказы клиента (что он покупал) — для карточки CRM: номер, дата, сумма,
@@ -353,22 +503,63 @@ class ClientDetailSerializer(ClientSerializer):
         }
 
     def get_referrals(self, obj):
-        # Реферальный бонус — фикс. сумма за каждого приведённого клиента
-        # (редактируется в Финансах). Считается справочно и только показывается —
-        # в расходы автоматически не списывается (решение заказчика).
-        from finance.models import FinanceSettings
+        """Кого привёл клиент и какой бонус за них начислен / выплачен / к выплате.
 
-        rate = FinanceSettings.load().referral_bonus
-        items = []
-        total = Decimal("0")
-        for ref in obj.referrals.all():
-            ltv = client_ltv(ref)
-            total += ltv
-            items.append({"id": ref.id, "display_name": ref.display_name, "lifetime_value": ltv})
-        count = len(items)
-        return {
-            "count": count,
-            "total_value": total,
-            "bonus": rate * count,
-            "list": items,
+        Бонус — таблица начислений (`ReferralBonus`), а не «ставка × число
+        привязок» (CLI-07): платим за приведённого с оплаченным и не
+        возвращённым заказом, по ставке на момент начисления. Старые привязки
+        показываются расчётом с пометкой `estimated` (D-95).
+        """
+        from .referrals import referral_summary
+
+        return referral_summary(obj, client_ltv)
+
+
+class ClientSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ClientSettings
+        fields = ["default_credit_limit", "storekeeper_takes_debt"]
+
+
+class ClientPriceSerializer(serializers.ModelSerializer):
+    """Договорная цена клиента (волна 2): материал + единица ИЛИ работа
+    (+ необязательно материал работы)."""
+
+    service_name = serializers.CharField(source="service.name", read_only=True, default=None)
+    material_name = serializers.CharField(source="material.name", read_only=True, default=None)
+    sale_mode_display = serializers.CharField(source="get_sale_mode_display", read_only=True)
+
+    class Meta:
+        from .models import ClientPrice
+
+        model = ClientPrice
+        fields = [
+            "id", "client", "service", "service_name", "material", "material_name",
+            "sale_mode", "sale_mode_display", "price", "note", "updated_at",
+        ]
+        read_only_fields = ["updated_at"]
+        validators = []          # уникальность — понятным текстом в validate()
+
+    def validate(self, attrs):
+        from .models import ClientPrice
+
+        merged = {
+            key: attrs.get(key, getattr(self.instance, key, None))
+            for key in ("client", "service", "material", "sale_mode")
         }
+        service, material, mode = merged["service"], merged["material"], merged["sale_mode"] or ""
+        if service is None and material is None:
+            raise serializers.ValidationError("Укажите услугу или материал.")
+        if service is None and not mode:
+            raise serializers.ValidationError({"sale_mode": "Для материала укажите единицу: кв.м, лист/штука или пог.м."})
+        if service is not None and mode:
+            raise serializers.ValidationError({"sale_mode": "У работы единицы нет — ставка как в каталоге услуги."})
+        attrs["sale_mode"] = mode
+        twin = ClientPrice.objects.filter(
+            client=merged["client"], service=service, material=material, sale_mode=mode,
+        )
+        if self.instance is not None:
+            twin = twin.exclude(pk=self.instance.pk)
+        if twin.exists():
+            raise serializers.ValidationError("Такая договорная цена у клиента уже есть — поправьте её.")
+        return attrs

@@ -1,7 +1,13 @@
 from django.contrib import admin
 from modeltranslation.admin import TranslationAdmin
 
-from .models import PricingSettings, PrintingService, ServiceRecipe
+from .models import (
+    PricingSettings,
+    PrintingService,
+    RateMatrixEntry,
+    ServiceRecipe,
+    ThicknessCoefficient,
+)
 
 
 class ServiceRecipeInline(admin.TabularInline):
@@ -18,3 +24,13 @@ class PrintingServiceAdmin(TranslationAdmin):
 @admin.register(PricingSettings)
 class PricingSettingsAdmin(admin.ModelAdmin):
     list_display = ("master_commission_percent", "updated_at")
+
+
+@admin.register(ThicknessCoefficient)
+class ThicknessCoefficientAdmin(admin.ModelAdmin):
+    list_display = ("kind", "thickness_from", "coefficient")
+
+
+@admin.register(RateMatrixEntry)
+class RateMatrixEntryAdmin(admin.ModelAdmin):
+    list_display = ("service", "material", "thickness_from", "rate")

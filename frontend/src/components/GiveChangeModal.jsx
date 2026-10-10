@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { apiError } from "../api/errors.js";
+import Field from "./Field.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 import { formatMoney } from "../utils/format.js";
@@ -11,12 +13,17 @@ const som = (n) => formatMoney(n);
 // Выдача сдачи — зеркало приёма оплаты: там деньги пришли, тут ушли.
 // Частями можно специально: мелочи в кассе может не хватить и во второй раз,
 // «отдал тысячу из полутора» — рабочая ситуация цеха, а не ошибка ввода.
+//
+// Сдачу отдают не только из наличных (cash-02): клиент заплатил переводом, а
+// сдачу вернули ему на карту — значит, расход должен лечь на тот счёт, откуда
+// ушли деньги. Не выбрали — наличные, как было всегда.
 export default function GiveChangeModal({ receipt, onClose, onGiven }) {
   const { t } = useTranslation();
   const { toast } = useUI();
 
   const due = Math.round(Number(receipt.change_due) || 0);
   const [amount, setAmount] = useState("");
+  const [account, setAccount] = useState(""); // "" — наличные (по умолчанию)
   const [busy, setBusy] = useState(false);
 
   const give = amount === "" ? due : Math.round(Number(amount) || 0);
@@ -29,11 +36,12 @@ export default function GiveChangeModal({ receipt, onClose, onGiven }) {
     try {
       await api.post(`/sales/receipts/${receipt.id}/give-change/`, {
         ...(amount === "" ? {} : { amount: give }),
+        ...(account ? { method: account } : {}),
       });
       toast(t("receipts.changeDone", { amount: som(give) }));
       onGiven?.();
     } catch (e) {
-      toast(e.response?.data?.detail || t("common.error"), "error");
+      toast(apiError(e, t("common.error")), "error");
     } finally {
       setBusy(false);
     }
@@ -74,6 +82,14 @@ export default function GiveChangeModal({ receipt, onClose, onGiven }) {
         </div>
         <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("receipts.changeHint")}</p>
       </div>
+
+      <Field label={t("receiptsV2.changeAccount")}>
+        <select value={account} onChange={(e) => setAccount(e.target.value)}>
+          <option value="">{t("checkout.cash")}</option>
+          <option value="MBANK">{t("checkout.mbank")}</option>
+          <option value="DEMIRBANK">{t("checkout.demirbank")}</option>
+        </select>
+      </Field>
 
       {left > 0 && (
         <div className="crow">

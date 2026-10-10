@@ -65,7 +65,8 @@ class WasteTests(APITestCase):
         self.assertIn("Отход/брак: царапины, разгрузка", log.reason)
         self.assertIn("лист 1.22×2.44 ×2", log.reason)
         # Себестоимость — по цене старой пачки: 4000 за 5.9536 кв.м.
-        self.assertEqual(log.cost, (Decimal("5.9536") * self.lot_old.cost_per_sqm).quantize(Decimal("0.01")))
+        # Партия ушла целиком — ровно её закуп (STK-10: без хвоста цены кв.м).
+        self.assertEqual(log.cost, Decimal("4000.00"))
         self.assertEqual(log.created_by, self.store)
         # Складовщику себестоимость не отдаётся, владельцу — да.
         self.assertIsNone(r.data[0]["cost"])
@@ -83,7 +84,7 @@ class WasteTests(APITestCase):
         self.assertEqual(self.lot_old.remaining_area, self.lot_old.initial_area)
         log = InventoryLog.objects.get(type=InventoryLog.Type.WRITE_OFF)
         # 15000 / 14.884 = 1007.79 за кв.м × 1.5
-        self.assertEqual(log.cost, (Decimal("1.5") * self.lot_new.cost_per_sqm).quantize(Decimal("0.01")))
+        self.assertEqual(log.cost, self.lot_new.cost_of(Decimal("1.5")).quantize(Decimal("0.01")))
         self.assertIn("1.5 кв.м", log.reason)
 
     def test_roll_waste_is_metres_from_that_roll(self):
@@ -129,7 +130,7 @@ class WasteTests(APITestCase):
         self.assertEqual(log.quantity_changed, Decimal("-8.0000"))
         self.assertEqual(
             log.cost,
-            (Decimal("5.9536") * old_cost + rest * new_cost).quantize(Decimal("0.01")),
+            (self.lot_old.cost_of(Decimal("5.9536")) + self.lot_new.cost_of(rest)).quantize(Decimal("0.01")),
         )
 
     def test_roll_waste_to_the_last_metre_leaves_no_tail(self):

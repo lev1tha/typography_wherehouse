@@ -12,6 +12,8 @@ import Icon from "../../components/Icon.jsx";
 import LoadError from "../../components/LoadError.jsx";
 import Modal from "../../components/Modal.jsx";
 import PrintDocs from "../../components/PrintDocs.jsx";
+import PrintQuote from "../../components/PrintQuote.jsx";
+import QuotesModal from "../../components/QuotesModal.jsx";
 import { PaymentBadge } from "../../components/StatusBadge.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { clearCheckoutDraft, loadCheckoutDraft, saveCheckoutDraft } from "../../utils/draft.js";
@@ -29,6 +31,12 @@ const ceilSom = (v) => Math.max(0, Math.ceil((Number(v) || 0) - 1e-6));
 const somFmt = (n) => formatMoney(n);
 // Количество без хвоста нулей: 1.230 → 1.23, 2.000 → 2.
 const trimQty = (n) => String(+Number(n || 0).toFixed(3));
+// Площадь всех деталей позиции: ширина × длина × число деталей, округление ОДИН
+// раз на итоге — так её считает сервер (12 × 0.33×0.37 это 1.465, а не 12 × 0.122).
+const partsArea = (w, l, parts) =>
+  Number(parts) > 1
+    ? Math.round(Number(w) * Number(l) * Number(parts) * 1000 + 1e-7) / 1000
+    : areaOf(w, l);
 
 // Whole-sheet line where the wholesale price is in effect (qty reached the min).
 function isWholesale(line) {
@@ -45,6 +53,8 @@ function unitPrice(line) {
   // (у рулона это длина). Вернуть отсюда полную сумму значит умножить длину
   // дважды — 1.5 м по 1000 давали 2 250 вместо 1 500.
   if (line.kind === "material-metre") return Number(line.price);
+  // Рулон по кв.м изделия (CALC-10): цена за кв.м × площадь изделия.
+  if (line.kind === "material-roll-area") return Number(line.price);
   if (line.kind === "material" || line.kind === "material-area") {
     if (line.mode === "PIECE" && isWholesale(line)) return Number(line.wholesale_price);
     return Number(line.price);
@@ -54,7 +64,7 @@ function unitPrice(line) {
 // Quantity that price multiplies by (area-material bills by area).
 function lineQty(line) {
   if (line.kind === "material-metre") return Number(line.length);
-  return line.kind === "material-area" ? Number(line.area) : line.qty;
+  return line.kind === "material-area" || line.kind === "material-roll-area" ? Number(line.area) : line.qty;
 }
 // Строки чека, на которые сервер разложит позицию кассы: сумма до округления и
 // чья это строка (услуга — с минимумом, материал — без). Резка = 2 строки в
@@ -72,7 +82,9 @@ function lineParts(line) {
   if (line.kind === "cut-work" || line.kind === "cut-own")
     return [{ raw: Number(line.rate) * Number(line.runM || 0), ...svc(line.serviceId) }];
   // Гравировка: площадь × цена за кв.м, материала в строке нет.
-  if (line.kind === "engraving") return [{ raw: Number(line.rate) * Number(line.area || 0), ...svc(line.serviceId) }];
+  // Проходы умножают ставку: три прохода стоят втрое.
+  if (line.kind === "engraving")
+    return [{ raw: Number(line.rate) * Number(line.passes || 1) * Number(line.area || 0), ...svc(line.serviceId) }];
   // Отходы: цена × количество В ВЫБРАННОЙ МЕРКЕ (кв.м, пог.м или штуки).
   if (line.kind === "waste") return [{ raw: Number(line.rate) * Number(line.amount || 0), ...svc(line.serviceId) }];
   if (line.kind === "service") return [{ raw: unitPrice(line) * lineQty(line), ...svc(line.id) }];
@@ -180,10 +192,13 @@ function cartFromReceipt(items, materials, services, t) {
       // Гравировка: площадь × цена за кв.м, материала в строке нет. Цена —
       // сегодняшняя из каталога, а если её там нет — та, по которой продали.
       if (s.kind === "ENGRAVING") {
+        // Проходы и детали переносим как были; ставка в корзине — за ОДИН проход.
+        const passes = Number(it.passes) || 1;
         lines.push({
           key: `E${s.id}-${i}`, kind: "engraving", serviceId: s.id, name: s.name,
           width: Number(it.width) || 0, length: Number(it.length) || 0, area: qty,
-          rate: priceOrLast(s.rate_flat, it), note: it.note || "",
+          parts: Number(it.parts_count) || 1, passes,
+          rate: Number(s.rate_flat) || lastPrice(it) / passes, note: it.note || "",
           ownMaterial: !!it.own_material, qty: 1,
         });
         return;
@@ -217,6 +232,7 @@ function cartFromReceipt(items, materials, services, t) {
           s.uses_running_meter ? s.rate_per_pm || m.cut_rate_per_pm : s.rate_flat,
           it
         );
+        const parts = Number(it.parts_count) || 1;
         lines.push({
           key: `C${m.id}-${i}`, kind: "cutting",
           serviceId: s.id, name: s.name,
@@ -226,7 +242,9 @@ function cartFromReceipt(items, materials, services, t) {
           rate,
           rateEdited: fromLast(s.uses_running_meter ? s.rate_per_pm || m.cut_rate_per_pm : s.rate_flat, it),
           width: Number(it.width) || 0, length: Number(it.length) || 0,
-          area: Number(pair.quantity) || 0, runM: qty, qty: 1,
+          // runM — длина реза на ВСЕ детали, runMOne — на одну (она уходит на сервер).
+          area: Number(pair.quantity) || 0, runM: qty, runMOne: +(qty / parts).toFixed(2),
+          parts, rm: !!s.uses_running_meter, qty: 1,
         });
         return;
       }
@@ -251,10 +269,15 @@ function cartFromReceipt(items, materials, services, t) {
         });
         return;
       }
-      // Обычная услуга по прейскуранту: цена берётся из каталога.
+      // Обычная услуга по прейскуранту: цена берётся из каталога, а если в
+      // прошлый раз её вписали руками (по договорённости), — та же вписанная.
       lines.push({
         key: `S${s.id}`, kind: "service", id: s.id, name: s.name,
-        unit_price: priceOrLast(s.uses_pieces ? s.rate_per_piece : s.base_price, it),
+        unit_price: it.price_is_manual
+          ? lastPrice(it)
+          : priceOrLast(s.uses_pieces ? s.rate_per_piece : s.base_price, it),
+        priceEdited: !!it.price_is_manual,
+        staff_sets_rate: !!s.staff_sets_rate,
         qty: qty || 1,
       });
       return;
@@ -271,6 +294,20 @@ function cartFromReceipt(items, materials, services, t) {
     // старого чека, где рулон продан не метрами (или материал с тех пор стал
     // рулоном), повторить нечем — сервер её отклонит, поэтому пропускаем вслух.
     if (m.sells_by_metre) {
+      // Рулон по кв.м изделия (CALC-10): размеры изделия — те же, цена за кв.м —
+      // сегодняшняя. Цены за кв.м у рулона больше нет — повторить нечем.
+      if (it.roll_area && it.sale_mode === "SQM") {
+        const w = Number(it.width) || 0;
+        const len = Number(it.length) || 0;
+        if (!(Number(m.price_per_sqm) > 0) || !(w > 0) || !(len > 0)) return void skipped++;
+        lines.push({
+          key: `MR${m.id}-${i}`, kind: "material-roll-area", id: m.id, name: m.name,
+          price: Number(m.price_per_sqm), priceEdited: false,
+          width: w, length: len, area: areaOf(w, len), qty: 1,
+          rollId: null, rollName: "",
+        });
+        return;
+      }
       if (it.sale_mode !== "METER") return void skipped++;
       lines.push({
         key: `MM${m.id}-${i}`, kind: "material-metre", id: m.id, name: m.name,
@@ -315,6 +352,126 @@ function cartFromReceipt(items, materials, services, t) {
   return { lines, skipped };
 }
 
+// Корзина кассы → позиции запроса `checkout` / `preview` / КП. Одна функция на
+// все три: цена, которую показывает предпросмотр сервера, и цена оформления
+// считаются из одних и тех же позиций.
+//
+// Новое (2026-10-10): `parts_count` (деталей, шт) и `passes` (проходы) —
+// размеры `width`×`length` и `running_meters` уходят ПО ОДНОЙ детали, сервер
+// умножает на число деталей сам и округляет один раз; `cut_rate` у услуги «по
+// договорённости» (монтаж, буквы) — цена за единицу, вписанная в кассе.
+function cartToItems(cart, isAdmin) {
+  return cart.map((l) => withExecutor(l, lineToItem(l, isAdmin)));
+}
+
+// Строки-работы, у которых бывает исполнитель (волна 2): отходы — не работа.
+const WORK_KINDS = ["cutting", "cut-work", "cut-own", "engraving", "service"];
+const workServiceId = (l) => (l.kind === "service" ? l.id : l.serviceId);
+
+// Исполнитель уходит только у строки работы и только выбранный: пусто — сервер
+// разберёт выработку по-старому (учётка кассира, станок).
+function withExecutor(l, item) {
+  return WORK_KINDS.includes(l.kind) && l.executor ? { ...item, executor: Number(l.executor) } : item;
+}
+
+function lineToItem(l, isAdmin) {
+  const partsArg = Number(l.parts) > 1 ? { parts_count: Number(l.parts) } : {};
+  const passesArg = Number(l.passes) > 1 ? { passes: Number(l.passes) } : {};
+  if (l.kind === "material")
+    return {
+      type: "MATERIAL", material: l.id, quantity: l.qty, mode: l.mode || "SQM",
+      // Пачка листа уходит тем же полем, что и рулон: на сервере это одна
+      // и та же партия (Roll), просто формы разные.
+      ...(l.lotId ? { roll: l.lotId } : {}),
+      // Цену шлём, только если админ правил её руками. Иначе сервер сам
+      // решит, розничная тут цена или оптовая (опт включается от количества).
+      ...(isAdmin && l.priceEdited ? { material_price: l.price } : {}),
+    };
+  if (l.kind === "material-metre")
+    // Режим шлём ЯВНО: сервер его не угадывает, иначе площадь и длина
+    // молча поменялись бы местами.
+    return {
+      type: "MATERIAL", material: l.id, quantity: l.length, mode: "METER",
+      ...(l.rollId ? { roll: l.rollId } : {}),
+      ...(l.usedWidth ? { used_width: l.usedWidth } : {}),
+      // Цену шлём, только если админ её правил (или её нет в каталоге и
+      // взята из прошлого чека). Нетронутая — сервер берёт каталог сам, а
+      // пустой каталог отклоняет: неявный ноль — ошибка ввода, явный
+      // (вписанный) ноль — подарок.
+      ...(isAdmin && l.priceEdited ? { material_price: l.price } : {}),
+    };
+  if (l.kind === "material-roll-area")
+    // Рулон по кв.м изделия (CALC-10): размеры изделия, площадь считает сервер;
+    // со склада уходит вся ширина рулона × длина.
+    return {
+      type: "MATERIAL", material: l.id, mode: "SQM", width: l.width, length: l.length,
+      ...(l.rollId ? { roll: l.rollId } : {}),
+      ...(isAdmin && l.priceEdited ? { material_price: l.price } : {}),
+    };
+  if (l.kind === "material-area")
+    return {
+      type: "MATERIAL", material: l.id, quantity: l.area, mode: "SQM",
+      ...(l.lotId ? { roll: l.lotId } : {}),
+      ...(isAdmin && l.priceEdited ? { material_price: l.price } : {}),
+    };
+  if (l.kind === "cutting")
+    return {
+      type: "SERVICE", service: l.serviceId, material: l.materialId,
+      width: l.width, length: l.length,
+      // Длина реза уходит ПО ОДНОЙ детали (деталей сервер умножит сам). У
+      // внутреннего монтажа длины реза нет — поле не шлём, сервер его
+      // отклонит как лишнее.
+      ...(l.rm === false ? {} : { running_meters: l.runMOne ?? l.runM }),
+      ...partsArg,
+      ...(l.lotId ? { roll: l.lotId } : {}),
+      ...(isAdmin && l.materialPriceEdited ? { material_price: l.materialPrice } : {}),
+      ...(isAdmin && l.rateEdited ? { cut_rate: l.rate } : {}),
+    };
+  if (l.kind === "cut-work")
+    // Материал передаём (для ставки реза), но без размеров → площадь 0 →
+    // бэкенд создаёт только строку работы, без материала по площади.
+    return {
+      type: "SERVICE", service: l.serviceId, material: l.materialId,
+      running_meters: l.runM,
+      ...(isAdmin && l.rateEdited ? { cut_rate: l.rate } : {}),
+    };
+  if (l.kind === "cut-own")
+    // Материал клиента: цену шлём ВСЕГДА — она видна и правится у всех,
+    // каталожной у чужого материала нет. Сервер это разрешает только
+    // с флагом `own_material`.
+    return {
+      type: "SERVICE", service: l.serviceId, own_material: true,
+      running_meters: l.runM, cut_rate: l.rate, note: l.note || "",
+    };
+  if (l.kind === "waste")
+    // Отходы: мерка — ЯВНО (сервер её не угадывает), цена — всегда своя.
+    // Площадь шлём размерами, если их называли: так она сойдётся с тем,
+    // что мерили рулеткой.
+    return {
+      type: "SERVICE", service: l.serviceId, mode: l.mode,
+      ...(l.mode === "SQM" && l.width && l.length
+        ? { width: l.width, length: l.length }
+        : { quantity: l.amount }),
+      cut_rate: l.rate, note: l.note || "",
+    };
+  if (l.kind === "engraving")
+    // Гравировка: цена за кв.м — та, что стояла в окне (правится всеми).
+    return {
+      type: "SERVICE", service: l.serviceId, width: l.width, length: l.length,
+      cut_rate: l.rate, note: l.note || "",
+      ...partsArg,
+      ...passesArg,
+      ...(l.ownMaterial ? { own_material: true } : {}),
+    };
+  // Услуга за штуку или фикс (монтаж, буквы, «Прочее»): цену по договорённости
+  // вписывают в кассе — админ у любой, складовщик там, где это разрешено
+  // услуге. Нетронутая цена уходит без `cut_rate`: сервер берёт каталог.
+  return {
+    type: "SERVICE", service: l.id, quantity: l.qty,
+    ...(l.priceEdited ? { cut_rate: l.unit_price } : {}),
+  };
+}
+
 export default function Checkout() {
   const { t } = useTranslation();
   const { isAdmin, user } = useAuth();
@@ -322,8 +479,9 @@ export default function Checkout() {
   // ?repeat=<id> — «повторить заказ» из «Чеков» или карточки клиента.
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Черновик корзины из sessionStorage: собранный чек переживает уход на другой
-  // экран, F5 и выход по истёкшей сессии. Читаем ОДИН раз при монтировании;
+  // Черновик корзины из localStorage (волна 2): собранный чек переживает уход на
+  // другой экран, F5, закрытие вкладки, пропавшую связь и выход по истёкшей
+  // сессии. Читаем ОДИН раз при монтировании;
   // чужой черновик (другой пользователь на той же вкладке) не берём.
   const uid = user?.id ?? user?.username ?? null;
   const draftRef = useRef(undefined);
@@ -369,6 +527,10 @@ export default function Checkout() {
   // цеха, а долг — деньги клиента, и решает он, платить ли сегодня.
   const [clientDebt, setClientDebt] = useState(0);
   const [payDebt, setPayDebt] = useState(false);
+  // Аванс клиента (волна 2, D-93): деньги «на будущие работы» уже в кассе.
+  // Галочка «зачесть аванс» включена по умолчанию, если аванс есть.
+  const [clientAdvance, setClientAdvance] = useState(0);
+  const [useAdvance, setUseAdvance] = useState(true);
   const [referredBy, setReferredBy] = useState(draft?.referredBy || "");
   const [matches, setMatches] = useState([]);
   // Подсказка «найден клиент»: какая строка выбрана стрелками (-1 — никакая).
@@ -391,6 +553,24 @@ export default function Checkout() {
   // Своя скидка на этот заказ — только у админа (снять или поменять). null —
   // берётся скидка клиента; складовщик её только применяет.
   const [discountOverride, setDiscountOverride] = useState(isAdmin ? draft?.discountOverride ?? null : null);
+  // Ответ сервера на расчёт корзины (`/receipts/preview/`): итог по правилам,
+  // предупреждения и — админу — себестоимость и маржа до оформления.
+  const [preview, setPreview] = useState(null);
+  const [previewErr, setPreviewErr] = useState("");
+  const nextPreview = useLatest();
+  // Имя покупателя для заказа в долг без карточки клиента.
+  const [buyerName, setBuyerName] = useState("");
+  // Гарантия / переделка за счёт цеха (админ): исходный заказ, причина, виновник.
+  const NO_WARRANTY = { on: false, orderNo: "", orderId: null, reason: "", culprit: "", lookup: "" };
+  const [warranty, setWarranty] = useState(NO_WARRANTY);
+  // Коммерческие предложения: окно списка, КП в печати, КП, из которого собран заказ.
+  const [quotesOpen, setQuotesOpen] = useState(false);
+  // Исполнители работ (волна 2): работающие сотрудники и «я» — сотрудник
+  // учётки кассира. null — список ещё не пришёл (умолчание не ставим).
+  const [executors, setExecutors] = useState(null);
+  const [execMe, setExecMe] = useState(null);
+  const [quotePrint, setQuotePrint] = useState(null);
+  const [quoteId, setQuoteId] = useState(null);
 
   function loadCatalog() {
     setCatalogError(false);
@@ -420,10 +600,39 @@ export default function Checkout() {
     // Подсказки по названию заказа — как живой поиск клиента, чтобы повторные
     // работы назывались одинаково, а не «вывеска», «Вывеска», «вывеска2».
     api.get("/sales/receipts/titles/").then((r) => setTitleHints(r.data)).catch(() => {});
+    api.get("/staff/employees/executors/")
+      .then((r) => {
+        setExecutors(r.data.employees || []);
+        setExecMe(r.data.me ?? null);
+      })
+      .catch(() => setExecutors([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Корзина — в sessionStorage при любом изменении: см. utils/draft.js. Пустая
+  // Исполнитель по умолчанию — сотрудник учётки кассира, иначе единственный
+  // сотрудник со станком услуги. Ставится один раз новой строке работы
+  // (`executor === undefined`); выбранное или снятое руками не трогаем.
+  useEffect(() => {
+    if (!executors || !executors.length || !services.length) return;
+    if (!cart.some((l) => WORK_KINDS.includes(l.kind) && l.executor === undefined)) return;
+    const byMachine = (machine) => {
+      const same = executors.filter((e) => machine && e.default_machine === machine);
+      return same.length === 1 ? same[0].id : null;
+    };
+    setCart((c) =>
+      c.map((l) => {
+        if (!WORK_KINDS.includes(l.kind) || l.executor !== undefined) return l;
+        const svc = services.find((x) => x.id === workServiceId(l));
+        return { ...l, executor: execMe ?? byMachine(svc?.machine) ?? null };
+      })
+    );
+  }, [cart, executors, execMe, services]);
+
+  function setLineExecutor(key, value) {
+    setCart((c) => c.map((l) => (l.key === key ? { ...l, executor: value ? Number(value) : null } : l)));
+  }
+
+  // Корзина — в localStorage при любом изменении: см. utils/draft.js. Пустая
   // касса черновика не держит (после оформления и после «Очистить» он исчезает).
   useEffect(() => {
     const empty = !cart.length && !orderTitle && !client.phone && !client.full_name && !client.company_name;
@@ -495,6 +704,7 @@ export default function Checkout() {
       setClientDebt(0);
       setPayDebt(false);
       setClientDiscount(0);
+      setClientAdvance(0);
       return;
     }
     api
@@ -503,9 +713,11 @@ export default function Checkout() {
         setClientChange(Number(r.data.change_due) || 0);
         setClientDebt(Number(r.data.debt) || 0);
         setClientDiscount(Number(r.data.discount_percent) || 0);
+        setClientAdvance(Number(r.data.advance_balance) || 0);
+        setUseAdvance(true);
         setPayDebt(false);
       })
-      .catch(() => { setClientChange(0); setClientDebt(0); setClientDiscount(0); });
+      .catch(() => { setClientChange(0); setClientDebt(0); setClientDiscount(0); setClientAdvance(0); });
   }, [clientId]);
 
   useEffect(() => {
@@ -553,6 +765,9 @@ export default function Checkout() {
       uses_pieces: s.uses_pieces,
       // Отходы: мерку выбирают в окне, поэтому ставок у плитки три.
       uses_free_measure: s.uses_free_measure,
+      // Цену этой услуги в кассе вписывает и складовщик (гравировка, отходы
+      // или флаг «по договорённости» в «Ценах и услугах»).
+      staff_sets_rate: !!s.staff_sets_rate,
       id: s.id,
       name: s.name,
       category: t(`serviceKind.${s.kind}`),
@@ -587,6 +802,9 @@ export default function Checkout() {
       // остаток в квадратах, которые владелец в уме делит на ширину.
       sells_by_metre: !!m.sells_by_metre,
       price_per_pm: Number(m.price_per_pm ?? 0),
+      // Вторая цена рулона — за кв.м изделия (CALC-10); пусто — только метры.
+      price_per_sqm: Number(m.price_per_sqm ?? 0),
+      sells_roll_by_area: !!m.sells_roll_by_area,
       metres_remaining: m.metres_remaining != null ? Number(m.metres_remaining) : null,
     }));
     return [...ownCut, ...svc, ...mat];
@@ -651,9 +869,108 @@ export default function Checkout() {
     };
   }, [pricingRules, services, urgentOn, urgencyPct, discountPct]);
   // По каталогу (до правил) и по правилам — «каталог → итог» в корзине.
-  const catalogTotal = useMemo(() => cart.reduce((s, l) => s + lineTotal(l), 0), [cart]);
-  const total = useMemo(() => cart.reduce((s, l) => s + ruledTotal(l, rules), 0), [cart, rules]);
+  const localCatalogTotal = useMemo(() => cart.reduce((s, l) => s + lineTotal(l), 0), [cart]);
+  const localTotal = useMemo(() => cart.reduce((s, l) => s + ruledTotal(l, rules), 0), [cart, rules]);
+  // Итог считает СЕРВЕР: режим минимума («деталь» / «заказ»), округление «итог
+  // заказа одной формулой», матрица ставок и коэффициент толщины живут там, а
+  // не в кассе. Пока ответ не пришёл (или корзина изменилась) — своя прикидка.
+  const previewBody = useMemo(() => {
+    if (!cart.length) return null;
+    const body = { payment_method: "CASH", pay_full: true, items: cartToItems(cart, isAdmin) };
+    if (urgentOn) body.is_urgent = true;
+    if (overrideOn) body.discount_percent = discountPct;
+    if (clientId) body.client_id = clientId;
+    if (isAdmin && warranty.on) {
+      body.is_warranty = true;
+      body.warranty_reason = warranty.reason.trim() || "—";
+      if (warranty.orderId) body.warranty_of = warranty.orderId;
+    }
+    return body;
+  }, [cart, isAdmin, urgentOn, overrideOn, discountPct, clientId, warranty.on, warranty.reason, warranty.orderId]);
+  const previewKey = previewBody ? JSON.stringify(previewBody) : "";
+  const fresh = !!preview && preview.key === previewKey;
+  const catalogTotal = fresh ? Number(preview.data.catalog_total) : localCatalogTotal;
+  const total = fresh ? Number(preview.data.total_price) : localTotal;
   const rulesChangeTotal = total !== catalogTotal;
+
+  // Расчёт корзины на сервере — с задержкой, чтобы не дёргать его на каждую
+  // цифру. Ничего не сохраняется: это тот же расчёт, что при оформлении, но
+  // транзакция откатывается.
+  useEffect(() => {
+    if (!previewBody) {
+      nextPreview();
+      setPreview(null);
+      setPreviewErr("");
+      return undefined;
+    }
+    const id = setTimeout(() => {
+      api
+        .post("/sales/receipts/preview/", previewBody, { signal: nextPreview() })
+        .then((r) => {
+          setPreview({ key: previewKey, data: r.data });
+          setPreviewErr("");
+        })
+        .catch((e) => {
+          if (isCanceled(e)) return;
+          setPreview(null);
+          // Причина отказа до оформления: размеры, ставка, остаток — как её
+          // потом назвал бы «Оформить», только раньше.
+          setPreviewErr(apiError(e, ""));
+        });
+    }, 450);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewKey]);
+
+  // Маржа каждой позиции корзины (админ, бухгалтер): строки ответа сервера идут
+  // в порядке корзины, и только рез раскладывается на две (работа + материал).
+  // Не сошлось число строк — построчную маржу не показываем, итоговая остаётся.
+  const lineMargins = useMemo(() => {
+    if (!fresh || preview.data.margin == null || !Array.isArray(preview.data.items)) return null;
+    const counts = cart.map((l) => (l.kind === "cutting" ? 2 : 1));
+    if (counts.reduce((a, b) => a + b, 0) !== preview.data.items.length) return null;
+    let at = 0;
+    return cart.map((_, i) => {
+      const group = preview.data.items.slice(at, at + counts[i]);
+      at += counts[i];
+      const sold = group.reduce((sum, it) => sum + Number(it.line_total || 0), 0);
+      const cost = group.reduce((sum, it) => sum + Number(it.cost_total || 0), 0);
+      return { sold, cost, margin: sold - cost, pct: sold > 0 ? Math.round(((sold - cost) / sold) * 100) : 0 };
+    });
+  }, [fresh, preview, cart]);
+
+  // Ставка работы для пары «станок × материал» — у сервера: матрица ставок,
+  // ставка станка или материала и коэффициент по толщине (CALC-02, CALC-05).
+  // Вписанную руками ставку (`cutRateEdited`) не трогаем.
+  const rateKey =
+    cut && cut.material && !cut.service && !cut.ownCut && cut.cutServiceId && cut.material.is_roll_material
+      ? `${cut.cutServiceId}:${cut.material.id}`
+      : "";
+  useEffect(() => {
+    if (!rateKey) return undefined;
+    const [sid, mid] = rateKey.split(":");
+    let alive = true;
+    api
+      .get("/services/rate/", { params: { service: sid, material: mid } })
+      .then((r) => {
+        if (!alive) return;
+        setCut((c) =>
+          c && !c.cutRateEdited && c.material && String(c.material.id) === mid && String(c.cutServiceId) === sid
+            ? { ...c, cutRate: String(r.data.rate), rateSource: r.data.source, rateCoef: r.data.coefficient }
+            : c
+        );
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [rateKey]);
+
+  // Шлюз оплаты — заглушка: «Онлайн» вести некуда, кнопка скрыта (CLI-09).
+  // Черновик мог сохранить этот способ раньше — возвращаем наличные.
+  useEffect(() => {
+    if (pricingRules.online_payments_enabled === false && paymentMethod === "ONLINE") setPaymentMethod("CASH");
+  }, [pricingRules.online_payments_enabled, paymentMethod]);
   // Сработал ли минимум хоть у одной строки — для подписи «каталог → итог».
   const minHit = useMemo(
     () =>
@@ -671,7 +988,10 @@ export default function Checkout() {
   const appliedChange = useChange && clientChange > 0 ? Math.min(clientChange, total) : 0;
   // Долг НЕ уменьшается сдачей: сдача закрывает этот заказ, а долг — прошлые.
   const debtNow = payDebt && clientDebt > 0 ? clientDebt : 0;
-  const toPay = Math.max(0, total - appliedChange);
+  // Аванс — после сдачи и тоже только на остаток заказа (так считает сервер).
+  const appliedAdvance =
+    useAdvance && clientAdvance > 0 ? Math.min(clientAdvance, Math.max(0, total - appliedChange)) : 0;
+  const toPay = Math.max(0, total - appliedChange - appliedAdvance);
   // Сколько денег кассир берёт с клиента сейчас: заказ после зачёта плюс долг.
   const cashNow = toPay + debtNow;
   // От чего считать «долг» и «сдачу» под полем: без погашения — от заказа,
@@ -892,7 +1212,7 @@ export default function Checkout() {
       setCart((prev) => [...prev, {
         key: `E${cut.service.id}-${prev.length}`, kind: "engraving",
         serviceId: cut.service.id, name: cut.service.name,
-        width: w, length: l, area: areaOf(cut.width, cut.length), rate,
+        width: w, length: l, area: cutArea, rate, parts: cutParts, passes: cutPasses,
         note: (cut.note || "").trim(), ownMaterial: !!cut.ownMaterial, qty: 1,
       }]);
       setCut(null);
@@ -944,16 +1264,29 @@ export default function Checkout() {
       if (m.sells_by_metre) {
         const len = Number(cut.length);
         if (!len) return;
-        setCart((prev) => [...prev, {
-          key: `MM${m.id}-${prev.length}`, kind: "material-metre",
-          id: m.id, name: m.name,
-          price: Number(cut.matPrice ?? m.price_per_pm) || 0,
-          priceEdited: !!cut.priceEdited,
-          length: len, qty: 1,
-          rollId: cutRollPicked ? cutRollPicked.id : null,
-          rollName: cutRollPicked ? (cutRollPicked.code || `№${cutRollPicked.id}`) : "",
-          usedWidth: cutUsedWidth > 0 && cutUsedWidth < cutFullWidth ? cutUsedWidth : null,
-        }]);
+        if (cutRollByArea) {
+          // Рулон по кв.м изделия (CALC-10): в корзину — размеры изделия.
+          if (!(cutRollProdArea > 0)) return;
+          setCart((prev) => [...prev, {
+            key: `MR${m.id}-${prev.length}`, kind: "material-roll-area",
+            id: m.id, name: m.name,
+            price: cutRollSqmRate, priceEdited: !!cut.sqmPriceEdited,
+            width: Number(cut.usedWidth), length: len, area: cutRollProdArea, qty: 1,
+            rollId: cutRollPicked ? cutRollPicked.id : null,
+            rollName: cutRollPicked ? (cutRollPicked.code || `№${cutRollPicked.id}`) : "",
+          }]);
+        } else {
+          setCart((prev) => [...prev, {
+            key: `MM${m.id}-${prev.length}`, kind: "material-metre",
+            id: m.id, name: m.name,
+            price: Number(cut.matPrice ?? m.price_per_pm) || 0,
+            priceEdited: !!cut.priceEdited,
+            length: len, qty: 1,
+            rollId: cutRollPicked ? cutRollPicked.id : null,
+            rollName: cutRollPicked ? (cutRollPicked.code || `№${cutRollPicked.id}`) : "",
+            usedWidth: cutUsedWidth > 0 && cutUsedWidth < cutFullWidth ? cutUsedWidth : null,
+          }]);
+        }
         // Контурная резка по рулону — своей строкой работы, тем же путём, что
         // и рез целого листа: материал уходит в неё только ради ставки, без
         // размеров куска (иначе сервер посчитал бы рулон ещё и по площади).
@@ -976,8 +1309,8 @@ export default function Checkout() {
       if (!w || !l) return;
       // Площадь — как её посчитает и сохранит сервер (до 0.001, половина
       // вверх): иначе касса и чек расходились на сом.
-      const area = areaOf(cut.width, cut.length);
-      const runM = runMetersFor(cut);
+      const area = cutArea;
+      const runM = cutRunM;
       // «Квадратный метр» — материал по площади и всё: работы реза в этом
       // режиме нет. Так же ведём себя, если услуги резки нет в каталоге.
       if (cut.mode === "SQM" || !cuttingService) {
@@ -1001,7 +1334,9 @@ export default function Checkout() {
         materialPriceEdited: !!cut.matPriceEdited,
         rate: Number(cut.cutRate || 0), rateEdited: !!cut.cutRateEdited,
         cutMode: cut.mode,
-        width: w, length: l, area, runM, qty: 1,
+        // runM — длина реза на ВСЕ детали, runMOne — на одну: на сервер уходит
+        // вторая, деталей он умножит сам.
+        width: w, length: l, area, runM, runMOne: cutRunMOne, parts: cutParts, rm: true, qty: 1,
       }]);
       setCut(null);
       return;
@@ -1020,7 +1355,7 @@ export default function Checkout() {
       serviceId: s.id, name: s.name,
       materialId: mat.id, materialName: mat.name, materialPrice: matPrice,
       rate: Number(s.rate_flat),
-      width: w, length: l, area, runM: area, qty: 1,
+      width: w, length: l, area, runM: area, rm: false, qty: 1,
     }]);
     setCut(null);
   }
@@ -1053,6 +1388,92 @@ export default function Checkout() {
     setFieldErr((e) => ({ ...e, name: undefined, phone: undefined }));
   }
 
+  // Цена по договорённости у услуги за штуку или фикс (монтаж, буквы, «Прочее»).
+  function setLinePrice(key, raw) {
+    setCart((prev) =>
+      prev.map((l) => (l.key === key ? { ...l, unit_price: raw, priceEdited: true } : l))
+    );
+  }
+
+  // Исходный заказ гарантийной переделки: по номеру находим сам чек.
+  async function findWarrantyOrder() {
+    const no = String(warranty.orderNo).replace(/\D/g, "");
+    if (!no) return setWarranty((w) => ({ ...w, orderId: null, lookup: "" }));
+    try {
+      const { data } = await api.get("/sales/receipts/", { params: { search: no, page_size: 5 } });
+      const hit = (data.results || []).find((r) => String(r.order_number) === no);
+      setWarranty((w) => ({
+        ...w,
+        orderId: hit ? hit.id : null,
+        lookup: hit ? t("checkout2.warrantyFound", { name: hit.client_name || hit.title || "—" }) : t("checkout2.warrantyNotFound"),
+      }));
+    } catch {
+      setWarranty((w) => ({ ...w, orderId: null, lookup: t("checkout2.warrantyNotFound") }));
+    }
+  }
+
+  // Коммерческое предложение: те же позиции и правила прайса, но склад, долг и
+  // выручку оно не трогает. Печатается сразу после сохранения.
+  async function saveQuote() {
+    setError("");
+    if (!cart.length) return setError(t("checkout.emptyCart"));
+    setBusy(true);
+    try {
+      const body = { items: cartToItems(cart, isAdmin) };
+      if (orderTitle.trim()) body.title = orderTitle.trim();
+      if (clientId) body.client_id = clientId;
+      else {
+        const nm = (client.type === "OSOO" ? client.company_name : client.full_name) || "";
+        if (nm.trim()) body.client_name = nm.trim();
+      }
+      if (urgentOn) body.is_urgent = true;
+      if (overrideOn) body.discount_percent = discountPct;
+      const { data } = await api.post("/sales/quotes/", body);
+      toast(t("checkout2.quoteSaved", { n: data.number }));
+      setQuotePrint(data);
+    } catch (e) {
+      setError(apiError(e, t("common.error")));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // «Оформить заказ из КП»: позиции КП идут в корзину тем же кодом, что и
+  // «Повторить заказ» (цены — сегодняшние), а оформление закроет само КП.
+  function loadQuote(q) {
+    const src = (q.items || []).filter((i) => !i.is_returned);
+    const { lines, skipped } = cartFromReceipt(src, materials, services, t);
+    if (!lines.length) {
+      toast(t("checkout.repeatEmpty"), "error");
+      return;
+    }
+    setCart(lines);
+    setQuoteId(q.id);
+    if (q.title) setOrderTitle(q.title);
+    if (q.client) {
+      setClientId(q.client);
+      api
+        .get(`/clients/clients/${q.client}/`)
+        .then((c) =>
+          setClient({
+            type: c.data.type,
+            full_name: c.data.full_name || "",
+            company_name: c.data.company_name || "",
+            phone: c.data.phone || "",
+          })
+        )
+        .catch(() => {});
+    } else if (q.client_name) {
+      setClient((c) => ({ ...c, full_name: q.client_name }));
+    }
+    setQuotesOpen(false);
+    toast(
+      skipped
+        ? t("checkout2.quoteLoadedPartly", { n: q.number, skipped })
+        : t("checkout2.quoteLoaded", { n: q.number })
+    );
+  }
+
   // Очистить чек целиком: позиции, клиент, оплата. Спрашиваем — собранный на
   // десять позиций чек стирается одним нажатием.
   async function clearAll() {
@@ -1068,6 +1489,9 @@ export default function Checkout() {
     setPayDebt(false);
     setIsUrgent(false);
     setDiscountOverride(null);
+    setBuyerName("");
+    setWarranty(NO_WARRANTY);
+    setQuoteId(null);
     setMatches([]);
     setError("");
     setFieldErr({});
@@ -1094,10 +1518,16 @@ export default function Checkout() {
     }
   }
 
-  async function submit() {
+  // `confirmed` — коды предупреждений, которые человек уже подтвердил: сервер
+  // отвечает 409, пока сомнительный заказ (строка на 120 000, деталь больше
+  // листа, долг выше лимита) не подтверждён, и ничего не создаёт.
+  async function submit(confirmed = []) {
     setError("");
     setFieldErr({});
     if (!cart.length) return setError(t("checkout.emptyCart"));
+    // Цена по договорённости стёрта и не вписана — на сервер ушла бы пустая строка.
+    const noPrice = cart.find((l) => l.kind === "service" && l.priceEdited && !(Number(l.unit_price) >= 0 && l.unit_price !== ""));
+    if (noPrice) return setError(t("checkout2.needPrice", { name: noPrice.name }));
     // Резка без длины реза — работа за ноль; сервер такой заказ отклонит, но
     // причину лучше назвать здесь, вместе со строкой, которую надо переделать.
     const noRunM = cart.find((l) => (l.kind === "cutting" || l.kind === "cut-work" || l.kind === "cut-own") && !(Number(l.runM) > 0));
@@ -1113,85 +1543,16 @@ export default function Checkout() {
       if (client.type === "PHYSICAL" && !client.full_name.trim()) bad.name = t("checkout.needName");
       if (client.type === "OSOO" && !client.company_name.trim()) bad.name = t("checkout.needCompany");
     }
+    // Заказ в долг без клиента — только с именем покупателя: взыскать не с кого.
+    const willOwe = !(isAdmin && warranty.on) && paymentMethod !== "ONLINE" && !payFull && Number(prepay || 0) < owedNow;
+    if (willOwe && !clientId && !client.phone && !buyerName.trim()) bad.buyer = t("checkout2.buyerNeeded");
+    if (isAdmin && warranty.on && !warranty.reason.trim()) bad.warrantyReason = t("checkout2.warrantyReasonNeeded");
     if (Object.keys(bad).length) {
       setFieldErr(bad);
       return focusFirstInvalid();
     }
     setBusy(true);
-    const items = cart.map((l) => {
-      if (l.kind === "material")
-        return {
-          type: "MATERIAL", material: l.id, quantity: l.qty, mode: l.mode || "SQM",
-          // Пачка листа уходит тем же полем, что и рулон: на сервере это одна
-          // и та же партия (Roll), просто формы разные.
-          ...(l.lotId ? { roll: l.lotId } : {}),
-          // Цену шлём, только если админ правил её руками. Иначе сервер сам
-          // решит, розничная тут цена или оптовая (опт включается от количества).
-          ...(isAdmin && l.priceEdited ? { material_price: l.price } : {}),
-        };
-      if (l.kind === "material-metre")
-        // Режим шлём ЯВНО: сервер его не угадывает, иначе площадь и длина
-        // молча поменялись бы местами.
-        return {
-          type: "MATERIAL", material: l.id, quantity: l.length, mode: "METER",
-          ...(l.rollId ? { roll: l.rollId } : {}),
-          ...(l.usedWidth ? { used_width: l.usedWidth } : {}),
-          // Цену шлём, только если админ её правил (или её нет в каталоге и
-          // взята из прошлого чека). Нетронутая — сервер берёт каталог сам, а
-          // пустой каталог отклоняет: неявный ноль — ошибка ввода, явный
-          // (вписанный) ноль — подарок.
-          ...(isAdmin && l.priceEdited ? { material_price: l.price } : {}),
-        };
-      if (l.kind === "material-area")
-        return {
-          type: "MATERIAL", material: l.id, quantity: l.area, mode: "SQM",
-          ...(l.lotId ? { roll: l.lotId } : {}),
-          ...(isAdmin && l.priceEdited ? { material_price: l.price } : {}),
-        };
-      if (l.kind === "cutting")
-        return {
-          type: "SERVICE", service: l.serviceId, material: l.materialId,
-          width: l.width, length: l.length, running_meters: l.runM,
-          ...(l.lotId ? { roll: l.lotId } : {}),
-          ...(isAdmin && l.materialPriceEdited ? { material_price: l.materialPrice } : {}),
-          ...(isAdmin && l.rateEdited ? { cut_rate: l.rate } : {}),
-        };
-      if (l.kind === "cut-work")
-        // Материал передаём (для ставки реза), но без размеров → площадь 0 →
-        // бэкенд создаёт только строку работы, без материала по площади.
-        return {
-          type: "SERVICE", service: l.serviceId, material: l.materialId,
-          running_meters: l.runM,
-          ...(isAdmin && l.rateEdited ? { cut_rate: l.rate } : {}),
-        };
-      if (l.kind === "cut-own")
-        // Материал клиента: цену шлём ВСЕГДА — она видна и правится у всех,
-        // каталожной у чужого материала нет. Сервер это разрешает только
-        // с флагом `own_material`.
-        return {
-          type: "SERVICE", service: l.serviceId, own_material: true,
-          running_meters: l.runM, cut_rate: l.rate, note: l.note || "",
-        };
-      if (l.kind === "waste")
-        // Отходы: мерка — ЯВНО (сервер её не угадывает), цена — всегда своя.
-        // Площадь шлём размерами, если их называли: так она сойдётся с тем,
-        // что мерили рулеткой.
-        return {
-          type: "SERVICE", service: l.serviceId, mode: l.mode,
-          ...(l.mode === "SQM" && l.width && l.length
-            ? { width: l.width, length: l.length }
-            : { quantity: l.amount }),
-          cut_rate: l.rate, note: l.note || "",
-        };
-      if (l.kind === "engraving")
-        // Гравировка: цена за кв.м — та, что стояла в окне (правится всеми).
-        return {
-          type: "SERVICE", service: l.serviceId, width: l.width, length: l.length,
-          cut_rate: l.rate, note: l.note || "",
-          ...(l.ownMaterial ? { own_material: true } : {}),
-        };
-      return { type: "SERVICE", service: l.id, quantity: l.qty };
-    });
+    const items = cartToItems(cart, isAdmin);
     const payload = { payment_method: paymentMethod, items };
     if (orderTitle.trim()) payload.title = orderTitle.trim();
     // Правила прайса: «Срочно» — только когда наценка задана; скидку шлёт
@@ -1210,6 +1571,7 @@ export default function Checkout() {
       // Зачесть сдачу решает касса, а СКОЛЬКО зачесть — сервер: сдача могла
       // измениться, пока чек собирали, и своё число касса бы не угадала.
       if (useChange && clientChange > 0) payload.use_change = true;
+      if (useAdvance && clientAdvance > 0) payload.use_advance = true;
       // Сумму долга считает сервер: он же собирает список заказов под погашение
       // ДО продажи, чтобы новый заказ не попал сам под себя.
       if (payDebt && clientDebt > 0) payload.pay_debt = true;
@@ -1217,6 +1579,16 @@ export default function Checkout() {
     if (clientId) payload.client_id = clientId;
     else if (client.phone)
       payload.client = { ...client, ...(referredBy ? { referred_by: Number(referredBy) } : {}) };
+    else if (buyerName.trim()) payload.buyer_name = buyerName.trim();
+    if (quoteId) payload.quote_id = quoteId;
+    if (isAdmin && warranty.on) {
+      payload.is_warranty = true;
+      payload.warranty_reason = warranty.reason.trim();
+      if (warranty.culprit.trim()) payload.warranty_culprit = warranty.culprit.trim();
+      if (warranty.orderId) payload.warranty_of = warranty.orderId;
+    }
+    if (confirmed.length) payload.confirmed_warnings = confirmed;
+    let retryWith = null;
     try {
       // Один ключ на одну попытку одной и той же корзины: если ответ потерялся
       // (обрыв, таймаут), повторное «Оформить» уйдёт с ТЕМ ЖЕ ключом, и сервер
@@ -1253,6 +1625,8 @@ export default function Checkout() {
       setClientId(null);
       setClientChange(0);
       setUseChange(true);
+      setClientAdvance(0);
+      setUseAdvance(true);
       setClientDebt(0);
       setPayDebt(false);
       setReferredBy("");
@@ -1263,24 +1637,40 @@ export default function Checkout() {
       setIsUrgent(false);
       setDiscountOverride(null);
       setClientDiscount(0);
+      setBuyerName("");
+      setWarranty(NO_WARRANTY);
+      setQuoteId(null);
+      setPreview(null);
       // Дату НЕ сбрасываем: заказы задним числом заносят пачкой за один день,
       // и возврат на сегодня после каждой продажи заставлял бы вводить её снова.
     } catch (e) {
       idem.failed(e);
-      // Ошибка валидации клиента ({"client": {"phone": [...]}}) — к своему полю.
-      const cd = e.response?.status === 400 ? e.response.data?.client : null;
-      if (cd && typeof cd === "object" && !Array.isArray(cd) && (cd.phone || cd.full_name || cd.company_name)) {
-        setFieldErr({
-          ...(cd.phone ? { phone: [].concat(cd.phone).join(" ") } : {}),
-          ...(cd.full_name || cd.company_name ? { name: [].concat(cd.full_name || cd.company_name).join(" ") } : {}),
-        });
-        focusFirstInvalid();
+      // Сомнительный заказ: сервер ничего не создал и просит подтвердить.
+      if (e.response?.status === 409 && e.response.data?.needs_confirmation) {
+        const found = e.response.data.warnings || [];
+        const ok = await confirm(
+          `${found.map((w) => w.message).join("\n")}\n\n${t("checkout2.confirmAnyway")}`
+        );
+        if (ok) retryWith = [...new Set([...confirmed, ...found.map((w) => w.code)])];
       } else {
-        setError(apiError(e, t("common.error")));
+        // Ошибка валидации клиента ({"client": {"phone": [...]}}) — к своему полю.
+        const cd = e.response?.status === 400 ? e.response.data?.client : null;
+        if (cd && typeof cd === "object" && !Array.isArray(cd) && (cd.phone || cd.full_name || cd.company_name)) {
+          setFieldErr({
+            ...(cd.phone ? { phone: [].concat(cd.phone).join(" ") } : {}),
+            ...(cd.full_name || cd.company_name ? { name: [].concat(cd.full_name || cd.company_name).join(" ") } : {}),
+          });
+          focusFirstInvalid();
+        } else {
+          setError(apiError(e, t("common.error")));
+        }
       }
     } finally {
       setBusy(false);
     }
+    // Подтвердили — тот же заказ уходит ещё раз, уже с кодами подтверждения.
+    if (retryWith) return submit(retryWith);
+    return undefined;
   }
 
   const isMatModal = !!(cut && cut.material && !cut.service); // окно материала
@@ -1368,7 +1758,26 @@ export default function Checkout() {
   const cutRollLeft = cutRollPicked
     ? Number(cutRollPicked.metres_remaining || 0) - cutRollLen
     : Number(cutRollMat?.metres_remaining || 0) - cutRollLen;
-  const cutArea = cut && Number(cut.width) && Number(cut.length) ? areaOf(cut.width, cut.length) : 0;
+  // РУЛОН ПО КВ.М ИЗДЕЛИЯ (CALC-10): второй способ, если у рулона задана цена
+  // за кв.м. Клиент платит ширина × длина изделия × цена за кв.м, а со склада
+  // уходит вся ширина рулона × длина — как у метров; лишняя полоса — обрезок.
+  const cutRollAreaOk = cutRoll && Number(cutRollMat.price_per_sqm) > 0;
+  const cutRollByArea = cutRollAreaOk && cut?.rollMode === "SQM";
+  const cutRollSqmRate = cutRollByArea ? Number(cut.sqmPrice ?? cutRollMat.price_per_sqm) || 0 : 0;
+  const cutRollProdArea =
+    cutRollByArea && cutUsedWidth > 0 && cutRollLen > 0 ? areaOf(cut.usedWidth, cut.length) : 0;
+  const cutRollMatTotal = cutRollByArea ? ceilSom(cutRollProdArea * cutRollSqmRate) : cutRollTotal;
+  const cutRollStockArea = cutRoll ? +(cutFullWidth * cutRollLen).toFixed(3) : 0;
+  // Деталей и проходов (2026-10-10): у реза по стороне/кривой и у гравировки
+  // 12 одинаковых деталей — одна позиция. Площадь и длина реза считаются на все
+  // детали и округляются один раз — как на сервере; проходы умножают ставку.
+  const cutParts =
+    cut && (cut.engraving || (isMatModal && CUT_MODES.includes(cut.mode)))
+      ? Math.min(1000, Math.max(1, Math.floor(Number(cut.parts)) || 1))
+      : 1;
+  const cutPasses = cut?.engraving ? Math.min(20, Math.max(1, Math.floor(Number(cut.passes)) || 1)) : 1;
+  const cutArea =
+    cut && Number(cut.width) && Number(cut.length) ? partsArea(cut.width, cut.length, cutParts) : 0;
   const cutMat = cut ? (cut.material || materials.find((m) => m.id === Number(cut.materialId))) : null;
   // Сколько площади просит эта строка и сколько её осталось на складе. В корзине
   // уже может лежать этот же материал — учитываем, иначе две строки по 8 кв.м
@@ -1397,7 +1806,7 @@ export default function Checkout() {
     : isMatModal && CUT_MODES.includes(cut.mode) && !!cuttingService;
   // Ставка: у монтажа — своя за кв.м, у реза — ставка станка/материала.
   const cutWorkRate = cut?.engraving
-    ? engRate
+    ? engRate * cutPasses
     : cut?.service
     ? (cut.service.uses_running_meter ? Number(cut.cutRate || 0) : Number(cut.service.rate_flat))
     : cutWorkOn
@@ -1406,7 +1815,8 @@ export default function Checkout() {
   // Длина реза: у кривой — то, что ввёл мастер; у обычного реза — ОДНА сторона
   // куска, та, что вписана в «Длину». Площадь сюда не подставляется: кв.м и
   // пог.м разные величины, и работа от такой подстановки выходила втрое дешевле.
-  const cutRunM = cut?.service ? cutArea : isMatModal ? runMetersFor(cut) : 0;
+  const cutRunMOne = isMatModal ? runMetersFor(cut) : 0; // на одну деталь
+  const cutRunM = cut?.service ? cutArea : isMatModal ? +(cutRunMOne * cutParts).toFixed(3) : 0;
   const cutWork = cutWorkOn ? cutWorkRate * cutRunM : 0;
   const cutMaterialSum = cutMatSqm * cutArea;
   const cutPieceQty = Number(cut?.qty) || 1;
@@ -1455,7 +1865,7 @@ export default function Checkout() {
     : wholeUnitOf(cutMat);
   // Итог = сумма округлённых вверх строк (как в чеке): лист/материал + работа.
   const cutTotal = cutRoll
-    ? cutRollTotal + cutRollWork
+    ? cutRollMatTotal + cutRollWork
     : cutPiece
     ? ceilSom(cutPieceTotal) + ceilSom(cutPieceWork)
     : ceilSom(cutWork) + ceilSom(cutMaterialSum);
@@ -1479,7 +1889,9 @@ export default function Checkout() {
       addBlock = "noCutService";
     } else if (cutRoll) {
       if (!(cutRollLen > 0)) addBlock = "needRollLen";
-      else if (!(cutRollRate > 0)) addBlock = "needRollPrice";
+      else if (cutRollByArea && !(cutUsedWidth > 0)) addBlock = "needSize";
+      else if (cutRollByArea && !(cutRollSqmRate > 0)) addBlock = "needMatPrice";
+      else if (!cutRollByArea && !(cutRollRate > 0)) addBlock = "needRollPrice";
       else if (cutRollLeft < 0) addBlock = "rollShort";
       else if (cutUsedWidth > cutFullWidth) addBlock = "rollTooWide";
       else if (cutRollWorkOn && !(cutRollRunM > 0)) addBlock = "needRunM";
@@ -1549,11 +1961,18 @@ export default function Checkout() {
                     <span className="muted" style={{ fontSize: 12 }}>{t("checkout.ownCutPriceTile")}</span>
                   ) : p.kind === "material" ? (
                     p.sells_by_metre ? (
-                      // У рулона цена одна — за погонный метр. Цены за квадрат
-                      // и «за лист целиком» у него не бывает.
+                      // У рулона цена — за погонный метр; «за лист целиком» у
+                      // него не бывает. Вторая цена — за кв.м изделия (CALC-10),
+                      // если её задали.
                       <>
                         {ceilSom(p.price_per_pm)}{" "}
                         {t("checkout.perPieceShort", { unit: t("unit.METER") })}
+                        {p.price_per_sqm > 0 && (
+                          <div className="muted" style={{ fontSize: 12 }}>
+                            {ceilSom(p.price_per_sqm)}{" "}
+                            {t("checkout.perPieceShort", { unit: t("unit.SQM") })}
+                          </div>
+                        )}
                       </>
                     ) : p.is_roll_material ? (
                       <>
@@ -1597,12 +2016,20 @@ export default function Checkout() {
         <div className="pos-cart card">
           <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8, margin: "0 0 10px" }}>
             <h3 style={{ margin: 0 }}>{t("checkout.receipt")}</h3>
-            {(cart.length > 0 || client.phone || client.full_name || client.company_name || orderTitle) && (
-              <button type="button" className="ghost" onClick={clearAll}>
-                {t("checkout.clear")}
+            <div className="row" style={{ gap: 4, margin: 0 }}>
+              <button type="button" className="ghost" onClick={() => setQuotesOpen(true)}>
+                {t("checkout2.quotesList")}
               </button>
-            )}
+              {(cart.length > 0 || client.phone || client.full_name || client.company_name || orderTitle) && (
+                <button type="button" className="ghost" onClick={clearAll}>
+                  {t("checkout.clear")}
+                </button>
+              )}
+            </div>
           </div>
+          {quoteId && (
+            <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>{t("checkout2.fromQuote")}</p>
+          )}
           {cart.length ? (
             cart.map((l) => (
               <div className="cart-line" key={l.key}>
@@ -1610,6 +2037,7 @@ export default function Checkout() {
                   <div className="cl-name">{l.name}</div>
                   {l.kind === "cutting" ? (
                     <div className="cl-sub">
+                      {Number(l.parts) > 1 ? `${l.parts} × ` : ""}
                       {l.width}×{l.length} = {l.area} {t("unit.SQM")} · {l.materialName} ·{" "}
                       {t("checkout.rateWork")} {l.rate} × {l.runM} {t("checkout.pmShort")}
                       {/* Строка без длины реза может прийти только из повтора
@@ -1651,7 +2079,9 @@ export default function Checkout() {
                     </div>
                   ) : l.kind === "engraving" ? (
                     <div className="cl-sub">
-                      {l.width}×{l.length} = {l.area} {t("unit.SQM")} · {l.rate}{" "}
+                      {Number(l.parts) > 1 ? `${l.parts} × ` : ""}
+                      {l.width}×{l.length} = {l.area} {t("unit.SQM")} · {l.rate}
+                      {Number(l.passes) > 1 ? ` × ${l.passes} ${t("checkout2.passesShort")}` : ""}{" "}
                       {t("checkout.perPieceShort", { unit: t("unit.SQM") })}
                       {l.note ? ` · ${l.note}` : ""}
                     </div>
@@ -1660,6 +2090,13 @@ export default function Checkout() {
                     // намеренно, она в расчёт цены не входит.
                     <div className="cl-sub">
                       {l.length} {t("unit.METER")} · {l.price} {t("checkout.perPieceShort", { unit: t("unit.METER") })}
+                      {l.rollName ? ` · ${t("checkout.fromRoll", { roll: l.rollName })}` : ""}
+                    </div>
+                  ) : l.kind === "material-roll-area" ? (
+                    // Рулон по кв.м изделия (CALC-10): размеры изделия и цена за
+                    // кв.м; со склада уйдёт вся ширина рулона.
+                    <div className="cl-sub">
+                      {l.width}×{l.length} = {l.area} {t("unit.SQM")} · {l.price} {t("checkout.perPieceShort", { unit: t("unit.SQM") })}
                       {l.rollName ? ` · ${t("checkout.fromRoll", { roll: l.rollName })}` : ""}
                     </div>
                   ) : l.kind === "material-area" ? (
@@ -1671,11 +2108,55 @@ export default function Checkout() {
                         <span className="badge ok" style={{ marginLeft: 6 }}>{t("checkout.wholesale")}</span>
                       )}
                     </div>
+                  ) : l.kind === "service" && (isAdmin || l.staff_sets_rate) ? (
+                    // Цена по договорённости: админ вписывает у любой услуги,
+                    // складовщик — там, где это разрешено услуге.
+                    <div className="cl-sub">
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        min="0"
+                        step="any"
+                        value={l.unit_price}
+                        onChange={(e) => setLinePrice(l.key, e.target.value)}
+                        aria-label={`${t("checkout2.unitPrice")}: ${l.name}`}
+                        style={{ width: 96, minHeight: 0, height: 28, padding: "2px 6px" }}
+                      />{" "}
+                      {t("checkout2.somPerUnit")}
+                      {l.priceEdited && <span className="badge" style={{ marginLeft: 6 }}>{t("checkout2.byAgreement")}</span>}
+                    </div>
                   ) : (
                     <div className="cl-sub">{formatMoney(unitPrice(l))} / ед.</div>
                   )}
+                  {/* Маржа строки до оформления — только тем, кто видит закупку.
+                      Себестоимость тут прикидка по партиям на сейчас. */}
+                  {lineMargins?.[cart.indexOf(l)] && (
+                    <div className="cl-sub" style={{ color: lineMargins[cart.indexOf(l)].margin < 0 ? "var(--danger-ink)" : undefined }}>
+                      {t("checkout2.lineMargin", {
+                        sum: formatNumber(lineMargins[cart.indexOf(l)].margin),
+                        pct: lineMargins[cart.indexOf(l)].pct,
+                      })}
+                    </div>
+                  )}
+                  {/* Исполнитель работы — кому пойдёт выработка в ведомости. */}
+                  {WORK_KINDS.includes(l.kind) && executors?.length > 0 && (
+                    <div className="cl-sub">
+                      <select
+                        value={l.executor ?? ""}
+                        onChange={(e) => setLineExecutor(l.key, e.target.value)}
+                        aria-label={`${t("checkout2.executor")}: ${l.name}`}
+                        title={t("checkout2.executor")}
+                        style={{ width: "auto", minHeight: 0, height: 28, padding: "2px 6px" }}
+                      >
+                        <option value="">{t("checkout2.executor")}: {t("checkout2.executorNone")}</option>
+                        {executors.map((e) => (
+                          <option key={e.id} value={e.id}>{t("checkout2.executor")}: {e.full_name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
-                {!["cutting", "material-area", "material-metre", "cut-work", "cut-own", "engraving", "waste"].includes(l.kind) && (
+                {!["cutting", "material-area", "material-metre", "material-roll-area", "cut-work", "cut-own", "engraving", "waste"].includes(l.kind) && (
                   <div className="stepper">
                     <button onClick={() => changeQty(l.key, -1)} aria-label={t("checkout.qtyMinus")}>−</button>
                     {/* Поле, а не подпись: одну-две штуки удобнее доклацать
@@ -1762,6 +2243,48 @@ export default function Checkout() {
                 </p>
               )
             )}
+            {/* Гарантия / переделка за счёт цеха (админ): цены строк 0,
+                материал списывается, себестоимость видна в марже исходного заказа. */}
+            {isAdmin && (
+              <div style={{ marginTop: 8 }}>
+                <label className="pos-urgent">
+                  <input
+                    type="checkbox"
+                    checked={warranty.on}
+                    onChange={(e) => setWarranty({ ...warranty, on: e.target.checked })}
+                  />
+                  <span>{t("checkout2.warranty")}</span>
+                </label>
+                {warranty.on && (
+                  <div className="card" style={{ padding: 10, marginTop: 6 }}>
+                    <p className="muted" style={{ fontSize: 12, margin: "0 0 6px" }}>{t("checkout2.warrantyHint")}</p>
+                    <Field label={t("checkout2.warrantyOrder")} hint={warranty.lookup || undefined}>
+                      <input
+                        inputMode="numeric"
+                        value={warranty.orderNo}
+                        onChange={(e) => setWarranty({ ...warranty, orderNo: e.target.value, orderId: null, lookup: "" })}
+                        onBlur={findWarrantyOrder}
+                        placeholder="№"
+                      />
+                    </Field>
+                    <Field label={t("checkout2.warrantyReason")} required error={fieldErr.warrantyReason}>
+                      <input
+                        value={warranty.reason}
+                        maxLength={255}
+                        onChange={(e) => setWarranty({ ...warranty, reason: e.target.value })}
+                      />
+                    </Field>
+                    <Field label={t("checkout2.warrantyCulprit")} style={{ marginBottom: 0 }}>
+                      <input
+                        value={warranty.culprit}
+                        maxLength={120}
+                        onChange={(e) => setWarranty({ ...warranty, culprit: e.target.value })}
+                      />
+                    </Field>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {rulesChangeTotal && cart.length > 0 && (
@@ -1780,6 +2303,39 @@ export default function Checkout() {
                   .join(" · ")}
               </div>
             </div>
+          )}
+
+          {/* Расчёт сервера: маржа (только админу и бухгалтеру), предупреждения
+              «проверьте размеры» и причина, по которой заказ не соберётся. */}
+          {fresh && preview.data.margin != null && cart.length > 0 && (
+            <div className="pos-catalog">
+              <div className="crow">
+                <span className="muted">{t("checkout2.cost")}</span>
+                <span className="muted">{formatMoney(preview.data.cost_total)}</span>
+              </div>
+              <div className="crow">
+                <span className="muted">{t("checkout2.margin")}</span>
+                <strong style={{ color: Number(preview.data.margin) < 0 ? "var(--danger-ink)" : undefined }}>
+                  {formatMoney(preview.data.margin)}
+                  {Number(preview.data.total_price) > 0 &&
+                    ` · ${Math.round((Number(preview.data.margin) / Number(preview.data.total_price)) * 100)}%`}
+                </strong>
+              </div>
+              <div className="muted" style={{ fontSize: 12 }}>{t("checkout2.costEstimate")}</div>
+            </div>
+          )}
+          {fresh &&
+            [...(preview.data.confirm_warnings || []), ...(preview.data.warnings || [])].map((w, i) => (
+              <p key={`${w.code}-${i}`} className="callout" role="status" style={{ fontSize: 13, margin: "6px 0" }}>
+                {w.code === "below_cost"
+                  ? t("checkout.warnBelowCost", { name: w.name, sum: formatMoney(w.line_total) })
+                  : w.code === "cost_unknown"
+                  ? t("checkout.warnCostUnknown")
+                  : w.message || w.code}
+              </p>
+            ))}
+          {!fresh && previewErr && cart.length > 0 && (
+            <p className="muted" style={{ fontSize: 12, margin: "6px 0" }} role="status">{previewErr}</p>
           )}
 
           <div className="pos-total"><span>{t("common.total")}</span><span>{formatMoney(total)}</span></div>
@@ -1911,7 +2467,7 @@ export default function Checkout() {
 
           <label id="pay-method-label" style={{ marginTop: 10 }}>{t("checkout.paymentMethod")}</label>
           <div className="row" style={{ gap: 8, flexWrap: "wrap" }} role="group" aria-labelledby="pay-method-label">
-            {["CASH", "MBANK", "DEMIRBANK", "ONLINE"].map((m) => (
+            {["CASH", "MBANK", "DEMIRBANK", ...(pricingRules.online_payments_enabled ? ["ONLINE"] : [])].map((m) => (
               <button
                 key={m}
                 className={paymentMethod === m ? "" : "secondary"}
@@ -1955,6 +2511,35 @@ export default function Checkout() {
             </div>
           )}
 
+          {/* Аванс клиента (волна 2): деньги уже в кассе, галочка закрывает
+              ими остаток заказа после сдачи. Снял — аванс остаётся на счету. */}
+          {paymentMethod !== "ONLINE" && clientAdvance > 0 && total > 0 && !warranty.on && (
+            <div
+              className="card"
+              style={{ background: "var(--primary-soft)", padding: 10, marginTop: 10 }}
+            >
+              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={useAdvance}
+                  onChange={(e) => setUseAdvance(e.target.checked)}
+                  style={{ width: 18, height: 18, marginTop: 2 }}
+                />
+                <span style={{ fontSize: 13 }}>
+                  {t("checkout2.hasAdvance", { sum: formatNumber(clientAdvance) })}
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    {useAdvance
+                      ? t("checkout2.advanceApplied", {
+                          sum: formatNumber(appliedAdvance),
+                          left: formatNumber(toPay),
+                        })
+                      : t("checkout2.advanceKept")}
+                  </div>
+                </span>
+              </label>
+            </div>
+          )}
+
           {/* Старый долг клиента — тут же, а не в другом разделе: он приходит
               за новым заказом и заодно отдаёт прошлое. Галочка ВЫКЛЮЧЕНА по
               умолчанию: это его деньги, и решает он. Долг принимает только
@@ -1981,6 +2566,14 @@ export default function Checkout() {
                 </span>
               </label>
             </div>
+          )}
+
+          {/* Складовщик долг не принимает, но видеть его обязан: отгружать в долг
+              клиенту, который уже должен, — решение, а не случайность (CLI-03). */}
+          {paymentMethod !== "ONLINE" && !isAdmin && clientDebt > 0 && (
+            <p className="callout" role="status" style={{ fontSize: 13, margin: "10px 0 0" }}>
+              {t("checkout2.clientOwes", { sum: formatNumber(clientDebt) })}
+            </p>
           )}
 
           {paymentMethod !== "ONLINE" && (
@@ -2042,9 +2635,22 @@ export default function Checkout() {
                       10 103 сома по четырём заказам. Предупреждаем, но не
                       запрещаем: бывает, что клиента заводят потом. */}
                   {!clientId && !client.phone && (
-                    <div style={{ fontSize: 12, color: "var(--danger-ink)" }}>
-                      {t("checkout.debtNeedsClient")}
-                    </div>
+                    <Field
+                      style={{ marginTop: 6 }}
+                      label={t("checkout2.buyerName")}
+                      required
+                      error={fieldErr.buyer}
+                      hint={t("checkout.debtNeedsClient")}
+                    >
+                      <input
+                        value={buyerName}
+                        maxLength={255}
+                        onChange={(e) => {
+                          setBuyerName(e.target.value);
+                          setFieldErr((er) => ({ ...er, buyer: undefined }));
+                        }}
+                      />
+                    </Field>
                   )}
                 </div>
               )}
@@ -2092,7 +2698,7 @@ export default function Checkout() {
               </button>
             </div>
           )}
-          <button style={{ marginTop: 0, width: "100%", height: 52 }} onClick={submit} disabled={busy || !cart.length}>
+          <button style={{ marginTop: 0, width: "100%", height: 52 }} onClick={() => submit()} disabled={busy || !cart.length}>
             {busy
               ? t("common.loading")
               : `${t("checkout.submit")} · ${formatMoney(total)}` +
@@ -2105,6 +2711,16 @@ export default function Checkout() {
               {t("checkout.takeNow")}: <strong>{formatMoney(cashNow)}</strong>
             </p>
           )}
+          {/* КП: посчитать и распечатать, ничего не списывая и не продавая. */}
+          <button
+            type="button"
+            className="secondary"
+            style={{ marginTop: 8, width: "100%" }}
+            onClick={saveQuote}
+            disabled={busy || !cart.length}
+          >
+            {t("checkout2.saveQuote")}
+          </button>
           </div>
         </div>
       </div>
@@ -2439,6 +3055,26 @@ export default function Checkout() {
                 </Field>
               </div>
               <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("checkout.sizeHint")}</p>
+              {/* Деталей и проходов: 4 одинаковые таблички — одна позиция; три
+                  прохода по металлу стоят втрое (CALC-02, CALC-04). */}
+              <div className="row">
+                <Field className="grow" label={t("checkout2.parts")} hint={t("checkout2.partsHint")}>
+                  <input
+                    type="number" inputMode="numeric" min="1" step="1"
+                    value={cut.parts ?? ""}
+                    placeholder="1"
+                    onChange={(e) => setCut({ ...cut, parts: e.target.value })}
+                  />
+                </Field>
+                <Field className="grow" label={t("checkout2.passes")} hint={t("checkout2.passesHint")}>
+                  <input
+                    type="number" inputMode="numeric" min="1" max="20" step="1"
+                    value={cut.passes ?? ""}
+                    placeholder="1"
+                    onChange={(e) => setCut({ ...cut, passes: e.target.value })}
+                  />
+                </Field>
+              </div>
               {/* Цена за кв.м — на виду и правится у всех: у крупных заказов
                   она своя («5 000 за квадрат»). */}
               <div className="field">
@@ -2474,11 +3110,13 @@ export default function Checkout() {
                   <div className="crow"><span className="k">{t("checkout.engravingArea")}</span><strong>{cutArea} {t("unit.SQM")}</strong></div>
                   <div className="crow">
                     <span className="k">{t("checkout.engravingRate")}</span>
-                    <span>{engRate} × {cutArea} = {ceilSom(engRate * cutArea)}</span>
+                    <span>
+                      {engRate}{cutPasses > 1 ? ` × ${cutPasses}` : ""} × {cutArea} = {ceilSom(engRate * cutPasses * cutArea)}
+                    </span>
                   </div>
                   <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
                     <strong>{t("common.total")}</strong>
-                    <strong style={{ fontSize: 18 }}>{formatMoney(ceilSom(engRate * cutArea))}</strong>
+                    <strong style={{ fontSize: 18 }}>{formatMoney(ceilSom(engRate * cutPasses * cutArea))}</strong>
                   </div>
                 </div>
               )}
@@ -2515,9 +3153,35 @@ export default function Checkout() {
                   )}
                 </div>
               )}
+              {/* Второй способ продажи рулона — по кв.м изделия (CALC-10). Есть,
+                  только когда у рулона задана цена за кв.м; иначе — одни метры,
+                  как раньше. Баннер 1×2 м по 220 сом/кв.м = 440, со склада —
+                  вся ширина рулона × 2 м. */}
+              {cutRollAreaOk && (
+                <>
+                  <div className="tabs" style={{ marginTop: 0 }} role="group" aria-label={t("rollArea.modeLabel")}>
+                    {["METER", "SQM"].map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={(cut.rollMode || "METER") === mode ? "active" : ""}
+                        aria-pressed={(cut.rollMode || "METER") === mode}
+                        onClick={() => setCut({ ...cut, rollMode: mode })}
+                      >
+                        {t(mode === "SQM" ? "rollArea.modeSqm" : "rollArea.modeMetre")}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="muted" style={{ fontSize: 13, margin: "8px 0 12px" }}>
+                    {cutRollByArea
+                      ? t("rollArea.hintSqm", { width: cutFullWidth })
+                      : t("rollArea.hintMetre")}
+                  </p>
+                </>
+              )}
               {/* У рулона без цены за метр кнопка «Добавить» молча гасла, и
                   складовщик не понимал почему: цену правит только админ. */}
-              {!(cutRollRate > 0) && (
+              {!cutRollByArea && !(cutRollRate > 0) && (
                 <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "0 0 8px" }}>
                   {isAdmin ? t("checkout.rollNoPriceAdmin") : t("checkout.rollNoPrice")}
                 </p>
@@ -2532,7 +3196,7 @@ export default function Checkout() {
                     autoFocus
                   />
                 </Field>
-                {isAdmin && (
+                {isAdmin && !cutRollByArea && (
                   <Field className="grow" style={{ margin: 0 }} label={t("checkout.rollRate")}>
                     <input
                       type="number"
@@ -2542,11 +3206,25 @@ export default function Checkout() {
                     />
                   </Field>
                 )}
+                {isAdmin && cutRollByArea && (
+                  <Field className="grow" style={{ margin: 0 }} label={t("rollArea.rate")}>
+                    <input
+                      type="number"
+                      step="any"
+                      value={cut.sqmPrice ?? String(cutRollMat.price_per_sqm ?? "")}
+                      onChange={(e) => setCut({ ...cut, sqmPrice: e.target.value, sqmPriceEdited: true })}
+                    />
+                  </Field>
+                )}
               </div>
-              {/* Ширина изделия — необязательная. Заполнили меньше рулона —
-                  система посчитает, сколько ушло в обрезок. Не заполнили —
-                  считаем, что ушло всё, и ничего не выдумываем. */}
-              <Field style={{ marginTop: 10 }} label={t("checkout.usedWidth")}>
+              {/* Ширина изделия. У метров — необязательная: заполнили меньше
+                  рулона — система посчитает, сколько ушло в обрезок; не
+                  заполнили — считаем, что ушло всё. У кв.м изделия — по ней
+                  цена, поэтому обязательна. */}
+              <Field
+                style={{ marginTop: 10 }}
+                label={cutRollByArea ? <>{t("rollArea.width")} *</> : t("checkout.usedWidth")}
+              >
                 {(a) => (
                   <>
                   <input {...a}
@@ -2554,10 +3232,12 @@ export default function Checkout() {
                   step="any"
                   value={cut.usedWidth ?? ""}
                   onChange={(e) => setCut({ ...cut, usedWidth: e.target.value })}
-                  placeholder={String(cutFullWidth)}
+                  placeholder={cutRollByArea ? "" : String(cutFullWidth)}
                 />
                   <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
-                  {t("checkout.usedWidthHint", { width: cutFullWidth })}
+                  {cutRollByArea
+                    ? t("rollArea.widthHint", { width: cutFullWidth })
+                    : t("checkout.usedWidthHint", { width: cutFullWidth })}
                 </p>
                   </>
                 )}
@@ -2696,6 +3376,18 @@ export default function Checkout() {
                 </Field>
               </div>
               <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("checkout.sizeHint")}</p>
+              {/* «Деталей, шт»: 12 одинаковых деталей — одна позиция, а не двенадцать.
+                  Площадь и длина реза умножаются на число деталей. */}
+              {isMatModal && CUT_MODES.includes(cut.mode) && (
+                <Field label={t("checkout2.parts")} hint={t("checkout2.partsHint")}>
+                  <input
+                    type="number" inputMode="numeric" min="1" step="1"
+                    value={cut.parts ?? ""}
+                    placeholder="1"
+                    onChange={(e) => setCut({ ...cut, parts: e.target.value })}
+                  />
+                </Field>
+              )}
               {/* Длина кривой — только у фигурного реза. У обычного её вводить
                   не нужно: в рез идёт одна сторона куска, и система берёт её
                   сама из «Длины». */}
@@ -2724,6 +3416,14 @@ export default function Checkout() {
                   {t("checkout.sideAuto", { value: cutRunM })}
                 </p>
               )}
+              {/* Откуда ставка работы: матрица или коэффициент толщины. */}
+              {isMatModal && cutWorkOn && (cut.rateSource?.startsWith("matrix") || cut.rateCoef) && (
+                <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+                  {cut.rateSource?.startsWith("matrix")
+                    ? t("checkout2.rateFromMatrix")
+                    : t("checkout2.rateCoef", { n: formatNumber(cut.rateCoef, { max: 3 }) })}
+                </p>
+              )}
               {/* Admin-only: override catalogue prices at sale time */}
               {isAdmin && (
                 <div className="row">
@@ -2745,8 +3445,24 @@ export default function Checkout() {
             <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
               <div className="crow">
                 <span className="k">{t("checkout.rateMaterial")}</span>
-                <span>{cutRollRate} × {cutRollLen} = {cutRollTotal}</span>
+                {cutRollByArea ? (
+                  <span>
+                    {cutUsedWidth > 0 ? cutUsedWidth : "—"} × {cutRollLen} = {cutRollProdArea} {t("unit.SQM")}
+                    {" × "}{cutRollSqmRate} = {cutRollMatTotal}
+                  </span>
+                ) : (
+                  <span>{cutRollRate} × {cutRollLen} = {cutRollTotal}</span>
+                )}
               </div>
+              {/* Сколько уйдёт со склада: у кв.м изделия это не его площадь, а
+                  вся ширина рулона × длина. */}
+              {cutRollByArea && (
+                <div className="crow">
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    {t("rollArea.stockOut", { width: cutFullWidth, len: cutRollLen, area: cutRollStockArea })}
+                  </span>
+                </div>
+              )}
               {/* Работа реза — отдельной строкой, как она уйдёт и в чек. */}
               {cutRollWorkOn && (
                 <div className="crow">
@@ -2756,7 +3472,7 @@ export default function Checkout() {
               )}
               <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 6 }}>
                 <strong>{t("common.total")}</strong>
-                <strong style={{ fontSize: 18 }}>{formatMoney(cutRollTotal + cutRollWork)}</strong>
+                <strong style={{ fontSize: 18 }}>{formatMoney(cutRollMatTotal + cutRollWork)}</strong>
               </div>
               {/* Сколько ушло в отход — на виду в момент продажи, а не потом
                   в отчёте: здесь ещё можно передумать и отрезать иначе. */}
@@ -2920,6 +3636,7 @@ export default function Checkout() {
                 <span className="muted">
                   {" "}× {trimQty(it.quantity)} {it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || ""}
                   {" "}· {trimQty(it.price_per_item)} {t("checkout.perPieceShort", { unit: it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "" })}
+                  {it.executor_name ? ` · ${it.executor_name}` : ""}
                 </span>
               </span>
               <span>
@@ -2946,10 +3663,17 @@ export default function Checkout() {
           )}
           {/* Отдельной строкой: иначе «оплачено 3 000» по заказу, за который
               принесли 2 000, выглядит как ошибка кассы. */}
-          {Number(receipt.change_applied) > 0 && (
+          {Number(receipt.change_applied) - Number(receipt.advance_applied || 0) > 0 && (
             <div className="crow">
               <span className="k">{t("checkout.changeUsed")}</span>
-              <span>{somFmt(receipt.change_applied)}</span>
+              <span>{somFmt(Number(receipt.change_applied) - Number(receipt.advance_applied || 0))}</span>
+            </div>
+          )}
+          {/* Зачтено из аванса клиента (волна 2): касса не двигалась. */}
+          {Number(receipt.advance_applied) > 0 && (
+            <div className="crow">
+              <span className="k">{t("checkout2.advanceUsed")}</span>
+              <span>{somFmt(receipt.advance_applied)}</span>
             </div>
           )}
           {/* Долг закрыт вместе с заказом — это отдельные деньги, и кассир
@@ -2993,6 +3717,14 @@ export default function Checkout() {
       )}
 
       {printing && <PrintDocs receipt={printing} onClose={() => setPrinting(null)} />}
+      {quotesOpen && (
+        <QuotesModal
+          onClose={() => setQuotesOpen(false)}
+          onLoad={loadQuote}
+          onPrint={(q) => setQuotePrint(q)}
+        />
+      )}
+      {quotePrint && <PrintQuote quote={quotePrint} onClose={() => setQuotePrint(null)} />}
 
       {givingChange && (
         <GiveChangeModal

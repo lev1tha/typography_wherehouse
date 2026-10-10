@@ -104,3 +104,47 @@ class Profile(models.Model):
 
     def __str__(self) -> str:
         return f"Профиль {self.user.username}"
+
+
+class Employee(models.Model):
+    """Сотрудник цеха — человек, которому считают зарплату.
+
+    Не то же самое, что `User`. Учётная запись — это ВХОД в систему, и на цех из
+    трёх мастеров их две-три на всех («Чпу», «Лазер»): мастера работают под
+    общими логинами по станкам. Зарплату же считают по человеку, поэтому
+    сотрудник — отдельная запись; связь с учёткой необязательна (мастер, у
+    которого своего входа нет, — обычный случай).
+
+    Из цеха сотрудников не удаляют, а отключают (`is_active`): выплаты и
+    начисления прошлых месяцев ссылаются на них и должны остаться читаемыми.
+    """
+
+    class Machine(models.TextChoices):
+        # Те же коды, что у `services.PrintingService.Machine`: сотрудник — «за
+        # ЧПУ» или «за лазером» — получает выработку этого станка, пока в строке
+        # заказа нет своего поля «исполнитель».
+        CNC = "CNC", _("ЧПУ")
+        LASER = "LASER", _("Лазер")
+
+    full_name = models.CharField(_("ФИО"), max_length=255)
+    position = models.CharField(_("должность"), max_length=120, blank=True)
+    default_machine = models.CharField(
+        _("станок по умолчанию"), max_length=10, choices=Machine.choices, blank=True, default="",
+        help_text=_("Выработка станка идёт этому сотруднику, если он на станке один."),
+    )
+    is_active = models.BooleanField(_("работает"), default=True)
+    user = models.OneToOneField(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="employee", verbose_name=_("учётная запись"),
+        help_text=_("Заказы, оформленные под этим логином, считаются его выработкой."),
+    )
+    note = models.CharField(_("примечание"), max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("сотрудник")
+        verbose_name_plural = _("сотрудники")
+        ordering = ["-is_active", "full_name", "id"]
+
+    def __str__(self) -> str:
+        return self.full_name

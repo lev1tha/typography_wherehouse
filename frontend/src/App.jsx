@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import FinanceGate from "./components/FinanceGate.jsx";
 import Layout from "./components/Layout.jsx";
+import OfflineBanner from "./components/OfflineBanner.jsx";
 import ProtectedRoute from "./components/ProtectedRoute.jsx";
 import { useAuth } from "./auth/AuthContext.jsx";
 
@@ -20,6 +21,9 @@ const Clients = lazy(() => import("./pages/admin/Clients.jsx"));
 const Receipts = lazy(() => import("./pages/admin/Receipts.jsx"));
 const Supplies = lazy(() => import("./pages/admin/Supplies.jsx"));
 const Finance = lazy(() => import("./pages/admin/Finance.jsx"));
+const Payroll = lazy(() => import("./pages/admin/Payroll.jsx"));
+const Staff = lazy(() => import("./pages/admin/Staff.jsx"));
+const OpeningBalances = lazy(() => import("./pages/admin/OpeningBalances.jsx"));
 const CustomerOrders = lazy(() => import("./pages/customer/CustomerOrders.jsx"));
 const Warehouse = lazy(() => import("./pages/store/Warehouse.jsx"));
 const Checkout = lazy(() => import("./pages/store/Checkout.jsx"));
@@ -35,6 +39,7 @@ const ADMIN_NAV = [
       { to: "/admin/catalog", label: "nav.warehouse", icon: "package" },
       { to: "/admin/finance", label: "nav.finance", icon: "clipboard" },
       { to: "/admin/cash", label: "nav.cash", icon: "wallet" },
+      { to: "/admin/payroll", label: "nav.payroll", icon: "users" },
     ],
   },
   {
@@ -42,6 +47,9 @@ const ADMIN_NAV = [
     items: [
       { to: "/admin/dashboard", label: "nav.dashboard", icon: "dashboard" },
       { to: "/admin/pricing", label: "nav.pricing", icon: "tag" },
+      { to: "/admin/staff", label: "nav.staff", icon: "user" },
+      // Переезд из Excel (волна 2): долги и авансы клиентов на дату переезда.
+      { to: "/admin/opening-balances", label: "nav.openingBalances", icon: "inbox" },
     ],
   },
 ];
@@ -62,14 +70,16 @@ const STORE_NAV = [
 
 // Бухгалтер: проверяет, а не участвует. Чеки с себестоимостью и маржой, журнал
 // действий (он же вкладка на экране чеков), финансовый отчёт и обзор — всё
-// только на просмотр. Кассы, склада и клиентов у него нет ни в меню, ни на
-// сервере.
+// только на просмотр. Кассы и склада у него нет ни в меню, ни на сервере;
+// «Клиенты» (долги, возраст долга, акт сверки) — только чтение (CLI-08).
 const ACCOUNTANT_NAV = [
   {
     items: [
       { to: "/acc", label: "nav.receipts", end: true, icon: "receipt" },
+      { to: "/acc/clients", label: "nav.clients", icon: "users" },
       { to: "/acc/finance", label: "nav.finance", icon: "clipboard" },
       { to: "/acc/cash", label: "nav.cash", icon: "wallet" },
+      { to: "/acc/payroll", label: "nav.payroll", icon: "users" },
       { to: "/acc/dashboard", label: "nav.dashboard", icon: "dashboard" },
     ],
   },
@@ -95,6 +105,9 @@ export default function App() {
     : "/app/checkout";
 
   return (
+    <>
+    {/* Нет связи — сверху честно сказано (волна 2, XL-12). */}
+    <OfflineBanner />
     <Routes>
       <Route path="/login" element={<Login />} />
 
@@ -136,6 +149,16 @@ export default function App() {
             </FinanceGate>
           }
         />
+        <Route
+          path="/admin/payroll"
+          element={
+            <FinanceGate>
+              <Payroll />
+            </FinanceGate>
+          }
+        />
+        <Route path="/admin/staff" element={<Staff />} />
+        <Route path="/admin/opening-balances" element={<OpeningBalances />} />
         <Route path="/admin/expenses" element={<Navigate to="/admin/finance" replace />} />
       </Route>
 
@@ -163,6 +186,7 @@ export default function App() {
         }
       >
         <Route path="/acc" element={<Receipts />} />
+        <Route path="/acc/clients" element={<Clients />} />
         <Route
           path="/acc/finance"
           element={
@@ -176,6 +200,14 @@ export default function App() {
           element={
             <FinanceGate>
               <Cash />
+            </FinanceGate>
+          }
+        />
+        <Route
+          path="/acc/payroll"
+          element={
+            <FinanceGate>
+              <Payroll />
             </FinanceGate>
           }
         />
@@ -202,5 +234,6 @@ export default function App() {
 
       <Route path="*" element={<Navigate to={home} replace />} />
     </Routes>
+    </>
   );
 }

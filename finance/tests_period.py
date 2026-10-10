@@ -175,13 +175,19 @@ class PeriodLockTests(APITestCase):
         receipt.refresh_from_db()
         self.assertEqual(receipt.total_price, before)
 
-    def test_old_order_payment_cannot_be_reverted(self):
+    def test_old_order_payment_can_be_reverted_today_without_touching_the_closed_month(self):
+        """Откат оплаты ложится встречной записью в кассу СЕГОДНЯ (cash-03,
+        2026-10-10), а выручка заказа — по его дате: замок смотрит на сегодняшний
+        день, а не на дату заказа. Закрытый месяц не сдвигается ни на сом."""
         receipt = self._old_receipt()
+        report = "/api/finance/report/"
+        closed = {"date_from": self.inside.replace(day=1).isoformat(),
+                  "date_to": self.close_through.isoformat()}
+        before = self.client.get(report, closed).data["revenue"]
         self._close()
-        self.assertEqual(
-            self.client.post(f"/api/sales/receipts/{receipt.id}/unpay/", {},
-                             format="json").status_code, 400
-        )
+        r = self.client.post(f"/api/sales/receipts/{receipt.id}/unpay/", {}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(self.client.get(report, closed).data["revenue"], before)
 
     def test_old_order_can_be_refunded_today_without_touching_the_closed_month(self):
         """Возврат — событие своего дня (решение владельца, 2026-09-27).

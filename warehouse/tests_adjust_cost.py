@@ -41,11 +41,13 @@ class AdjustmentCostTests(APITestCase):
         self.assertEqual(log.quantity_changed, Decimal("-400"))
         self.assertEqual(log.cost, Decimal("1600.00"))
 
-    def test_surplus_has_no_cost(self):
-        """Прибавка — не потеря: денег по ней не уходило, выдумывать нечего."""
+    def test_surplus_has_its_cost_too(self):
+        """Излишек — тоже деньги (F5/PNL-04, волна 2, D-123): по той же цене, со
+        знаком «+». ОПиУ гасит им недостачу — раньше «ошибся, поправил»
+        оставлял убыток навсегда, а склад дорожал из воздуха."""
         log = self._adjust("700")
         self.assertEqual(log.quantity_changed, Decimal("200"))
-        self.assertIsNone(log.cost)
+        self.assertEqual(log.cost, Decimal("800.00"))
 
     def test_material_with_a_zero_purchase_price_gives_zero_not_a_crash(self):
         """Закупочной цены может не быть вовсе (ноль) — это не повод падать."""

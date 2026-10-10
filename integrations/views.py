@@ -12,7 +12,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from clients.models import Client
+from integrations.linking import link_chat
 from integrations.payments import get_gateway
 from integrations.telegram import send_customer_receipt
 from sales.models import Receipt
@@ -159,15 +159,15 @@ class TelegramCustomerWebhookView(APIView):
         if not contact or not chat_id:
             return Response({"status": "ignored"})
 
-        phone = (contact.get("phone_number") or "").lstrip("+")
-        # Match by the trailing digits to tolerate +996 / 996 / 0 prefixes.
-        client = (
-            Client.objects.filter(phone__endswith=phone[-9:]).first()
-            if len(phone) >= 9
-            else None
+        # Привязываем только СВОЙ контакт: user_id карточки должен совпасть с
+        # отправителем (см. `integrations.linking`). Telegram ждёт 200 на любой
+        # апдейт — иначе он повторяет его; результат в теле.
+        status_name, client = link_chat(
+            phone=contact.get("phone_number"),
+            contact_user_id=contact.get("user_id"),
+            sender_id=(message.get("from") or {}).get("id"),
+            chat_id=chat_id,
         )
         if client:
-            client.telegram_chat_id = str(chat_id)
-            client.save(update_fields=["telegram_chat_id"])
-            return Response({"status": "linked", "client": client.id})
-        return Response({"status": "not_found"})
+            return Response({"status": status_name, "client": client.id})
+        return Response({"status": status_name})

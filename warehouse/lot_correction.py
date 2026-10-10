@@ -258,17 +258,27 @@ def _legacy_area(item, roll: Roll | None) -> Decimal:
 
     if item.sale_mode == TransactionItem.SaleMode.METER:
         return item.quantity * (roll.width if roll is not None and roll.width else Decimal("0"))
+    if item.roll_area and item.length:
+        # Рулон по кв.м изделия (CALC-10): длина изделия на всю ширину рулона.
+        return item.length * (roll.width if roll is not None and roll.width else Decimal("0"))
     if item.sale_mode == TransactionItem.SaleMode.PIECE and item.material.piece_area:
         return item.quantity * item.material.piece_area
     return item.quantity
 
 
-def _sold_lines(roll: Roll | None, material: Material, since, cps0, cps1, used):
+def _sold_lines(roll: Roll | None, material: Material, since, cps0, cps1, used,
+                u0=None, u1=None):
     """Строки чеков, чья себестоимость меняется, и старые, которые не тронем.
 
     Возвращает (changes, legacy, recorded_area, inferred_area):
     changes — [{item, area, delta, how}], legacy — [item].
+
+    ``u0``/``u1`` — цена единицы до и после БЕЗ округления до копеек (STK-10):
+    продажа считает себестоимость как закуп × взято / принято, и поправка
+    обязана считать так же, иначе вылезает копеечный хвост.
     """
+    u0 = cps0 if u0 is None else u0
+    u1 = cps1 if u1 is None else u1
     from sales.models import Receipt, TransactionItem, TransactionItemLot
 
     changes, legacy = [], []
@@ -283,7 +293,7 @@ def _sold_lines(roll: Roll | None, material: Material, since, cps0, cps1, used):
             .select_related("receipt", "material")
         }
         for item_id, area in per_item.items():
-            delta = _money(area * cps1) - _money(area * cps0)
+            delta = _money(area * u1) - _money(area * u0)
             if delta:
                 changes.append({"item": items[item_id], "area": area, "delta": delta, "how": "lots"})
 
@@ -317,7 +327,8 @@ def _sold_lines(roll: Roll | None, material: Material, since, cps0, cps1, used):
         area = _legacy_area(item, roll)
         if (
             item.roll_id == roll.id and area > 0 and not same_price
-            and abs(item.cost_total - _money(area * cps0)) <= CENT
+            and min(abs(item.cost_total - _money(area * cps0)),
+                    abs(item.cost_total - _money(area * u0))) <= CENT
         ):
             inferred.append((item, area))
         else:
@@ -329,7 +340,7 @@ def _sold_lines(roll: Roll | None, material: Material, since, cps0, cps1, used):
         legacy = [it for it, _ in inferred] + legacy
         inferred, inferred_area = [], Decimal("0")
     for item, area in inferred:
-        delta = _money(area * cps1) - _money(area * cps0)
+        delta = _money(area * u1) - _money(area * u0)
         if delta:
             changes.append({"item": item, "area": area, "delta": delta, "how": "inferred"})
     return changes, legacy, recorded_area, inferred_area
@@ -423,6 +434,8 @@ def _plan(*, roll: Roll | None, line: SupplyLine | None, data) -> dict:
         since = timezone.make_aware(datetime.combine(purchase_day, time.min))
     changes, legacy, recorded_area, inferred_area = _sold_lines(
         roll, material, since, cps0, cps1, used,
+        u0=(cost0 / area0) if area0 else Decimal("0"),
+        u1=(cost1 / area1) if area1 else Decimal("0"),
     )
     if roll is not None and cps1 != cps0:
         untracked = used - recorded_area - inferred_area - sum(
@@ -548,15 +561,17 @@ def _plan(*, roll: Roll | None, line: SupplyLine | None, data) -> dict:
     if supply is not None:
         total_before = supply.total_cost
         total_after = total_before - line.cost + cost1
-        paid = supply.paid_amount or Decimal("0")
+        # Оплачено = старое поле накладной + платежи-строки (2026-10-10).
+        paid = supply.paid_total or Decimal("0")
         plan["supply"] = {
             "id": supply.id, "number": supply.number,
             "total_before": total_before, "total_after": total_after,
             "paid": paid,
-            "debt_before": max(total_before - paid, Decimal("0")),
-            "debt_after": max(total_after - paid, Decimal("0")),
-            "overpaid_before": max(paid - total_before, Decimal("0")),
-            "overpaid_after": max(paid - total_after, Decimal("0")),
+            # Начальные остатки долга не имеют (STK-09): склад на дату переезда.
+            "debt_before": Decimal("0") if supply.is_opening else max(total_before - paid, Decimal("0")),
+            "debt_after": Decimal("0") if supply.is_opening else max(total_after - paid, Decimal("0")),
+            "overpaid_before": Decimal("0") if supply.is_opening else max(paid - total_before, Decimal("0")),
+            "overpaid_after": Decimal("0") if supply.is_opening else max(paid - total_after, Decimal("0")),
             "stated_total": supply.stated_total,
             "discrepancy_before": (supply.stated_total - total_before) if supply.stated_total is not None else None,
             "discrepancy_after": (supply.stated_total - total_after) if supply.stated_total is not None else None,
@@ -665,7 +680,13 @@ def apply(*, roll=None, line=None, data, user=None) -> dict:
         if roll is not None:
             for k in ("width", "height", "length", "sheet_count"):
                 setattr(line, k, shape[k])
-        line.save(update_fields=["quantity", "cost", "width", "height", "length", "sheet_count"])
+        fields = ["quantity", "cost", "width", "height", "length", "sheet_count"]
+        # Накладная в валюте: сумма строки в валюте идёт за суммой в сомах по
+        # курсу накладной, иначе «в валюте» и «в сомах» разошлись бы.
+        if line.cost_fc is not None and line.supply.rate:
+            line.cost_fc = (line.cost / line.supply.rate).quantize(CENT)
+            fields.append("cost_fc")
+        line.save(update_fields=fields)
 
     material.quantity = (material.quantity or Decimal("0")) + qty_delta
     material.purchase_price = plan["stock"]["purchase_price_after"]

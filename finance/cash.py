@@ -200,6 +200,18 @@ def supplier_paid(amount, account, *, roll=None, supply=None, happened_on=None,
     )
 
 
+def supplier_refund(amount, account, *, supply=None, happened_on=None, note="", user=None):
+    """Поставщик вернул деньги (за возвращённый товар) — приход той же статьёй
+    «Оплата поставщику»: в ОДДС это уменьшение оплаты поставщикам, а не
+    выручка. Зовёт «Вернуть поставщику» (`warehouse.supplier_returns`)."""
+    from .models import CashEntry
+
+    return money_in(
+        amount, CashEntry.Article.SUPPLY, account=account, happened_on=happened_on,
+        supply=supply, note=note, user=user,
+    )
+
+
 def sync_expense(entry, *, user=None):
     """Привести кассовую запись траты в соответствие с самой тратой.
 
@@ -216,8 +228,13 @@ def sync_expense(entry, *, user=None):
     """
     from .models import CashEntry, ExpenseKind
 
+    # Начисление зарплаты и карточка актива в рассрочку — записи БЕЗ денег; с
+    # ними не только нечего писать, но и нельзя стирать: к начислению
+    # привязаны выплаты (они в кассе своей статьёй), к активу — платежи.
+    if entry.is_cashless:
+        return None
     entry.cash_entries.all().delete()
-    if entry.kind.role == ExpenseKind.Role.NOT_CASH:
+    if not entry.kind.moves_cash:
         return None
     article = (
         CashEntry.Article.SALARY
@@ -266,3 +283,23 @@ def reverse_supplier_payments(*, roll=None, supply=None, note="", user=None):
             entries.append(money_out(value, CashEntry.Article.SUPPLY, account=account,
                                      roll=roll, supply=supply, note=note, user=user))
     return entries
+
+
+def balances_after() -> dict:
+    """{id записи: остаток её счёта сразу после неё} по всей книге.
+
+    Порядок — как человек читает книгу: по дате операции, внутри дня по
+    времени ввода (cash-05). Остаток считается по ВСЕЙ истории счёта, а не по
+    выбранной странице: фильтр списка баланса не меняет."""
+    from .models import CashEntry
+
+    running = {}
+    out = {}
+    rows = CashEntry.objects.order_by("happened_on", "created_at", "id").values_list(
+        "id", "account", "kind", "amount"
+    )
+    for entry_id, account, kind, amount in rows:
+        value = running.get(account, Decimal("0")) + (amount if kind == CashEntry.Kind.IN else -amount)
+        running[account] = value
+        out[entry_id] = value
+    return out

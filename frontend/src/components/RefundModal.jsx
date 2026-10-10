@@ -3,9 +3,12 @@ import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
+import { useAuth } from "../auth/AuthContext.jsx";
+import Field from "./Field.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
-import { itemTitle } from "../utils/itemLabel.js";
+import { fieldErrors } from "../utils/fieldErrors.js";
+import { itemSpecParts, itemTitle } from "../utils/itemLabel.js";
 import { formatMoney } from "../utils/format.js";
 
 // Возврат по чеку — целиком или ОТДЕЛЬНЫМИ позициями.
@@ -18,15 +21,39 @@ import { formatMoney } from "../utils/format.js";
 // больше, чем по чеку принимали), остальные строки живут дальше.
 const som = (n) => formatMoney(n);
 
+// Часть количества (cash-09, волна 2) — у материала и у работ без размеров.
+// Сумма части — по правилу сервера: остающееся вверх до сома, возвращается
+// остаток, итог заказа не меняется (`split_line_for_refund`).
+const canSplit = (it) => it.type === "MATERIAL" || !(Number(it.width) > 0 || Number(it.length) > 0);
+const qtyOf = (it) => Number(it.quantity) || 0;
+function partValue(it, back) {
+  const q = qtyOf(it);
+  if (!(back > 0) || back >= q) return Number(it.line_total || 0);
+  const kept = Math.ceil(Math.round((q - back) * Number(it.price_per_item) * 1e6) / 1e6);
+  return Math.max(0, Number(it.line_total || 0) - kept);
+}
+
 export default function RefundModal({ receipt, onClose, onDone }) {
   const { t } = useTranslation();
   const { toast } = useUI();
+  const { isAdmin } = useAuth();
   const items = useMemo(() => (receipt.items || []).filter((i) => !i.is_returned), [receipt.items]);
   const [picked, setPicked] = useState(() => new Set(items.map((i) => i.id)));
+  // Сколько вернуть по строке: пусто — всё количество.
+  const [backQty, setBackQty] = useState({});
+  const partOf = (it) => {
+    const v = Number(String(backQty[it.id] ?? "").replace(",", "."));
+    return canSplit(it) && v > 0 && v < qtyOf(it) ? v : null;
+  };
+  const [account, setAccount] = useState(""); // "" — с того счёта, куда пришли деньги
+  const [reason, setReason] = useState("");
+  const [errors, setErrors] = useState({});
   const [busy, setBusy] = useState(false);
 
   const allPicked = picked.size === items.length;
-  const sum = items.filter((i) => picked.has(i.id)).reduce((s, i) => s + Number(i.line_total || 0), 0);
+  const sum = items
+    .filter((i) => picked.has(i.id))
+    .reduce((s, i) => s + (partOf(i) ? partValue(i, partOf(i)) : Number(i.line_total || 0)), 0);
   // Деньгами отдают ровно переплату относительно того, что у клиента ОСТАЁТСЯ
   // на руках, — так же считает сервер (`refund_receipt`): неоплаченный заказ
   // денег не возвращает, оплаченный целиком — стоимость возвращённых строк,
@@ -36,6 +63,7 @@ export default function RefundModal({ receipt, onClose, onDone }) {
   const refundedBefore = Number(receipt.refunded_amount || 0);
   const excess = (refunded) => Math.max(0, paid - (total - refunded));
   const moneyBack = Math.max(0, excess(refundedBefore + sum) - excess(refundedBefore));
+  const reasonRequired = !isAdmin && paid > 0;
 
   function toggle(id) {
     setPicked((prev) => {
@@ -48,15 +76,33 @@ export default function RefundModal({ receipt, onClose, onDone }) {
 
   async function submit() {
     if (!picked.size) return toast(t("receipts.refundNothing"), "error");
+    if (reasonRequired && !reason.trim()) {
+      return setErrors({ reason: t("receiptsV2.refundReasonReq") });
+    }
     setBusy(true);
+    setErrors({});
     try {
-      // Все строки — как раньше, пустое тело: «вернуть чек целиком».
-      const body = allPicked ? {} : { item_ids: [...picked] };
+      // Все строки — как раньше: «вернуть чек целиком» без списка. Счёт и
+      // причину шлём только когда их выбрали — пустые сервер всё равно примет,
+      // но запись в журнале тогда была бы без причины.
+      const partial = items.filter((i) => picked.has(i.id) && partOf(i));
+      const body =
+        allPicked && !partial.length
+          ? {}
+          : {
+              item_ids: [...picked].filter((id) => !partial.some((p) => p.id === id)),
+              ...(partial.length ? { quantities: partial.map((p) => ({ id: p.id, quantity: String(partOf(p)) })) } : {}),
+            };
+      if (account) body.method = account;
+      if (reason.trim()) body.reason = reason.trim();
       const { data } = await api.post(`/sales/receipts/${receipt.id}/refund/`, body);
       toast(t("receipts.refundDone"));
       onDone?.(data);
     } catch (e) {
-      toast(apiError(e, t("common.error")), "error");
+      // 400 {reason: […]} — подсвечиваем поле «Причина», остальное — тостом.
+      const fe = fieldErrors(e);
+      setErrors(fe);
+      if (!fe.reason) toast(apiError(e, t("common.error")), "error");
     } finally {
       setBusy(false);
     }
@@ -91,6 +137,7 @@ export default function RefundModal({ receipt, onClose, onDone }) {
         </div>
         {items.map((it) => {
           const name = itemTitle(it, t);
+          const spec = itemSpecParts(it, t);
           // Единица — кодом с сервера, подпись из словаря (та же, что в накладной).
           const unit = it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "";
           return (
@@ -111,14 +158,59 @@ export default function RefundModal({ receipt, onClose, onDone }) {
                   <span className="muted">
                     × {String(+Number(it.quantity).toFixed(3))} {unit}
                   </span>
+                  {spec.length > 0 && <span className="rc-spec">{spec.join(" · ")}</span>}
                 </span>
               </span>
-              <strong>{som(it.line_total)}</strong>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                {picked.has(it.id) && canSplit(it) && qtyOf(it) > 1 && (
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    min="0"
+                    step="any"
+                    value={backQty[it.id] ?? ""}
+                    placeholder={String(+qtyOf(it).toFixed(3))}
+                    onChange={(e) => setBackQty((m) => ({ ...m, [it.id]: e.target.value }))}
+                    aria-label={`${t("receiptsV2.refundQty")}: ${name}`}
+                    title={t("receiptsV2.refundQty")}
+                    style={{ width: 72, minHeight: 0, height: 28, padding: "2px 6px" }}
+                  />
+                )}
+                <strong>{som(partOf(it) ? partValue(it, partOf(it)) : it.line_total)}</strong>
+              </span>
             </label>
           );
         })}
         {!items.length && <p className="muted">{t("receipts.refundEmpty")}</p>}
       </div>
+
+      {/* Счёт нужен, только когда часть возврата уходит деньгами. */}
+      {moneyBack > 0 && (
+        <Field label={t("receiptsV2.refundAccount")} hint={t("receiptsV2.refundAccountHint")}>
+          <select value={account} onChange={(e) => setAccount(e.target.value)}>
+            <option value="">{t("receiptsV2.accountDefault")}</option>
+            <option value="CASH">{t("checkout.cash")}</option>
+            <option value="MBANK">{t("checkout.mbank")}</option>
+            <option value="DEMIRBANK">{t("checkout.demirbank")}</option>
+          </select>
+        </Field>
+      )}
+
+      <Field
+        label={t("receiptsV2.refundReason")}
+        required={reasonRequired}
+        optional={!reasonRequired}
+        optionalLabel={t("common.optional")}
+        hint={reasonRequired ? t("receiptsV2.refundReasonHint") : undefined}
+        error={errors.reason}
+      >
+        <input
+          value={reason}
+          maxLength={255}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder={t("receiptsV2.refundReasonPh")}
+        />
+      </Field>
 
       <div className="card" style={{ background: "var(--canvas)", padding: 12 }}>
         <div className="crow">

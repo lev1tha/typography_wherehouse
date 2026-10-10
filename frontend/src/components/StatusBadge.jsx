@@ -10,6 +10,8 @@ const PAYMENT_VARIANT = {
 const FULFILLMENT_VARIANT = {
   PROCESSING: "amber",
   READY: "blue",
+  // Часть позиций отдали, остальное ещё дорезают — заказ открыт, как и «Готовится».
+  PARTIALLY_ISSUED: "amber",
   ISSUED: "ok",
 };
 
@@ -29,4 +31,11 @@ export function FulfillmentBadge({ status }) {
       {t(`fulfillment.${status}`)}
     </span>
   );
+}
+
+// Гарантийная переделка: заказ за счёт цеха, цена строк в нём 0. Метка стоит
+// рядом с номером, чтобы его не принимали за обычный заказ с нулевой суммой.
+export function WarrantyBadge() {
+  const { t } = useTranslation();
+  return <span className="badge red">{t("warranty.badge")}</span>;
 }

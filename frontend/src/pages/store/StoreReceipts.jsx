@@ -5,24 +5,19 @@ import { useNavigate } from "react-router-dom";
 import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
-import AddToOrderModal from "../../components/AddToOrderModal.jsx";
-import RefundModal from "../../components/RefundModal.jsx";
-import { itemTitle } from "../../utils/itemLabel.js";
-
-const som = (n) => formatMoney(n);
-const trimQty = (n) => String(+Number(n || 0).toFixed(3));
 import DataTable from "../../components/DataTable.jsx";
 import Icon from "../../components/Icon.jsx";
 import LoadError from "../../components/LoadError.jsx";
-import Modal from "../../components/Modal.jsx";
 import Pager, { usePage } from "../../components/Pager.jsx";
 import PayDebtModal from "../../components/PayDebtModal.jsx";
 import PrintDocs from "../../components/PrintDocs.jsx";
-import { FulfillmentBadge, PaymentBadge } from "../../components/StatusBadge.jsx";
+import ReceiptCard from "../../components/ReceiptCard.jsx";
+import { FulfillmentBadge, PaymentBadge, WarrantyBadge } from "../../components/StatusBadge.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { isCanceled, useLatest } from "../../utils/latest.js";
 import { formatDateTime, formatMoney } from "../../utils/format.js";
-import { lineRuled, receiptRuled, rulesLabel } from "../../utils/pricingRules.js";
+
+const som = (n) => formatMoney(n);
 
 export default function StoreReceipts() {
   const { t } = useTranslation();
@@ -35,10 +30,11 @@ export default function StoreReceipts() {
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(null);
   const [printing, setPrinting] = useState(null);
-  const [adding, setAdding] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [advancingId, setAdvancingId] = useState(null);
-  const { isAdmin } = useAuth();
+  const { isAdmin, isAccountant } = useAuth();
+  // Принять оплату долга может и складовщик (CLI-08): запись оплаты хранит, кто её
+  // принял, и админ видит это в карточке. Откатить оплату — только админ.
+  const canPay = !isAccountant;
   const [paying, setPaying] = useState(null);
   const [sort, setSort] = useState({ key: "_debt", dir: "desc" });
   const nextList = useLatest();
@@ -60,7 +56,7 @@ export default function StoreReceipts() {
   // Шаг назад по производству. Нужен только для ошибочного нажатия: вперёд
   // заказ идёт сам, а назад его возвращают, когда готовность или выдачу
   // отметили раньше времени. Из «Готовится» назад некуда — кнопки там нет.
-  const PREV = { ISSUED: "READY", READY: "PROCESSING" };
+  const PREV = { ISSUED: "READY", PARTIALLY_ISSUED: "READY", READY: "PROCESSING" };
   const backShort = (s) =>
     PREV[s] === "READY" ? t("receipts.toReady") : t("receipts.toProcessing");
 
@@ -80,7 +76,13 @@ export default function StoreReceipts() {
 
   const advance = (r, e) =>
     move(r, r.fulfillment_status === "PROCESSING" ? "READY" : "ISSUED", e);
-  const rollback = (r, e) => move(r, PREV[r.fulfillment_status], e);
+  // Откат из «Выдан частично» снимает отметки «выдано» по всем позициям — это
+  // история выдачи, поэтому спрашиваем.
+  const rollback = async (r, e) => {
+    e?.stopPropagation();
+    if (r.fulfillment_status === "PARTIALLY_ISSUED" && !(await confirm(t("issue.rollbackAsk")))) return;
+    return move(r, PREV[r.fulfillment_status], e);
+  };
 
   async function undoPay(r, e) {
     e?.stopPropagation();
@@ -127,33 +129,19 @@ export default function StoreReceipts() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterKey, page]);
 
-  // Возврат — в отдельном окне с выбором позиций (целиком по умолчанию);
-  // раньше здесь был только возврат всего чека одним подтверждением.
-  const [refunding, setRefunding] = useState(false);
-
-  async function setFulfillment(status) {
-    setBusy(true);
-    try {
-      const { data } = await api.post(
-        `/sales/receipts/${open.id}/set-fulfillment/`, { status }
-      );
-      setOpen(data);
-      load();
-      toast(t("receipts.statusUpdated"));
-    } catch (err) {
-      toast(err?.response?.data?.detail || t("common.error"), "error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   const columns = [
     {
       key: "order_number",
       label: t("receipts.number"),
+      sortKey: "order_number",
       render: (r) => (
         <>
           <strong>№{r.order_number ?? "—"}</strong>
+          {r.is_warranty && (
+            <div style={{ marginTop: 3 }}>
+              <WarrantyBadge />
+            </div>
+          )}
           {r.title ? <div className="muted" style={{ fontSize: 12 }}>{r.title}</div> : null}
         </>
       ),
@@ -209,8 +197,8 @@ export default function StoreReceipts() {
       sortKey: "_debt",
       render: (r) => {
         const hasDebt = Number(r.debt) > 0;
-        // Принимать оплату и откатывать её может только админ — складовщик
-        // видит долг, но кнопок у него нет (бэкенд тоже вернёт 403).
+        // Принять оплату может и складовщик, откатить её — только админ (бэкенд
+        // на откат складовщику вернёт 403).
         const canUndo =
           isAdmin &&
           (r.payment_status === "PAID" || Number(r.amount_paid) > 0) &&
@@ -220,7 +208,7 @@ export default function StoreReceipts() {
         return (
           <div className="row" style={{ gap: 6, alignItems: "center", margin: 0 }}>
             {hasDebt && <span style={{ color: "var(--danger-ink)", fontWeight: 600 }}>{som(r.debt)}</span>}
-            {hasDebt && isAdmin && (
+            {hasDebt && canPay && (
               <button
                 className="secondary"
                 style={{ padding: "3px 9px", height: "auto", fontSize: 12, whiteSpace: "nowrap" }}
@@ -280,13 +268,6 @@ export default function StoreReceipts() {
     },
   ];
 
-  const canRefund =
-    open &&
-    !["REFUNDED", "CANCELLED"].includes(open.payment_status) &&
-    open.status !== "CANCELLED" &&
-    (open.items || []).some((i) => !i.is_returned);
-  const canEdit = open && open.payment_status !== "REFUNDED" && open.status !== "CANCELLED";
-
   return (
     <>
       <h1>{t("receipts.title")}</h1>
@@ -307,8 +288,8 @@ export default function StoreReceipts() {
         <input
           className="search"
           type="search"
-          aria-label={t("common.search")}
-          placeholder={`${t("common.search")} (${t("receipts.number")})`}
+          aria-label={t("receiptsV2.searchPh")}
+          placeholder={t("receiptsV2.searchPh")}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -328,171 +309,14 @@ export default function StoreReceipts() {
       )}
       <Pager page={page} count={count} onPage={setPage} />
 
+      {/* Карточка заказа общая с админским экраном «Чеки»: оплата, выдача по
+          позициям, дозаказ, возврат, печать и наряд мастеру — по роли. */}
       {open && (
-        <Modal
-          title={`${t("checkout.receipt")} №${open.order_number}`}
+        <ReceiptCard
+          receipt={open}
           onClose={() => setOpen(null)}
-          footer={
-            <>
-              {Number(open.debt) > 0 && isAdmin && (
-                <button onClick={() => setPaying(open)} disabled={busy}>
-                  {t("receipts.acceptPayment")}
-                </button>
-              )}
-              {isAdmin &&
-                (open.payment_status === "PAID" || Number(open.amount_paid) > 0) &&
-                !["REFUNDED", "PARTIALLY_REFUNDED"].includes(open.payment_status) &&
-                open.status !== "CANCELLED" && (
-                  <button className="secondary" onClick={(e) => undoPay(open, e)} disabled={busy}>
-                    ↩ {t("receipts.unpay")}
-                  </button>
-                )}
-              {canEdit && (
-                <button className="secondary" onClick={() => setAdding(true)} disabled={busy}>
-                  + {t("receipts.addBtn")}
-                </button>
-              )}
-              {open.has_service && open.fulfillment_status === "PROCESSING" && (
-                <button className="secondary" onClick={() => setFulfillment("READY")} disabled={busy}>
-                  {t("receipts.markReady")}
-                </button>
-              )}
-              {open.has_service && open.fulfillment_status === "READY" && (
-                <button className="secondary" onClick={() => setFulfillment("ISSUED")} disabled={busy}>
-                  {t("receipts.markIssued")}
-                </button>
-              )}
-              {/* Откат прямо в окне чека: сюда заходят разбираться с заказом,
-                  а промах по «Готово» замечают чаще всего именно здесь. */}
-              {open.has_service && open.fulfillment_status !== "PROCESSING" && (
-                <button
-                  className="secondary"
-                  onClick={() => setFulfillment("PROCESSING")}
-                  disabled={busy}
-                  title={t("receipts.rollbackTitle")}
-                >
-                  ← {t("receipts.markProcessing")}
-                </button>
-              )}
-              {canRefund && (
-                <button className="danger" onClick={() => setRefunding(true)} disabled={busy}>
-                  {t("receipts.refund")}
-                </button>
-              )}
-            </>
-          }
-        >
-          {/* Строки с единицей и ценой, суммы целыми сомами — как в печатной
-              форме и в списке чеков. */}
-          {open.items.map((it) => {
-            const unit = it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label || "";
-            return (
-              <div className="crow" key={it.id}>
-                <span>
-                  {itemTitle(it, t)}
-                  <span className="muted">
-                    {" "}× {trimQty(it.quantity)} {unit} · {trimQty(it.price_per_item)}{" "}
-                    {t("checkout.perPieceShort", { unit })}
-                  </span>
-                  {it.is_returned && (
-                    <span className="badge warn" style={{ marginLeft: 6 }}>
-                      {t("receipts.returned")}
-                    </span>
-                  )}
-                </span>
-                <span>
-                  {lineRuled(it) && <s className="muted">{som(it.catalog_total)}</s>}{" "}
-                  {som(it.line_total)}
-                </span>
-              </div>
-            );
-          })}
-          {receiptRuled(open) && (
-            <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 8 }}>
-              <span className="k">
-                {t("checkout.catalogTotal")}
-                <span className="muted" style={{ display: "block", fontSize: 12 }}>{rulesLabel(open, t)}</span>
-              </span>
-              <s className="muted">{som(open.catalog_total)}</s>
-            </div>
-          )}
-          <div className="crow" style={{ borderTop: "1px solid var(--hairline)", marginTop: 8 }}>
-            <strong>{t("common.total")}</strong>
-            <strong>{som(open.total_price)}</strong>
-          </div>
-          {Number(open.amount_paid) > 0 && (
-            <div className="crow">
-              <span className="k">{t("receipts.paid")}</span>
-              <span>{som(open.amount_paid)}</span>
-            </div>
-          )}
-          {/* Часть заказа, закрытая сдачей с прошлых: без этой строки
-              «оплачено 3 000» по заказу, за который принесли 2 000, выглядит
-              как ошибка кассы. */}
-          {Number(open.change_applied) > 0 && (
-            <div className="crow">
-              <span className="k">{t("checkout.changeUsed")}</span>
-              <span>{som(open.change_applied)}</span>
-            </div>
-          )}
-          {Number(open.change_due) > 0 && (
-            <div className="crow">
-              <span className="k">{t("receipts.change")}</span>
-              <strong style={{ color: "var(--accent-ink)" }}>{som(open.change_due)}</strong>
-            </div>
-          )}
-          {Number(open.debt) > 0 && (
-            <div className="crow">
-              <span className="k">{t("receipts.debt")}</span>
-              <strong style={{ color: "var(--danger-ink)" }}>{som(open.debt)}</strong>
-            </div>
-          )}
-          <div className="crow">
-            <span className="k">{t("receipts.status")}</span>
-            <PaymentBadge status={open.payment_status} />
-          </div>
-          <div className="crow">
-            <span className="k">{t("receipts.method")}</span>
-            <span>{t(`checkout.${open.payment_method.toLowerCase()}`)}</span>
-          </div>
-          {open.cashier_name && (
-            <div className="crow">
-              <span className="k">{t("receipts.cashier")}</span>
-              <span>
-                {open.cashier_name}
-                {open.cashier_role && <span className="muted"> · {open.cashier_role}</span>}
-              </span>
-            </div>
-          )}
-          {open.has_service && (
-            <div className="crow">
-              <span className="k">{t("receipts.fulfillment")}</span>
-              <FulfillmentBadge status={open.fulfillment_status} />
-            </div>
-          )}
-        </Modal>
-      )}
-
-      {adding && open && (
-        <AddToOrderModal
-          receiptId={open.id}
-          receipt={open}
-          onClose={() => setAdding(false)}
-          onAdded={(data) => {
+          onChange={(data) => {
             setOpen(data);
-            setAdding(false);
-            load();
-          }}
-        />
-      )}
-
-      {refunding && open && (
-        <RefundModal
-          receipt={open}
-          onClose={() => setRefunding(false)}
-          onDone={(data) => {
-            setOpen(data);
-            setRefunding(false);
             load();
           }}
         />

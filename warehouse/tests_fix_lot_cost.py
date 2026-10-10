@@ -62,9 +62,10 @@ class FixLotCostTests(TestCase):
         before = self.material.stock_value
         self._run(str(self.roll.id), "9000", "--yes")
         self.material.refresh_from_db()
-        # 11 000 / 28,8 не делится нацело: цена за кв.м округляется до копеек,
-        # и склад показывает 10 999.87. После правки 9 000 / 28,8 = 312,50 ровно.
-        self.assertEqual(before, Decimal("10999.87"))
+        # 11 000 / 28,8 не делится нацело, но склад считается закуп × остаток /
+        # принято (STK-10) — ровно 11 000, без хвоста 10 999.87 от цены кв.м,
+        # округлённой до копеек. После правки 9 000 / 28,8 = 312,50 ровно.
+        self.assertEqual(before, Decimal("11000.00"))
         self.assertEqual(self.material.stock_value, Decimal("9000.00"))
 
     def test_older_lot_does_not_touch_the_card(self):

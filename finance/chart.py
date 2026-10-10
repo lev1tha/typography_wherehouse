@@ -57,6 +57,9 @@ FLOW_SECTIONS = (OPERATING, INVESTING, FINANCING)
 REVENUE = "revenue"
 COGS_MATERIAL = "cogs_material"
 COGS_SERVICES = "cogs_services"
+# Себестоимость гарантийных переделок (волна 2): часть себестоимости, вынесенная
+# своей строкой из материала и расходников. Итог себестоимости не меняется.
+COGS_WARRANTY = "cogs_warranty"
 LOSSES = "losses"
 OPEX = "opex"                      # по блокам «Финансов», каждой статьёй
 OPEX_CASH_MANUAL = "opex_cash_manual"
@@ -65,11 +68,13 @@ DEPRECIATION = "depreciation"
 DISPOSAL = "disposal"
 INTEREST = "interest"
 TAX = "tax"
+TAX_CASH = "tax_cash"      # та же строка налога, основа «по кассе» (только подпись)
 
 PNL_LINES = {
     REVENUE: "Выручка",
     COGS_MATERIAL: "Себестоимость материала",
     COGS_SERVICES: "Расходники услуг (по техкартам)",
+    COGS_WARRANTY: "Гарантийные переделки",
     LOSSES: "Потери материала (брак, недостача)",
     OPEX: "Операционные расходы",
     OPEX_CASH_MANUAL: "Расходы, внесённые прямо в кассе (до 27.09.2026)",
@@ -78,6 +83,7 @@ PNL_LINES = {
     DISPOSAL: "Списание выбывшего оборудования",
     INTEREST: "Проценты по займам",
     TAX: "Налог ({rate} % от выручки)",
+    TAX_CASH: "Налог ({rate} % от полученных денег)",
 }
 
 
@@ -124,6 +130,13 @@ ROLES = {
     Role.NOT_CASH: Mapping(None, None, note="Справочная запись: ни денег, ни расхода."),
 }
 
+# Платёж по активу, купленному в рассрочку: деньги — инвестиции, в ОПиУ его нет
+# (актив уже в прибыли амортизацией карточки на полную цену).
+ASSET_PAYMENT = Mapping(
+    None, INVESTING,
+    note="Платёж по активу в рассрочку: ОДДС — инвестиции, ОПиУ — только амортизация карточки.",
+)
+
 # Капвложение ниже порога — обычный расход месяца.
 CAPEX_EXPENSED = Mapping(
     OPEX, OPERATING,
@@ -162,6 +175,10 @@ ARTICLES = {
                         note="Свои деньги переложили — итог не меняется (D-6)."),
     A.OPENING: Mapping(None, OUTSIDE, "opening", "Ввод начального остатка",
                        note="Деньги, бывшие до учёта в системе, — не движение (D-5)."),
+    # Аванс и расчёт по ведомости: расход на зарплату уже начислен за месяц
+    # (`PayrollAccrual` → трата без денег), здесь только деньги.
+    A.PAYROLL: Mapping(None, OPERATING, "payroll", "Выплата зарплаты по ведомости",
+                       note="Зарплата в ОПиУ — начислением за месяц; деньги — выплатами (D-100)."),
 }
 
 # Системные строки ОПиУ — считаются, а не вносятся. В ОДДС их нет: деньги по
@@ -170,6 +187,8 @@ SYSTEM = {
     REVENUE: Mapping(REVENUE, None, note="По дате признания выручки (D-8, D-14), возврат — днём возврата."),
     COGS_MATERIAL: Mapping(COGS_MATERIAL, None, note="FIFO-снимок в момент продажи."),
     COGS_SERVICES: Mapping(COGS_SERVICES, None),
+    COGS_WARRANTY: Mapping(COGS_WARRANTY, None,
+                           note="Себестоимость заказов-переделок за счёт цеха (Receipt.is_warranty)."),
     LOSSES: Mapping(LOSSES, None, note="Брак и недостача по себестоимости (D-15)."),
     TAX: Mapping(TAX, None, note="Ставка истории TaxRate × выручка месяца (D-10, D-19)."),
     DEPRECIATION: Mapping(DEPRECIATION, None),
@@ -184,6 +203,8 @@ def for_role(role) -> Mapping:
 def for_expense(entry) -> Mapping:
     """Трата «Финансов»: по роли вида, капвложение — с учётом порога."""
     role = entry.kind.role
+    if entry.asset_id:
+        return ASSET_PAYMENT
     if role == Role.CAPEX and not entry.is_capitalized:
         return CAPEX_EXPENSED
     return ROLES[role]

@@ -43,8 +43,11 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
   // счёта остаток наличных считал бы и переводы тоже.
   const [form, setForm] = useState({
     name: "", amount: "", spent_at: defaultDate(period), note: "", account: "CASH",
-    period: "", useful_life_months: "",
+    period: "", useful_life_months: "", installment: false,
   });
+  // Платёж по активу, купленному в рассрочку: {asset, amount, spent_at, account, note}.
+  const [paying, setPaying] = useState(null);
+  const [payErr, setPayErr] = useState("");
   // Покупка в «Инвестициях»: от порога — актив с амортизацией (срок службы,
   // месяц выбытия), дешевле — сразу расход. Решает сервер по порогу.
   const isCapex = kind.role === "CAPEX";
@@ -76,7 +79,7 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(load, [kind.id, period?.date_from, period?.date_to]);
 
-  function add() {
+  function add(confirmed = false) {
     if (!form.amount) {
       setAddErr(t("expenses.needAmount"));
       return focusFirstInvalid();
@@ -92,18 +95,54 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
         account: form.account,
         ...(form.period ? { period: form.period } : {}),
         ...(isCapex && form.useful_life_months ? { useful_life_months: Number(form.useful_life_months) } : {}),
+        // Карточка актива в рассрочку: полная цена и амортизация от неё, денег
+        // она не двигает — они пойдут платежами по активу.
+        ...(isCapex && form.installment ? { is_cashless: true } : {}),
+        ...(confirmed === true ? { confirm_duplicate: true } : {}),
       })
       .then(() => {
         setForm({
           name: "", amount: "", spent_at: form.spent_at, note: "", account: form.account,
-          period: form.period, useful_life_months: "",
+          period: form.period, useful_life_months: "", installment: false,
         });
         load();
         onChanged?.();
         toast(t("expenses.added"));
       })
       // Текст сервера, а не «ошибка»: замок периода, срок больше аренды и
-      // прочие отказы объясняют, что поправить.
+      // прочие отказы объясняют, что поправить. Такая же трата уже есть —
+      // переспрашиваем: двойной ввод (F11) заметить иначе нечем.
+      .catch(async (e) => {
+        const dup = e.response?.data?.confirm_duplicate;
+        if (dup && confirmed !== true) {
+          if (await confirm(String([].concat(dup).join(" ")))) add(true);
+          return;
+        }
+        toast(apiError(e, t("common.error")), "error");
+      });
+  }
+
+  function savePayment() {
+    if (!(Number(paying.amount) > 0)) {
+      setPayErr(t("expenses.needAmount"));
+      return focusFirstInvalid();
+    }
+    setPayErr("");
+    api
+      .post("/finance/expense-entries/", {
+        kind: kind.id,
+        asset: paying.asset.id,
+        amount: Number(paying.amount),
+        spent_at: paying.spent_at,
+        account: paying.account,
+        name: paying.note || paying.asset.name || "",
+      })
+      .then(() => {
+        setPaying(null);
+        load();
+        onChanged?.();
+        toast(t("expenses.added"));
+      })
       .catch((e) => toast(apiError(e, t("common.error")), "error"));
   }
 
@@ -154,6 +193,7 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
   const total = rows.reduce((s, r) => s + Number(r.amount || 0), 0);
 
   return (
+    <>
     <Modal
       title={kind.name}
       onClose={onClose}
@@ -221,7 +261,7 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
             </select>
           </Field>
           <div className="field" style={{ display: "flex", alignItems: "flex-end" }}>
-            <button onClick={add}>{t("common.add")}</button>
+            <button onClick={() => add()}>{t("common.add")}</button>
           </div>
         </div>
         <div className="row" style={{ marginTop: 2 }}>
@@ -252,6 +292,22 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
               ? t("expenses.capexHint", { threshold: som(threshold) })
               : t("expenses.capexHintNoValue")}
           </p>
+        )}
+        {isCapex && (
+          <label className="field" style={{ display: "flex", alignItems: "center", gap: 8, margin: "8px 0 0" }}>
+            <input
+              type="checkbox" style={{ width: 20, height: 20, minHeight: 0 }}
+              checked={form.installment}
+              onChange={(e) => setForm({ ...form, installment: e.target.checked })}
+            />
+            {t("assetCard.checkbox")}
+          </label>
+        )}
+        {isCapex && form.installment && (
+          <p className="muted" style={{ fontSize: 12, margin: "2px 0 0" }}>{t("assetCard.hint")}</p>
+        )}
+        {kind.moves_cash === false && (
+          <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>{t("expenses.noCashKind")}</p>
         )}
         <Field style={{ marginTop: 8, marginBottom: 0 }} label={t("expenses.note")}>
           <input
@@ -358,13 +414,28 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
                     <span className="muted" style={{ fontSize: 12 }}> · {t("expenses.forMonth", { month: r.period })}</span>
                   )}
                   {r.name && <> · <strong>{r.name}</strong></>}
-                  {isCapex && (
+                  {isCapex && !r.asset && (
                     <div className="muted" style={{ fontSize: 12 }}>
-                      {r.is_capitalized
+                      {r.is_cashless
+                        ? t("assetCard.badge", {
+                            months: r.useful_life_months, paid: som(r.installments_paid || 0), price: som(r.amount),
+                          })
+                        : r.is_capitalized
                         ? t("expenses.assetBadge", { months: r.useful_life_months })
                         : t("expenses.belowThresholdBadge")}
                       {r.depreciate_until && ` · ${t("expenses.disposedBadge", { month: r.depreciate_until })}`}
                     </div>
+                  )}
+                  {r.asset && (
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {t("assetCard.paymentBadge", { asset: r.asset_name || `#${r.asset}` })}
+                    </div>
+                  )}
+                  {r.is_payroll && (
+                    <div className="muted" style={{ fontSize: 12 }}>{t("expenses.payrollBadge")}</div>
+                  )}
+                  {r.recurring && (
+                    <div className="muted" style={{ fontSize: 12 }}>{t("expenses.recurringBadge")}</div>
                   )}
                   {r.note && (
                     <div className="muted" style={{ fontSize: 12 }}>{r.note}</div>
@@ -372,7 +443,18 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
                 </span>
                 <span className="row" style={{ gap: 4, margin: 0, alignItems: "center" }}>
                   <strong>{som(r.amount)}</strong>
-                  {!readOnly && (
+                  {!readOnly && r.is_cashless && !r.is_payroll && (
+                    <button
+                      className="ghost row-btn"
+                      onClick={() => {
+                        setPayErr("");
+                        setPaying({ asset: r, amount: "", spent_at: defaultDate(period), account: "BANK", note: "" });
+                      }}
+                    >
+                      {t("assetCard.pay")}
+                    </button>
+                  )}
+                  {!readOnly && !r.is_payroll && (
                     <>
                       <button className="ghost" onClick={() => setEditing({ ...r })} aria-label={t("common.edit")}>
                         <Icon name="pencil" size={16} />
@@ -401,6 +483,47 @@ export default function ExpenseKindModal({ kind, period, settings, onClose, onCh
         <strong style={{ color: "var(--accent-ink)" }}>{t("fixed.totalForPeriod")}</strong>
         <strong style={{ color: "var(--accent-ink)" }}>{som(total)}</strong>
       </div>
+
     </Modal>
+      {/* Платёж по активу в рассрочку: деньги ушли (ОДДС — инвестиции), в ОПиУ
+          платёж не идёт — актив уже в прибыли амортизацией своей карточки. */}
+      {paying && (
+        <Modal
+          title={t("assetCard.payTitle", { asset: paying.asset.name || paying.asset.kind_name })}
+          onClose={() => setPaying(null)}
+          footer={
+            <>
+              <button className="secondary" onClick={() => setPaying(null)}>{t("common.cancel")}</button>
+              <button onClick={savePayment}>{t("common.save")}</button>
+            </>
+          }
+        >
+          <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
+            {t("assetCard.payHint", {
+              price: som(paying.asset.amount), paid: som(paying.asset.installments_paid || 0),
+              left: som(Number(paying.asset.amount) - Number(paying.asset.installments_paid || 0)),
+            })}
+          </p>
+          <div className="row">
+            <Field className="grow" label={t("expenses.amount")} required error={payErr}>
+              <input type="number" step="any" inputMode="decimal" autoFocus value={paying.amount}
+                onChange={(e) => { setPaying({ ...paying, amount: e.target.value }); setPayErr(""); }} />
+            </Field>
+            <Field style={{ width: 160 }} label={t("expenses.date")}>
+              <input type="date" value={paying.spent_at} onChange={(e) => setPaying({ ...paying, spent_at: e.target.value })} />
+            </Field>
+            <Field style={{ width: 140 }} label={t("expenses.paidFrom")}>
+              <select value={paying.account} onChange={(e) => setPaying({ ...paying, account: e.target.value })}>
+                <option value="CASH">{t("expenses.paidCash")}</option>
+                <option value="BANK">{t("expenses.paidBank")}</option>
+              </select>
+            </Field>
+          </div>
+          <Field label={t("expenses.note")}>
+            <input value={paying.note} onChange={(e) => setPaying({ ...paying, note: e.target.value })} />
+          </Field>
+        </Modal>
+      )}
+    </>
   );
 }

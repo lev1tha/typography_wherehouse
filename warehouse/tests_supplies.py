@@ -114,7 +114,7 @@ class SupplyDocumentTests(APITestCase):
         self.assertEqual(Decimal(str(resp.data["discrepancy"])), Decimal("0"))
 
     def test_supplier_debt_is_what_is_left_to_pay(self):
-        resp = self._create(paid_amount="20000")
+        resp = self._create(paid_amount="20000", paid_account="CASH")
         self.assertEqual(Decimal(str(resp.data["debt"])), Decimal("29200"))
 
     # ---- закуп в финотчёте --------------------------------------------------
@@ -198,9 +198,14 @@ class SupplyDocumentTests(APITestCase):
         уйти в заказы. Бумажная часть — номер, дата, оплата — правится."""
         resp = self._create()
         supply_id = resp.data["id"]
+        # Состав в теле правки — не молчаливое 200, а понятный отказ (аудит 10.10):
+        # опечатку поправит «Исправить приход», ошибку иную — отмена и новый ввод.
+        refused = self.client.patch(f"{self.URL}{supply_id}/", {"lines": []}, format="json")
+        self.assertEqual(refused.status_code, 400, refused.data)
+        self.assertIn("Исправить приход", refused.data["detail"])
         patch = self.client.patch(
             f"{self.URL}{supply_id}/",
-            {"paid_amount": "10000", "paid_account": "CASH", "lines": []}, format="json",
+            {"paid_amount": "10000", "paid_account": "CASH"}, format="json",
         )
         self.assertEqual(patch.status_code, 200, patch.data)
         self.assertEqual(Decimal(str(patch.data["paid_amount"])), Decimal("10000"))
@@ -249,12 +254,12 @@ class SupplierTests(APITestCase):
         material = Material.objects.create(
             name="Крепёж", unit=Material.Unit.PIECE, quantity=Decimal("0")
         )
-        for paid in ("0", "500"):
-            self.client.post(
+        for number, paid in (("Н-1", "0"), ("Н-2", "500")):
+            r = self.client.post(
                 "/api/warehouse/supplies/",
                 {
-                    "supplier": supplier.id, "received_on": "2026-08-01",
-                    "paid_amount": paid,
+                    "supplier": supplier.id, "received_on": "2026-08-01", "number": number,
+                    "paid_amount": paid, "paid_account": "CASH" if paid != "0" else "",
                     "lines": [{
                         "material": material.id, "form": "QTY",
                         "quantity": "10", "cost": "1000",
@@ -262,6 +267,7 @@ class SupplierTests(APITestCase):
                 },
                 format="json",
             )
+            self.assertEqual(r.status_code, 201, r.data)
         row = next(s for s in self.client.get(self.URL).data if s["id"] == supplier.id)
         # 1000 + (1000 − 500) = 1500
         self.assertEqual(Decimal(str(row["debt"])), Decimal("1500"))

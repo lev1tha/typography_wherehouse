@@ -13,6 +13,11 @@ class AuditLog(models.Model):
         related_name="audit_logs",
     )
     action = models.TextField(_("действие"))
+    # Тип записи для фильтра журнала (2026-10-10): tax / expense / cash /
+    # payroll / settings … Пусто у записей, сделанных до появления поля и у тех
+    # мест кода, что тип не передают, — журнал разбирает их по тексту
+    # (`audit.kinds.classify`).
+    kind = models.CharField(_("тип"), max_length=20, blank=True, default="", db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -27,6 +32,6 @@ class AuditLog(models.Model):
         return f"[{self.created_at:%Y-%m-%d %H:%M}] {who}: {self.action[:60]}"
 
     @classmethod
-    def record(cls, user, action: str) -> "AuditLog":
+    def record(cls, user, action: str, kind: str = "") -> "AuditLog":
         """Convenience helper used across views/services to log an action."""
-        return cls.objects.create(user=user, action=action)
+        return cls.objects.create(user=user, action=action, kind=kind)

@@ -678,7 +678,12 @@ export default function Dashboard() {
                   </td>
                   <td className="muted">{r.phone || "—"}</td>
                   <td>{som(r.material_spend)}</td>
-                  <td>{Number(r.material_qty)}</td>
+                  {/* Единицы раздельно: «20 шт + 0,96 кв.м», а не «20,96» (CLI-10). */}
+                  <td>
+                    {r.qty_by_unit?.length
+                      ? r.qty_by_unit.map((u) => `${+Number(u.qty).toFixed(3)} ${t(`unit.${u.unit}`)}`).join(" + ")
+                      : r.material_qty_label || Number(r.material_qty)}
+                  </td>
                   <td>{r.orders}</td>
                 </tr>
               ))}

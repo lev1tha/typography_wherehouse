@@ -171,8 +171,12 @@ class BulkPayTests(APITestCase):
 
     # ---- права -------------------------------------------------------------
 
-    def test_storekeeper_cannot_pay(self):
-        """Деньги — за админом, как и оплата по отдельному чеку."""
+    def test_storekeeper_cannot_pay_when_the_owner_switched_it_off(self):
+        """Деньги за админом, если владелец выключил «складовщик принимает
+        оплату долга» (CLI-08, 2026-10-10: по умолчанию включено)."""
+        from clients.models import ClientSettings
+
+        ClientSettings.objects.update_or_create(pk=1, defaults={"storekeeper_takes_debt": False})
         resp = self._pay({"amount": "1000"}, user=self.keeper)
         self.assertEqual(resp.status_code, 403, resp.data)
         self.assertEqual(self._debt(self.r1), Decimal("1000"))

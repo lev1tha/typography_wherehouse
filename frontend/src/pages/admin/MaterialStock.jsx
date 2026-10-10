@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
 import MonthPicker from "../../components/MonthPicker.jsx";
+import StockOnDate from "../../components/StockOnDate.jsx";
+import { useAuth } from "../../auth/AuthContext.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { formatNumber } from "../../utils/format.js";
 
@@ -25,6 +27,7 @@ export default function MaterialStock({ embedded = false }) {
   const [rows, setRows] = useState([]);
   const [totals, setTotals] = useState(null);
   const [loading, setLoading] = useState(true);
+  const { seesMoney } = useAuth();
 
   function load() {
     setLoading(true);
@@ -183,6 +186,8 @@ export default function MaterialStock({ embedded = false }) {
           </table>
         </div>
       )}
+      {/* Склад на дату (STK-04): из снимка конца месяца или расчётом. */}
+      {seesMoney && <StockOnDate />}
     </>
   );
 }

@@ -5,6 +5,7 @@ import api from "../../api/api.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import LoadError from "../../components/LoadError.jsx";
 import Modal from "../../components/Modal.jsx";
+import PrintAct from "../../components/PrintAct.jsx";
 import { FulfillmentBadge, PaymentBadge } from "../../components/StatusBadge.jsx";
 import { formatDate, formatMoney } from "../../utils/format.js";
 
@@ -16,9 +17,13 @@ export default function CustomerOrders() {
   const [orders, setOrders] = useState(null);
   const [failed, setFailed] = useState(false);
   const [showPay, setShowPay] = useState(false);
+  // Аванс клиента и акт сверки (CLI-05, CLI-13): клиент сам видит свои взаиморасчёты.
+  const [summary, setSummary] = useState(null);
+  const [showAct, setShowAct] = useState(false);
 
   function load() {
     setFailed(false);
+    api.get("/customer/summary/").then((r) => setSummary(r.data)).catch(() => {});
     api
       .get("/customer/orders/")
       .then((r) => setOrders(r.data))
@@ -74,17 +79,26 @@ export default function CustomerOrders() {
             <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{t("myOrders.changeHint")}</div>
           </div>
         )}
+        {Number(summary?.advance_balance) > 0 && (
+          <div className="stat">
+            <div className="label">{t("myOrders.advanceTitle")}</div>
+            <div className="value" style={{ color: "var(--accent-ink)" }}>{som(summary.advance_balance)}</div>
+            <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{t("myOrders.advanceHint")}</div>
+          </div>
+        )}
       </div>
 
-      {totalDebt > 0 && (
-        <button
-          className="secondary"
-          style={{ width: "auto", marginBottom: 18 }}
-          onClick={() => setShowPay(true)}
-        >
-          {t("myOrders.howToPay")}
+      <div className="row" style={{ gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+        {totalDebt > 0 && (
+          <button className="secondary" style={{ width: "auto" }} onClick={() => setShowPay(true)}>
+            {t("myOrders.howToPay")}
+          </button>
+        )}
+        {/* Акт сверки за период: тот же расчёт, что у цеха, — можно распечатать. */}
+        <button className="secondary" style={{ width: "auto" }} onClick={() => setShowAct(true)}>
+          {t("myOrders.statement")}
         </button>
-      )}
+      </div>
 
       {orders.length === 0 ? (
         <div className="empty-state">{t("myOrders.empty")}</div>
@@ -152,6 +166,14 @@ export default function CustomerOrders() {
             </div>
           ))}
         </div>
+      )}
+
+      {showAct && (
+        <PrintAct
+          client={{ display_name: user?.name || "" }}
+          endpoint="/customer/statement/"
+          onClose={() => setShowAct(false)}
+        />
       )}
 
       {showPay && (

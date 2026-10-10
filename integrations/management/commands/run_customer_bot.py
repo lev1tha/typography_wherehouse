@@ -11,6 +11,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 from clients.models import Client
+from integrations.linking import NOT_OWN, link_chat
 from sales.models import Receipt
 
 MENU_ORDERS = "🧾 Мои заказы"
@@ -18,17 +19,13 @@ MENU_RECEIPTS = "💳 Мои чеки"
 
 
 @sync_to_async
-def link_client_by_phone(phone: str, chat_id: int):
-    digits = phone.lstrip("+")
-    client = (
-        Client.objects.filter(phone__endswith=digits[-9:]).first()
-        if len(digits) >= 9
-        else None
+def link_client_by_contact(contact, sender_id: int, chat_id: int):
+    """Привязать чат — только если контакт СВОЙ (user_id == отправитель), см.
+    `integrations.linking`. Возвращает (статус, клиент)."""
+    return link_chat(
+        phone=contact.phone_number, contact_user_id=contact.user_id,
+        sender_id=sender_id, chat_id=chat_id,
     )
-    if client:
-        client.telegram_chat_id = str(chat_id)
-        client.save(update_fields=["telegram_chat_id"])
-    return client
 
 
 @sync_to_async
@@ -88,10 +85,16 @@ class Command(BaseCommand):
 
         async def on_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             contact = update.message.contact
-            client = await link_client_by_phone(
-                contact.phone_number, update.effective_chat.id
+            link_status, client = await link_client_by_contact(
+                contact, update.effective_user.id, update.effective_chat.id
             )
-            if client:
+            if link_status == NOT_OWN:
+                await update.message.reply_text(
+                    "Поделитесь СВОИМ контактом кнопкой «Поделиться контактом» — "
+                    "чужую карточку принять нельзя.",
+                    reply_markup=contact_kb,
+                )
+            elif client:
                 await update.message.reply_text(
                     "✅ Аккаунт привязан! Теперь вы будете получать чеки и "
                     "уведомления о заказах.",

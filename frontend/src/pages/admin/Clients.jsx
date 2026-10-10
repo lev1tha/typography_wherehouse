@@ -6,7 +6,9 @@ import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import BulkPayModal from "../../components/BulkPayModal.jsx";
+import ClientPricesSection from "../../components/ClientPricesSection.jsx";
 import ClientPicker from "../../components/ClientPicker.jsx";
+import { AdvanceModal, BonusPayModal, ClientSettingsModal, WriteOffModal } from "../../components/ClientActionModals.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import Field, { focusFirstInvalid } from "../../components/Field.jsx";
 import Icon from "../../components/Icon.jsx";
@@ -38,6 +40,12 @@ function rangeParams(r) {
 
 const money = (n) => formatNumber(n);
 const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, местная дата
+
+// Корзины давности долга: ключ → [от, до] дней (включительно). Те же, что на сервере.
+const BUCKETS = { "0_30": [0, 30], "31_60": [31, 60], "61_90": [61, 90], "90_plus": [91, null] };
+// Цвет давности: до месяца — обычный, дольше — предупреждение, дольше трёх — тревога.
+const ageColor = (d) =>
+  d > 90 ? "var(--danger-ink)" : d > 30 ? "var(--warn-ink)" : undefined;
 
 // Соседний день для стрелок ‹ ›. Полдень — чтобы переход на летнее время не
 // перекинул дату дважды.
@@ -80,6 +88,18 @@ export default function Clients() {
   const [merging, setMerging] = useState(null);
   // «Кому мы должны сдачу» — обратный список к должникам.
   const [onlyChange, setOnlyChange] = useState(false);
+  // Давность долга и «спящие» (CLI-01, CLI-10): «долг старше N дней», корзина
+  // давности (плитки сверху), «не заказывали N дней».
+  const [overdue, setOverdue] = useState("");
+  const [bucket, setBucket] = useState(null);
+  const [sleeping, setSleeping] = useState("");
+  const [aging, setAging] = useState(null);
+  // Общие правила клиентов (лимит, приём денег складовщиком) и окна действий.
+  const [cfg, setCfg] = useState({ default_credit_limit: null, storekeeper_takes_debt: false });
+  const [showCfg, setShowCfg] = useState(false);
+  const [advanceOpen, setAdvanceOpen] = useState(false);
+  const [writeOff, setWriteOff] = useState(null);
+  const [bonusPay, setBonusPay] = useState(null);
   // Период внутри карточки: за день, за месяц или за всё время. При открытии
   // берётся из фильтра списка, дальше переключается прямо в карточке — чтобы
   // посмотреть, что клиент брал сегодня, не закрывая её.
@@ -92,9 +112,13 @@ export default function Clients() {
 
   // Фильтры и сортировка одной строкой: смена любого сбрасывает страницу на
   // первую, а устаревший ответ не перетирает свежий.
-  const filterKey = JSON.stringify([search, period.year, period.month, day, onlyDebt, onlyChange, minOrders, sort]);
+  const filterKey = JSON.stringify([
+    search, period.year, period.month, day, onlyDebt, onlyChange, minOrders, overdue, bucket, sleeping, sort,
+  ]);
   const [page, setPage] = usePage(filterKey);
-  const filtered = !!(search || day || period.month || onlyDebt || onlyChange || minOrders);
+  const filtered = !!(search || day || period.month || onlyDebt || onlyChange || minOrders || overdue || bucket || sleeping);
+  // Деньги клиента принимает админ, а складовщик — если владелец это включил.
+  const canTakeMoney = isAdmin || (!isAccountant && cfg.storekeeper_takes_debt);
 
   // День важнее месяца: выбран день — смотрим ровно его, иначе весь месяц.
   function listRange() {
@@ -111,18 +135,55 @@ export default function Clients() {
     setOnlyDebt(false);
     setOnlyChange(false);
     setMinOrders("");
+    setOverdue("");
+    setBucket(null);
+    setSleeping("");
   }
 
-  function load() {
-    const params = {
+  // Параметры списка — те же для таблицы и для выгрузки CSV.
+  function listParams() {
+    const [from, to] = bucket ? BUCKETS[bucket] : [null, null];
+    return {
       ...(search ? { search } : {}),
       ...periodParams(),
       ...(onlyDebt ? { has_debt: 1 } : {}),
       ...(onlyChange ? { has_change: 1 } : {}),
       ...(Number(minOrders) > 0 ? { min_orders: Number(minOrders) } : {}),
+      ...(Number(overdue) > 0 ? { overdue_days: Number(overdue) } : {}),
+      ...(Number(sleeping) > 0 ? { sleeping_days: Number(sleeping) } : {}),
+      ...(bucket ? { age_from: from, ...(to != null ? { age_to: to } : {}) } : {}),
       ordering: (sort.dir === "desc" ? "-" : "") + sort.key,
-      ...(page > 1 ? { page } : {}),
     };
+  }
+
+  // Плитки давности долга: считаются по всем должникам, а не по текущему фильтру.
+  function loadAging() {
+    api.get("/clients/clients/aging/").then((r) => setAging(r.data)).catch(() => {});
+  }
+
+  useEffect(() => {
+    loadAging();
+    api.get("/clients/settings/").then((r) => setCfg(r.data)).catch(() => {});
+  }, []);
+
+  async function downloadCsv() {
+    try {
+      const r = await api.get("/clients/clients/export/", { params: listParams(), responseType: "blob" });
+      const url = URL.createObjectURL(r.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = onlyDebt ? "dolzhniki.csv" : "klienty.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast(apiError(e, t("clients.exportFailed")), "error");
+    }
+  }
+
+  function load() {
+    const params = { ...listParams(), ...(page > 1 ? { page } : {}) };
     api
       .get("/clients/clients/", { params, signal: nextList() })
       .then((r) => {
@@ -204,16 +265,12 @@ export default function Clients() {
     changeCardRange({ ...cardRange, mode: "all" });
   }
 
-  // Акт сверки считает сальдо от нуля, поэтому ему нужна вся история, а не
-  // заказы за день, выбранный в карточке, — иначе итог акта не сойдётся с долгом.
-  async function openAct() {
-    if (cardRange.mode === "all") return setActFor(detail);
-    try {
-      const { data } = await api.get(`/clients/clients/${detail.id}/`);
-      setActFor(data);
-    } catch (e) {
-      toast(apiError(e, t("common.error")), "error");
-    }
+  // Акт сверки считает сервер (входящее сальдо, обороты, исходящее сальдо) —
+  // форме достаточно знать, чей он.
+  function openAct() {
+    setActFor({
+      id: detail.id, display_name: detail.display_name, inn: detail.inn, phone: detail.phone,
+    });
   }
 
   // После выплаты перечитываем карточку и список: изменились и долги заказов,
@@ -225,6 +282,7 @@ export default function Clients() {
       toast(apiError(e, t("common.error")), "error");
     }
     load();
+    loadAging();
   }
 
   // Правка поля карточки (ФИО, компания, ИНН) — по уходу из поля. Если сервер
@@ -261,6 +319,65 @@ export default function Clients() {
       toast(t("common.saved"));
     } catch (e) {
       input.value = String(prev);
+      toast(apiError(e, t("common.error")), "error");
+    }
+  }
+
+  // Лимит долга клиента (CLI-03): пусто — действует общий. Касса предупредит, но
+  // не запретит. Задаёт только админ.
+  async function saveLimit(input) {
+    const raw = input.value.trim();
+    const prev = detail.credit_limit == null ? "" : String(+Number(detail.credit_limit));
+    const next = raw === "" ? null : Number(raw);
+    if (next !== null && (Number.isNaN(next) || next < 0)) {
+      input.value = prev;
+      return toast(t("clients.creditLimitBad"), "error");
+    }
+    if (String(next ?? "") === prev) return;
+    try {
+      await api.patch(`/clients/clients/${detail.id}/`, { credit_limit: next });
+      await refreshDetail(detail.id);
+      toast(t("common.saved"));
+    } catch (e) {
+      input.value = prev;
+      toast(apiError(e, t("common.error")), "error");
+    }
+  }
+
+  // Зачесть сдачу и аванс клиента в оплату его долга: касса не двигается.
+  async function offsetBalance() {
+    const avail = Number(detail.change_due || 0) + Number(detail.advance_balance || 0);
+    const owed = Number(detail.debt || 0);
+    if (!(await confirm(t("clients.offsetConfirm", { sum: formatMoney(Math.min(avail, owed)) })))) return;
+    try {
+      const { data } = await api.post(`/clients/clients/${detail.id}/pay-debt/`, { offset_only: true });
+      toast(t("clients.offsetDone", {
+        sum: formatMoney(data.offset.total), change: formatMoney(data.offset.change), advance: formatMoney(data.offset.advance),
+      }));
+      refreshDetail(detail.id);
+    } catch (e) {
+      toast(apiError(e, t("common.error")), "error");
+    }
+  }
+
+  async function revertAdvance(a) {
+    if (!(await confirm(t("clients.advanceRevertConfirm", { sum: formatMoney(a.amount) })))) return;
+    try {
+      await api.post(`/clients/clients/${detail.id}/advances/${a.id}/revert/`, {});
+      toast(t("clients.advanceRevertDone"));
+      refreshDetail(detail.id);
+    } catch (e) {
+      toast(apiError(e, t("common.error")), "error");
+    }
+  }
+
+  async function unpayBonus(item) {
+    if (!(await confirm(t("clients.bonusUnpayConfirm")))) return;
+    try {
+      await api.post(`/clients/clients/${detail.id}/referral-bonus/unpay/`, { referred: item.id });
+      toast(t("clients.bonusUnpayDone"));
+      refreshDetail(detail.id);
+    } catch (e) {
       toast(apiError(e, t("common.error")), "error");
     }
   }
@@ -374,17 +491,13 @@ export default function Clients() {
         return (
           <>
             <strong>{c.display_name}</strong>
-            {second && second !== c.display_name && (
-              <div className="muted" style={{ fontSize: 12 }}>{second}</div>
-            )}
+            <div className="muted" style={{ fontSize: 12 }}>
+              {c.type === "OSOO" ? t("clients.osoo") : t("clients.physical")}
+              {second && second !== c.display_name ? ` · ${second}` : ""}
+            </div>
           </>
         );
       },
-    },
-    {
-      key: "type",
-      label: t("clients.type"),
-      render: (c) => <span className="chip">{c.type === "OSOO" ? t("clients.osoo") : t("clients.physical")}</span>,
     },
     { key: "phone", label: t("clients.phone") },
     {
@@ -421,21 +534,63 @@ export default function Clients() {
           <span className="muted">—</span>
         ),
     },
-    // Сдача — сколько ЦЕХ должен клиенту. Соседняя колонка к долгу: вопрос
-    // «кто кому остался должен» имеет две стороны, и вторую тоже надо видеть.
+    // Сальдо = долг − сдача − аванс (cash-08): плюс — должен клиент, минус —
+    // мы. Две стороны одного вопроса «кто кому остался должен» в одной цифре.
     {
-      key: "change_due",
-      label: t("clients.changeDue"),
-      sortKey: "change_due_total",
+      key: "balance",
+      label: t("clients.colBalance"),
+      sortKey: "balance",
+      render: (c) => {
+        const v = Number(c.balance) || 0;
+        if (v === 0) return <span className="muted">—</span>;
+        return (
+          <span
+            style={{ color: v > 0 ? "var(--danger-ink)" : "var(--accent-ink)", fontWeight: 600 }}
+            title={t("clients.balanceBreak", {
+              debt: formatMoney(c.debt), change: formatMoney(c.change_due), advance: formatMoney(c.advance_balance),
+            })}
+          >
+            {v < 0 ? "−" : ""}{formatMoney(Math.abs(v))}
+          </span>
+        );
+      },
+    },
+    // Давность самого старого неоплаченного заказа — кого обзванивать.
+    {
+      key: "overdue_days",
+      label: t("clients.colAge"),
+      sortKey: "overdue_days",
       render: (c) =>
-        Number(c.change_due) > 0 ? (
-          <span style={{ color: "var(--accent-ink)", fontWeight: 600 }}>
-            {formatMoney(c.change_due)}
+        c.overdue_days == null ? (
+          <span className="muted">—</span>
+        ) : (
+          <span style={{ color: ageColor(c.overdue_days), fontWeight: c.overdue_days > 30 ? 600 : undefined }}>
+            {t("clients.ageDays", { n: c.overdue_days })}
+          </span>
+        ),
+    },
+    {
+      key: "last_order_at",
+      label: t("clients.colLast"),
+      sortKey: "last_order_at",
+      render: (c) =>
+        c.last_order_at ? (
+          <span title={formatDate(c.last_order_at)}>
+            {c.days_since_last_order === 0 ? t("clients.today") : t("clients.agoDays", { n: c.days_since_last_order })}
           </span>
         ) : (
           <span className="muted">—</span>
         ),
     },
+    // Маржа — закупочная цифра: приходит только админу и бухгалтеру.
+    ...(isAdmin || isAccountant
+      ? [{
+          key: "margin",
+          label: t("clients.colMargin"),
+          sortKey: "margin_total",
+          render: (c) => (c.margin != null ? formatMoney(c.margin) : <span className="muted">—</span>),
+        }]
+      : []),
     {
       key: "telegram",
       label: t("clients.telegram"),
@@ -463,6 +618,43 @@ export default function Clients() {
   return (
     <>
       <h1>{t("clients.title")}</h1>
+
+      {/* Дебиторка по возрасту заказа (CLI-01): сколько висит давно. Плитка
+          щёлкается — в списке остаются клиенты с долгом такого возраста. */}
+      {aging && Number(aging.total) > 0 && (
+        <section aria-label={t("clients.agingTitle")} style={{ marginBottom: 16 }}>
+          <div className="stat-grid">
+            {aging.buckets.map((b) => (
+              <button
+                key={b.key}
+                type="button"
+                className="stat"
+                aria-pressed={bucket === b.key}
+                onClick={() => { setBucket((cur) => (cur === b.key ? null : b.key)); setOnlyDebt(false); setOverdue(""); }}
+              >
+                <div className="label">{t(`clients.bucket_${b.key}`)}</div>
+                <div className="value" style={Number(b.amount) > 0 && b.key !== "0_30" ? { color: "var(--danger-ink)" } : undefined}>
+                  {formatMoney(b.amount)}
+                </div>
+                <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                  {t("clients.bucketMeta", { orders: b.orders, clients: b.clients })}
+                </div>
+              </button>
+            ))}
+            <div className="stat">
+              <div className="label">{t("clients.agingTotal")}</div>
+              <div className="value">{formatMoney(aging.total)}</div>
+              {Number(aging.no_client?.amount) > 0 && (
+                <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                  {t("clients.agingNoClient", { sum: formatMoney(aging.no_client.amount) })}
+                </div>
+              )}
+            </div>
+          </div>
+          <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>{t("clients.agingHint")}</p>
+        </section>
+      )}
+
       <div className="toolbar">
         <input
           className="search"
@@ -472,12 +664,24 @@ export default function Clients() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <button
-          type="button"
-          onClick={() => { setCreateErr({}); setCreating({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" }); }}
-        >
-          + {t("clients.newClient")}
+        {canEdit && (
+          <button
+            type="button"
+            onClick={() => { setCreateErr({}); setCreating({ type: "PHYSICAL", full_name: "", company_name: "", phone: "" }); }}
+          >
+            + {t("clients.newClient")}
+          </button>
+        )}
+        {/* Выгрузка в Excel: тот же список с теми же фильтрами и порядком, все
+            страницы. Должников — «Только должники» + эта кнопка. */}
+        <button type="button" className="secondary" onClick={downloadCsv}>
+          {t("clients.exportCsv")}
         </button>
+        {isAdmin && (
+          <button type="button" className="secondary" onClick={() => setShowCfg(true)}>
+            {t("clients.settingsBtn")}
+          </button>
+        )}
       </div>
 
       {/* Период: месяц стрелками или конкретный день. Показываем клиентов,
@@ -497,6 +701,15 @@ export default function Clients() {
             placeholder="0"
           />
         </Field>
+        <Field style={{ margin: 0, width: 130 }} label={t("clients.overdueFilter")}>
+          <input
+            type="number" min="0" inputMode="numeric" placeholder="30" value={overdue}
+            onChange={(e) => { setOverdue(e.target.value); setBucket(null); }}
+          />
+        </Field>
+        <Field style={{ margin: 0, width: 150 }} label={t("clients.sleepingFilter")}>
+          <input type="number" min="0" inputMode="numeric" placeholder="60" value={sleeping} onChange={(e) => setSleeping(e.target.value)} />
+        </Field>
         <div className="field" style={{ margin: 0 }}>
           <label>{t("clients.debtFilter")}</label>
           <div className="row" style={{ margin: 0, gap: 8 }}>
@@ -513,11 +726,11 @@ export default function Clients() {
               className={onlyChange ? "" : "secondary"}
               onClick={() => setOnlyChange((v) => !v)}
             >
-              {t("clients.onlyChange")}
+              {t("clients.onlyChangeAdvance")}
             </button>
           </div>
         </div>
-        {(day || period.month || onlyDebt || onlyChange || minOrders) && (
+        {(day || period.month || onlyDebt || onlyChange || minOrders || overdue || bucket || sleeping) && (
           <button className="ghost" onClick={resetFilters}>
             {t("common.reset")}
           </button>
@@ -624,6 +837,32 @@ export default function Clients() {
               <span>{Number(detail.discount_percent) > 0 ? `${formatNumber(detail.discount_percent, { max: 2 })} %` : "—"}</span>
             )}
           </div>
+          {/* Лимит долга: пусто — общий. Касса предупреждает, не запрещает. */}
+          <div className="crow">
+            <span className="k">{t("clients.creditLimit")}</span>
+            {isAdmin ? (
+              <span className="row" style={{ gap: 8, alignItems: "center", margin: 0 }}>
+                <input
+                  key={`lim-${detail.id}-${detail.credit_limit}`}
+                  type="number" inputMode="decimal" min="0"
+                  aria-label={t("clients.creditLimit")} title={t("clients.creditLimitHint")}
+                  placeholder={t("clients.creditLimitPh")}
+                  defaultValue={detail.credit_limit == null ? "" : String(+Number(detail.credit_limit))}
+                  style={{ width: 120, height: 34, textAlign: "right" }}
+                  onBlur={(e) => saveLimit(e.target)}
+                />
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {detail.effective_credit_limit == null
+                    ? t("clients.creditLimitNone")
+                    : t("clients.creditLimitEffective", { sum: formatMoney(detail.effective_credit_limit) })}
+                </span>
+              </span>
+            ) : (
+              <span>
+                {detail.effective_credit_limit == null ? t("clients.creditLimitNone") : formatMoney(detail.effective_credit_limit)}
+              </span>
+            )}
+          </div>
           <div className="crow">
             <span className="k">{t("clients.telegram")}</span>
             <span>{detail.is_telegram_linked ? t("clients.linked") : t("clients.notLinked")}</span>
@@ -641,6 +880,23 @@ export default function Clients() {
             <span className="k">{t("clients.ltv")}</span>
             <span><strong>{formatMoney(detail.stats?.lifetime_value || 0)}</strong></span>
           </div>
+          {detail.last_order_at && (
+            <div className="crow">
+              <span className="k">{t("clients.lastOrder")}</span>
+              <span>
+                {formatDate(detail.last_order_at)}
+                <span className="muted"> · {detail.days_since_last_order === 0 ? t("clients.today") : t("clients.agoDays", { n: detail.days_since_last_order })}</span>
+              </span>
+            </div>
+          )}
+          {/* Маржа по клиенту: сумма маржи его заказов. Закупочная цифра — её
+              видят админ и бухгалтер, складовщику сервер её не отдаёт. */}
+          {detail.margin != null && (
+            <div className="crow">
+              <span className="k">{t("clients.marginTotal")}</span>
+              <strong>{formatMoney(detail.margin)}</strong>
+            </div>
+          )}
           <div className="crow">
             <span className="k">{t("receipts.debt")}</span>
             <span className="row" style={{ gap: 8, alignItems: "center", margin: 0 }}>
@@ -649,9 +905,9 @@ export default function Clients() {
               ) : (
                 <span className="paid">{formatMoney(0)}</span>
               )}
-              {/* Общая выплата: клиент гасит несколько заказов одной суммой.
-                  Деньги — за админом, как и оплата по отдельному чеку. */}
-              {isAdmin && Number(detail.debt) > 0 && (
+              {/* Деньги клиента принимает админ, а складовщик — если владелец
+                  это включил (настройки клиентов). Бухгалтер только смотрит. */}
+              {canTakeMoney && Number(detail.debt) > 0 && (
                 <button
                   type="button"
                   className="secondary"
@@ -663,15 +919,64 @@ export default function Clients() {
               )}
             </span>
           </div>
-          {/* Сдача показывается ТОЛЬКО когда она есть: строка «сдача 0» у
-              каждого клиента — шум, а не информация. Выдаётся она в «Чеках», по
-              тому заказу, где переплатили: там видно, за что именно. */}
+          {Number(detail.overdue_days) >= 0 && detail.oldest_debt_at && (
+            <div className="crow">
+              <span className="k">{t("clients.oldestDebt")}</span>
+              <span style={{ color: ageColor(detail.overdue_days), fontWeight: detail.overdue_days > 30 ? 600 : undefined }}>
+                {formatDate(detail.oldest_debt_at)} · {t("clients.ageDays", { n: detail.overdue_days })}
+              </span>
+            </div>
+          )}
+          {/* Сдача и аванс показываются, ТОЛЬКО когда есть: строка «0» у каждого
+              клиента — шум. Сдача выдаётся в «Чеках», по заказу, где переплатили. */}
           {Number(detail.change_due) > 0 && (
             <div className="crow">
               <span className="k">{t("clients.changeDue")}</span>
               <strong style={{ color: "var(--accent-ink)" }}>
                 {formatMoney(detail.change_due)}
               </strong>
+            </div>
+          )}
+          {Number(detail.advance_balance) > 0 && (
+            <div className="crow">
+              <span className="k">{t("clients.advanceBalance")}</span>
+              <strong style={{ color: "var(--accent-ink)" }}>{formatMoney(detail.advance_balance)}</strong>
+            </div>
+          )}
+          {/* Сальдо = долг − сдача − аванс: одна цифра «кто кому должен». */}
+          {(Number(detail.change_due) > 0 || Number(detail.advance_balance) > 0 || Number(detail.debt) > 0) && (
+            <div className="crow">
+              <span className="k">{t("clients.balanceTitle")}</span>
+              <strong
+                style={{ color: Number(detail.balance) > 0 ? "var(--danger-ink)" : Number(detail.balance) < 0 ? "var(--accent-ink)" : undefined }}
+                title={t("clients.balanceBreak", {
+                  debt: formatMoney(detail.debt), change: formatMoney(detail.change_due), advance: formatMoney(detail.advance_balance),
+                })}
+              >
+                {Number(detail.balance) > 0 && t("clients.balanceDebt", { sum: formatMoney(detail.balance) })}
+                {Number(detail.balance) < 0 && t("clients.balanceCredit", { sum: formatMoney(-detail.balance) })}
+                {Number(detail.balance) === 0 && t("clients.balanceZero")}
+              </strong>
+            </div>
+          )}
+          {/* Действия над деньгами клиента. */}
+          {(canTakeMoney || isAdmin) && (
+            <div className="row" style={{ gap: 8, flexWrap: "wrap", margin: "6px 0 0" }}>
+              {canTakeMoney && (
+                <button type="button" className="secondary" onClick={() => setAdvanceOpen(true)}>
+                  {t("clients.advanceBtn")}
+                </button>
+              )}
+              {canTakeMoney && Number(detail.debt) > 0 && (Number(detail.change_due) > 0 || Number(detail.advance_balance) > 0) && (
+                <button type="button" className="secondary" title={t("clients.offsetHint")} onClick={offsetBalance}>
+                  {t("clients.offsetBtn")}
+                </button>
+              )}
+              {isAdmin && Number(detail.debt) > 0 && (
+                <button type="button" className="secondary" style={{ color: "var(--danger-ink)" }} onClick={() => setWriteOff(detail)}>
+                  {t("clients.writeOffBtn")}
+                </button>
+              )}
             </div>
           )}
           <div className="crow">
@@ -789,15 +1094,17 @@ export default function Clients() {
                       {formatDate(o.created_at)}
                       {/* «Ещё раз то же самое» — самый частый разговор у стойки.
                           Отсюда до кассы один клик, состав уже собран. */}
-                      <button
-                        type="button"
-                        className="ghost"
-                        style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-ink)" }}
-                        onClick={() => navigate(`${isAdmin ? "/admin" : "/app/checkout"}?repeat=${o.id}`)}
-                        title={t("receipts.repeatHint")}
-                      >
-                        {t("receipts.repeat")}
-                      </button>
+                      {canEdit && (
+                        <button
+                          type="button"
+                          className="ghost"
+                          style={{ padding: "3px 8px", height: "auto", fontSize: 12, color: "var(--accent-ink)" }}
+                          onClick={() => navigate(`${isAdmin ? "/admin" : "/app/checkout"}?repeat=${o.id}`)}
+                          title={t("receipts.repeatHint")}
+                        >
+                          {t("receipts.repeat")}
+                        </button>
+                      )}
                     </span>
                   </div>
                   {/* Возвращённые строки остаются в истории — зачёркнутыми и с
@@ -888,6 +1195,70 @@ export default function Clients() {
             </div>
           )}
 
+          {/* Договорные цены клиента (волна 2, CLI-02): правит админ. */}
+          <ClientPricesSection clientId={detail.id} canEdit={isAdmin} />
+
+          {/* Входящие остатки на дату переезда из Excel (волна 2): долг — часть
+              долга клиента, гасится общей выплатой первым; аванс — без кассы. */}
+          {detail.opening_balances?.length > 0 && (
+            <div className="field" style={{ marginTop: 14 }}>
+              <label>{t("opening.cardTitle")}</label>
+              {detail.opening_balances.map((b) => (
+                <div className="crow" key={b.id} style={{ fontSize: 13 }}>
+                  <span>
+                    <span className="muted">{formatDate(b.as_of)}</span>
+                    {" · "}{t(`opening.kind_${b.kind}`)}
+                    {b.note ? <span className="muted"> · {b.note}</span> : null}
+                  </span>
+                  <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                    <strong>{formatMoney(b.amount)}</strong>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      {b.kind === "DEBT"
+                        ? t("opening.cardDebtLeft", { sum: formatMoney(b.remaining) })
+                        : t("clients.advanceRemaining", { sum: formatMoney(b.remaining) })}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Авансы без заказа: сколько внёс и сколько ещё не зачтено. Ошибочный
+              аванс админ отменяет целиком, пока из него ничего не зачтено. */}
+          {detail.advances?.length > 0 && (
+            <div className="field" style={{ marginTop: 14 }}>
+              <label>{t("clients.advancesList")}</label>
+              {detail.advances.map((a) => (
+                <div className="crow" key={a.id} style={{ fontSize: 13 }}>
+                  <span>
+                    <span className="muted">{formatDate(a.paid_on)}</span>
+                    {" · "}{a.method_display}
+                    {a.note ? <span className="muted"> · {a.note}</span> : null}
+                  </span>
+                  <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                    <strong>{formatMoney(a.amount)}</strong>
+                    {a.reverted ? (
+                      <span className="badge warn">{t("clients.advanceReverted")}</span>
+                    ) : (
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        {t("clients.advanceRemaining", { sum: formatMoney(a.remaining) })}
+                      </span>
+                    )}
+                    {isAdmin && !a.reverted && Number(a.remaining) === Number(a.amount) && (
+                      <button
+                        type="button" className="ghost"
+                        style={{ padding: "2px 8px", height: "auto", fontSize: 12, color: "var(--danger-ink)" }}
+                        onClick={() => revertAdvance(a)}
+                      >
+                        {t("clients.advanceRevert")}
+                      </button>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Кто привёл клиента. Поставить можно один раз; сменить уже
               поставленного — только админ, прямо здесь. */}
           <div className="field" style={{ marginTop: 14 }}>
@@ -898,7 +1269,7 @@ export default function Clients() {
                 реферера, не заметив. Не предлагаем самого клиента и тех, кого
                 он привёл (получилось бы кольцо); остальные звенья цепочки
                 проверяет сервер. */}
-            {!detail.referred_by || isAdmin ? (
+            {canEdit && (!detail.referred_by || isAdmin) ? (
               <ClientPicker
                 id="referrer-picker"
                 value={detail.referred_by || ""}
@@ -907,6 +1278,10 @@ export default function Clients() {
                 excludeIds={[detail.id, ...(detail.referrals?.list || []).map((r) => r.id)]}
                 onChange={(id) => id !== (detail.referred_by || "") && setReferrer(id)}
               />
+            ) : !detail.referred_by ? (
+              <div className="crow" style={{ padding: "8px 0" }}>
+                <span className="muted">— {t("clients.noReferrer")} —</span>
+              </div>
             ) : (
               // Складовщик → реферер зафиксирован; сменить его может админ в
               // этой же карточке. Очереди заявок больше нет (27.09).
@@ -919,7 +1294,10 @@ export default function Clients() {
             )}
           </div>
 
-          {/* Clients this one referred */}
+          {/* Приведённые клиенты и бонус за них (CLI-07). Бонус начисляется один
+              раз — когда у приведённого появился первый оплаченный и не
+              возвращённый заказ, по ставке на тот момент; смена ставки прошлое не
+              меняет. Старые привязки показаны расчётом по текущей ставке. */}
           <div className="field" style={{ margin: 0 }}>
             <label>
               {t("clients.referrals")}: {detail.referrals?.count || 0}
@@ -927,31 +1305,90 @@ export default function Clients() {
                 <span className="muted"> · {formatMoney(detail.referrals.total_value)}</span>
               )}
             </label>
-            {Number(detail.referrals?.bonus) > 0 && (
+            {detail.referrals?.count > 0 && (
               <div
                 className="crow"
-                style={{
-                  background: "var(--primary-soft)",
-                  borderRadius: "var(--r-md)",
-                  padding: "8px 12px",
-                  marginBottom: 6,
-                }}
+                style={{ background: "var(--primary-soft)", borderRadius: "var(--r-md)", padding: "8px 12px", marginBottom: 6 }}
               >
                 <strong style={{ color: "var(--accent-ink)" }}>{t("clients.referralBonus")}</strong>
                 <strong style={{ color: "var(--accent-ink)" }}>
-                  {formatMoney(detail.referrals.bonus)}
+                  {t("clients.bonusTotals", {
+                    accrued: formatMoney(detail.referrals.bonus_accrued),
+                    paid: formatMoney(detail.referrals.bonus_paid),
+                    due: formatMoney(detail.referrals.bonus_due),
+                  })}
                 </strong>
               </div>
             )}
             {detail.referrals?.list?.length ? (
-              detail.referrals.list.map((r) => (
-                <div className="crow" key={r.id}>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    <Icon name="user" size={15} /> {r.display_name}
-                  </span>
-                  <span className="muted">{formatMoney(r.lifetime_value)}</span>
-                </div>
-              ))
+              <>
+                {detail.referrals.list.map((r) => {
+                  const b = r.bonus;
+                  return (
+                    <div className="card" key={r.id} style={{ background: "var(--canvas)", padding: 10, marginBottom: 6 }}>
+                      <div className="crow">
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <Icon name="user" size={15} /> {r.display_name}
+                        </span>
+                        <span className="muted">{formatMoney(r.lifetime_value)}</span>
+                      </div>
+                      <div className="crow" style={{ fontSize: 13, flexWrap: "wrap", gap: 6 }}>
+                        {b ? (
+                          <>
+                            <span>
+                              <span className={`badge ${b.status === "paid" ? "ok" : b.status === "partial" ? "warn" : "blue"}`}>
+                                {t(`clients.bonusStatus_${b.status}`)}
+                              </span>{" "}
+                              <strong>{formatMoney(b.amount)}</strong>
+                              <span className="muted">
+                                {" · "}
+                                {b.order_number ? t("clients.bonusForOrder", { n: b.order_number }) : ""}
+                                {" "}{t("clients.bonusAccruedOn", { date: formatDate(b.accrued_on) })}
+                                {b.estimated ? ` · ${t("clients.bonusEstimated")}` : ""}
+                              </span>
+                              {Number(b.paid_amount) > 0 && (
+                                <span className="muted">
+                                  {" · "}{t("clients.bonusPaidOn", { sum: formatMoney(b.paid_amount), date: formatDate(b.paid_on) })}
+                                </span>
+                              )}
+                              {Number(b.due) > 0 && Number(b.paid_amount) > 0 && (
+                                <span style={{ color: "var(--accent-ink)" }}> · {t("clients.bonusDue", { sum: formatMoney(b.due) })}</span>
+                              )}
+                            </span>
+                            {isAdmin && (
+                              <span style={{ display: "inline-flex", gap: 6 }}>
+                                {Number(b.due) > 0 && (
+                                  <button
+                                    type="button" className="secondary"
+                                    style={{ padding: "2px 9px", height: "auto", fontSize: 12 }}
+                                    onClick={() => setBonusPay(r)}
+                                  >
+                                    {t("clients.bonusPay")}
+                                  </button>
+                                )}
+                                {Number(b.paid_amount) > 0 && b.id && (
+                                  <button
+                                    type="button" className="ghost"
+                                    style={{ padding: "2px 8px", height: "auto", fontSize: 12 }}
+                                    onClick={() => unpayBonus(r)}
+                                  >
+                                    {t("clients.bonusUnpay")}
+                                  </button>
+                                )}
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          <span className="muted">{t("clients.bonusNone")}</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+                  {t("clients.bonusRate", { sum: formatMoney(detail.referrals.rate) })} · {t("clients.bonusHint")}
+                </p>
+              </>
             ) : (
               <span className="muted">{t("common.empty")}</span>
             )}
@@ -1003,7 +1440,16 @@ export default function Clients() {
                       <strong>{merging.preview.referrals}</strong>
                     </div>
                   )}
-                  <button className="danger" style={{ marginTop: 10 }} onClick={doMerge}>
+                  {Number(merging.preview.advance) > 0 && (
+                    <div className="crow">
+                      <span className="k">{t("clients.mergeAdvance")}</span>
+                      <strong style={{ color: "var(--accent-ink)" }}>{formatMoney(merging.preview.advance)}</strong>
+                    </div>
+                  )}
+                  {merging.preview.ring && (
+                    <p className="field-error" role="alert" style={{ marginTop: 8 }}>{t("clients.mergeRing")}</p>
+                  )}
+                  <button className="danger" style={{ marginTop: 10 }} onClick={doMerge} disabled={!!merging.preview.ring}>
                     {t("clients.mergeAction", { name: merging.preview.drop })}
                   </button>
                 </div>
@@ -1106,6 +1552,40 @@ export default function Clients() {
       )}
 
       {actFor && <PrintAct client={actFor} onClose={() => setActFor(null)} />}
+
+      {showCfg && (
+        <ClientSettingsModal
+          settings={cfg}
+          onClose={() => setShowCfg(false)}
+          onSaved={(data) => { setCfg(data); setShowCfg(false); }}
+        />
+      )}
+
+      {advanceOpen && detail && (
+        <AdvanceModal
+          client={detail}
+          isAdmin={isAdmin}
+          onClose={() => setAdvanceOpen(false)}
+          onDone={() => { setAdvanceOpen(false); refreshDetail(detail.id); }}
+        />
+      )}
+
+      {writeOff && (
+        <WriteOffModal
+          client={writeOff}
+          onClose={() => setWriteOff(null)}
+          onDone={() => { const id = writeOff.id; setWriteOff(null); refreshDetail(id); }}
+        />
+      )}
+
+      {bonusPay && detail && (
+        <BonusPayModal
+          referrer={detail}
+          item={bonusPay}
+          onClose={() => setBonusPay(null)}
+          onDone={() => { setBonusPay(null); refreshDetail(detail.id); }}
+        />
+      )}
 
       {payingClient && (
         <BulkPayModal

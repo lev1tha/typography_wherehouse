@@ -33,6 +33,10 @@ class Receipt(models.Model):
     class FulfillmentStatus(models.TextChoices):
         PROCESSING = "PROCESSING", _("Готовится")
         READY = "READY", _("Готово к выдаче")
+        # Часть позиций отдали клиенту, остальные ещё нет (2026-10-10, G1-N4):
+        # 8 из 10 деталей вручили в понедельник, две дорезают. Ставится выдачей
+        # по позициям (`/issue/`), не вручную.
+        PARTIALLY_ISSUED = "PARTIALLY_ISSUED", _("Выдан частично")
         ISSUED = "ISSUED", _("Выдан")
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -149,6 +153,24 @@ class Receipt(models.Model):
     discount_percent = models.DecimalField(
         _("скидка, %"), max_digits=5, decimal_places=2, default=Decimal("0"),
     )
+    # ГАРАНТИЯ / ПЕРЕДЕЛКА (2026-10-10, G2-N3): заказ за счёт цеха, не продажа.
+    # Цена строк 0, выручки нет, а материал списывается как обычно — и эта
+    # себестоимость видна отдельно и в марже исходного заказа
+    # (`Receipt.warranty_cost`). Исходный заказ, причина и виновник — чтобы на
+    # вопрос «сколько нам стоит брак и чей он» было чем ответить.
+    is_warranty = models.BooleanField(_("гарантия / переделка"), default=False)
+    warranty_of = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="warranty_orders", verbose_name=_("исходный заказ"),
+    )
+    warranty_reason = models.CharField(_("причина переделки"), max_length=255, blank=True)
+    warranty_culprit = models.CharField(
+        _("виновник"), max_length=120, blank=True,
+        help_text=_("Кто допустил брак. Текстом: справочника сотрудников в продажах нет"),
+    )
+    # Имя покупателя для заказа В ДОЛГ без карточки клиента (CLI-03): долг без
+    # имени взыскать не с кого.
+    buyer_name = models.CharField(_("имя покупателя"), max_length=255, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -270,6 +292,22 @@ class Receipt(models.Model):
         """
         return self.total_price - self.refunded_amount - self.cost_total
 
+    @property
+    def warranty_cost(self) -> Decimal:
+        """Сколько обошлись гарантийные переделки этого заказа (себестоимость
+        их строк). У самого гарантийного заказа — пусто: он и есть переделка."""
+        if self.is_warranty:
+            return Decimal("0")
+        return sum(
+            (order.cost_total for order in self.warranty_orders.all()), Decimal("0"),
+        )
+
+    @property
+    def margin_net(self) -> Decimal:
+        """Маржа заказа после гарантийных переделок: честная цифра для
+        владельца, `margin` остаётся прежней (на ней стоят отчёты)."""
+        return self.margin - self.warranty_cost
+
     def __str__(self) -> str:
         label = f"№{self.order_number}" if self.order_number else str(self.id)
         return f"Чек {label} — {self.total_price}"
@@ -315,6 +353,14 @@ class TransactionItem(models.Model):
         null=True, blank=True,
         help_text=_("Сколько ширины ушло клиенту. Остальное — обрезок цеха"),
     )
+    # РУЛОН ПО ПЛОЩАДИ ИЗДЕЛИЯ (CALC-10, D-140). Баннер 1×2 м из рулона 1.6:
+    # клиент платит за 2 кв.м изделия по цене за кв.м, а со склада уходит вся
+    # ширина × длина — 3.2 кв.м (режут поперёк целиком). Строка: `sale_mode` =
+    # SQM, `quantity` — площадь изделия, `width`×`length` — его размеры,
+    # списание — `length` погонных метров по рулонам. Флаг ставится при продаже
+    # и не выводится из справочника: смена формы материала потом не должна
+    # переписывать, как была продана старая строка.
+    roll_area = models.BooleanField(_("рулон по площади изделия"), default=False)
     # Из какого ФИЗИЧЕСКОГО рулона отрезали. Партия — это не «поступление», а
     # рулон на полке: у мастера их три, один початый на 8 метров, и дожигать
     # надо его. Без этой ссылки нельзя ни написать в чеке «списано с рулона №7»,
@@ -356,8 +402,39 @@ class TransactionItem(models.Model):
     )
     # Cutting-specific: dimensions of the cut. `letter_type` kept for history only.
     letter_type = models.CharField(max_length=20, blank=True)  # legacy, unused
-    width = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
-    length = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    # Размеры ОДНОЙ детали, м — три знака (2026-10-10, CALC-06): 0.455 м — это
+    # не 0.46. Деталей может быть несколько (`parts_count`).
+    width = models.DecimalField(max_digits=8, decimal_places=3, null=True, blank=True)
+    length = models.DecimalField(max_digits=8, decimal_places=3, null=True, blank=True)
+    # «Деталей, шт» (CALC-04 / XL-09): 12 одинаковых деталей — одна строка, а не
+    # двенадцать. Площадь и пог.м реза умножаются на число деталей, округление —
+    # один раз на итоге (12 × 0.33×0.37 считается как 12 × 0.1221, а не 12 × 0.122).
+    parts_count = models.PositiveSmallIntegerField(_("деталей, шт"), default=1)
+    # Проходы гравировки/реза (CALC-02): ставка за кв.м умножается на число
+    # проходов — три прохода стоят втрое.
+    passes = models.PositiveSmallIntegerField(_("проходов"), default=1)
+    # Коэффициент по толщине материала, применённый к каталожной ставке работы.
+    thickness_coef = models.DecimalField(
+        _("коэффициент толщины"), max_digits=6, decimal_places=3, null=True, blank=True,
+    )
+    # Материал, под который посчитана работа (у реза — тот, что режут; ставка и
+    # коэффициент зависят от него). Для «Наряда мастеру» и пересчёта по новому
+    # прайсу. Пусто — у строк до 10.10 и у работ без материала.
+    work_material = models.ForeignKey(
+        "warehouse.Material", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+", verbose_name=_("материал работы"),
+    )
+    # Цену назвали руками (админ или складовщик там, где ей разрешено), а не
+    # взяли из каталога: пересчёт заказа по новому прайсу такие строки не
+    # трогает (`sale_service.reprice_receipt`).
+    price_is_manual = models.BooleanField(_("цена вписана вручную"), default=False)
+    # Цена — ДОГОВОРНАЯ цена клиента (`clients.ClientPrice`, CLI-02, волна 2):
+    # скидка клиента к строке не применялась, пересчёт по прайсу её не трогает.
+    client_price = models.BooleanField(_("договорная цена клиента"), default=False)
+    # Сколько позиции уже вручили клиенту (G1-N4). `quantity` — всего.
+    issued_qty = models.DecimalField(
+        _("выдано"), max_digits=12, decimal_places=3, default=Decimal("0"),
+    )
     # МАТЕРИАЛ КЛИЕНТА (2026-09-04, просьба владельца): клиент принёс своё, цех
     # только режет. Со склада ничего не уходит и строки материала нет — одна
     # работа по цене, названной в момент продажи: каталожной ставки у чужого
@@ -371,6 +448,17 @@ class TransactionItem(models.Model):
     # крышке». Нужен ровно потому, что у такой строки нет материала, по
     # которому её потом узнают в чеке.
     note = models.CharField(_("комментарий"), max_length=255, blank=True)
+    # ИСПОЛНИТЕЛЬ работы (волна 2, STAFF-02/F10): кто из цеха её сделал. Мастера
+    # работают под общими логинами «Чпу»/«Лазер», и «кто оформил» — не «кто
+    # резал». Ведомость и «Резка по сотрудникам» читают это поле первым
+    # (`finance.payroll.Directory.executor_of`); пусто — как раньше: сотрудник
+    # учётки кассира, иначе единственный сотрудник со станком строки. Только у
+    # строк-работ: у материала исполнителя нет. PROTECT — сотрудника с работами
+    # не удаляют, а отключают, иначе прошлая выработка ушла бы другому.
+    executor = models.ForeignKey(
+        "accounts.Employee", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="work_lines", verbose_name=_("исполнитель"),
+    )
     is_returned = models.BooleanField(_("возвращено"), default=False)
     # КОГДА строку вернули. Возврат — событие своего дня, а не поправка к
     # заказу (решение владельца, 2026-09-27): он уменьшает выручку и
@@ -428,8 +516,20 @@ class TransactionItem(models.Model):
         Считается только у рулона и только когда ширину изделия назвали: без
         неё мы не знаем, ушёл материал целиком или половина легла в мусор.
         Возвращённая строка обрезка не даёт — материал вернулся на склад.
+
+        Рулон по площади изделия (CALC-10): ширина изделия — `width`, длина —
+        `length`; обрезок — та же полоса (ширина рулона − ширина изделия) × длина.
         """
-        if self.is_returned or self.sale_mode != self.SaleMode.METER:
+        if self.is_returned:
+            return Decimal("0")
+        if self.roll_area:
+            if not (self.width and self.length and self.material_id):
+                return Decimal("0")
+            spare = self.roll_width - self.width
+            if spare <= 0:
+                return Decimal("0")
+            return (spare * self.length).quantize(Decimal("0.0001"))
+        if self.sale_mode != self.SaleMode.METER:
             return Decimal("0")
         if not self.used_width or not self.material_id:
             return Decimal("0")
@@ -505,15 +605,30 @@ class Payment(models.Model):
         Receipt, on_delete=models.CASCADE, related_name="payments"
     )
     amount = models.DecimalField(_("сумма"), max_digits=14, decimal_places=2)
+
+    class Method(models.TextChoices):
+        CASH = "CASH", _("Наличные")
+        MBANK = "MBANK", _("MBank")
+        DEMIRBANK = "DEMIRBANK", _("DemirBank")
+        ONLINE = "ONLINE", _("Онлайн-оплата")
+        # Не деньги в кассе: долг закрыт зачётом сдачи клиента (cash-08) или
+        # списан как безнадёжный (cash-09). Приходом в кассу не пишутся.
+        CHANGE = "CHANGE", _("Зачёт сдачи")
+        WRITE_OFF = "WRITE_OFF", _("Списание долга")
+
     method = models.CharField(
         _("способ оплаты"),
         max_length=20,
-        choices=Receipt.PaymentMethod.choices,
-        default=Receipt.PaymentMethod.CASH,
+        choices=Method.choices,
+        default=Method.CASH,
     )
     # Дата, которой деньги считаются принятыми. Может быть в прошлом.
     paid_on = models.DateField(_("дата оплаты"), default=timezone.localdate)
     note = models.CharField(_("примечание"), max_length=255, blank=True)
+    # Трата «Безнадёжные долги», которую породило списание (WRITE_OFF): голое
+    # число, а не ссылка, чтобы продажи не зависели от модели финансов. Нужно
+    # отмене платежа — вместе со списанием уходит и его расход.
+    expense_id = models.PositiveIntegerField(null=True, blank=True)
     created_by = models.ForeignKey(
         "accounts.User",
         on_delete=models.SET_NULL,
@@ -591,3 +706,83 @@ class IdempotencyRecord(models.Model):
                 fields=["user", "endpoint", "key"], name="idempotency_unique_key"
             )
         ]
+
+
+class Quote(models.Model):
+    """Коммерческое предложение (2026-10-10, CALC-03): расчёт для клиента, а не
+    продажа.
+
+    Хранит позиции ровно как в корзине кассы (`cart`) и посчитанные по правилам
+    прайса строки (`lines`) — чтобы КП можно было распечатать с теми ценами, что
+    назвали, и оформить заказом позже. Склада, долга, кассы и выручки КП НЕ
+    трогает: это не чек, у него свой номер и нет номера заказа. Срок действия —
+    `valid_until`: после него цены считаются устаревшими (КП оформляют заказом
+    заново по сегодняшнему прайсу, а не по старому).
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "ACTIVE", _("Действует")
+        ORDERED = "ORDERED", _("Оформлен заказ")
+        CANCELLED = "CANCELLED", _("Отменено")
+
+    number = models.PositiveIntegerField(_("номер КП"), unique=True, null=True, editable=False)
+    client = models.ForeignKey(
+        "clients.Client", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="quotes",
+    )
+    # Имя для КП без карточки клиента («ООО Ромашка»): КП шлют и тем, кого ещё нет
+    # в базе.
+    client_name = models.CharField(_("кому"), max_length=255, blank=True)
+    title = models.CharField(_("наименование"), max_length=255, blank=True)
+    note = models.TextField(_("примечание"), blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="quotes",
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+    valid_until = models.DateField(_("действует до"), null=True, blank=True)
+    status = models.CharField(
+        max_length=12, choices=Status.choices, default=Status.ACTIVE,
+    )
+    cart = models.JSONField(_("позиции корзины"), default=list)
+    lines = models.JSONField(_("посчитанные строки"), default=list)
+    total_price = models.DecimalField(
+        _("итого"), max_digits=14, decimal_places=2, default=Decimal("0"),
+    )
+    is_urgent = models.BooleanField(_("срочно"), default=False)
+    urgency_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("0"),
+    )
+    discount_percent = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("0"),
+    )
+    receipt = models.ForeignKey(
+        Receipt, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="source_quotes", verbose_name=_("заказ из КП"),
+    )
+
+    class Meta:
+        verbose_name = _("коммерческое предложение")
+        verbose_name_plural = _("коммерческие предложения")
+        ordering = ["-created_at", "-id"]
+
+    NUMBER_ATTEMPTS = 5
+
+    def save(self, *args, **kwargs):
+        # Сквозной номер КП — Max+1 с повтором при гонке, как у чека.
+        if self.number is not None:
+            return super().save(*args, **kwargs)
+        for attempt in range(1, self.NUMBER_ATTEMPTS + 1):
+            last = Quote.objects.aggregate(m=models.Max("number"))["m"] or 0
+            self.number = last + 1
+            try:
+                with transaction.atomic():
+                    return super().save(*args, **kwargs)
+            except IntegrityError:
+                taken = Quote.objects.filter(number=self.number).exists()
+                self.number = None
+                if not taken or attempt == self.NUMBER_ATTEMPTS:
+                    raise
+
+    def __str__(self) -> str:
+        return f"КП №{self.number} — {self.total_price}"

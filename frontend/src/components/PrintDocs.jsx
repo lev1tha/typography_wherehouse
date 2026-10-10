@@ -5,8 +5,9 @@ import api from "../api/api.js";
 import { useDialog } from "../hooks/useDialog.js";
 import Icon from "./Icon.jsx";
 import PrintHost from "./PrintHost.jsx";
+import PrintWorkOrder from "./PrintWorkOrder.jsx";
 import amountInWords, { plural } from "../utils/amountInWords.js";
-import { itemTitle } from "../utils/itemLabel.js";
+import { itemSpecParts, itemTitle } from "../utils/itemLabel.js";
 import { formatDate, formatNumber } from "../utils/format.js";
 import { lineRuled, receiptRuled, rulesLabel } from "../utils/pricingRules.js";
 
@@ -15,6 +16,9 @@ import { lineRuled, receiptRuled, rulesLabel } from "../utils/pricingRules.js";
 // Заказчик пришёл из 1С, где печатная форма есть у каждого документа. Здесь её
 // не было вообще — ни одной, — и юрлицу нечего было отдать: без накладной оно
 // не примет товар.
+//
+// «Наряд мастеру» — третья вкладка: тот же заказ, но для цеха, без цен
+// (см. PrintWorkOrder). Его же открывает кнопка в карточке заказа (`initial`).
 //
 // СЧЁТА НА ОПЛАТУ здесь больше нет: он состоял из реквизитов организации
 // (банк, расчётный счёт, БИК, подписи), а реквизиты заказчик из системы убрал.
@@ -30,7 +34,8 @@ const money = (n) => formatNumber(n, { min: 2, max: 2 });
 const qty = (n) => formatNumber(n, { max: 3 });
 const day = (iso) => (iso ? formatDate(iso) : "");
 
-const DOCS = ["CHECK", "WAYBILL"];
+const DOCS = ["CHECK", "WAYBILL", "WORKORDER"];
+const DOC_LABEL = { CHECK: "print.docCheck", WAYBILL: "print.docWaybill", WORKORDER: "workOrder.title" };
 
 /** Строка «Покупатель» — как её пишут в документе. */
 function buyerLine(client, t) {
@@ -62,23 +67,31 @@ function ItemsTable({ items, t, receipt }) {
         </tr>
       </thead>
       <tbody>
-        {items.map((it, i) => (
-          <tr key={it.id}>
-            <td className="c">{i + 1}</td>
-            <td>{itemTitle(it, t)}</td>
-            <td className="r">{qty(it.quantity)}</td>
-            <td className="c">{it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label}</td>
-            <td className="r">
-              {/* Правила прайса: цена до них — зачёркнутой над итоговой, чтобы
-                  на бумаге было видно, откуда цена (D-62). */}
-              {lineRuled(it) && it.catalog_price != null && (
-                <s className="doc-was">{money(it.catalog_price)}</s>
-              )}
-              {money(it.price_per_item)}
-            </td>
-            <td className="r">{money(it.line_total)}</td>
-          </tr>
-        ))}
+        {items.map((it, i) => {
+          const spec = itemSpecParts(it, t);
+          return (
+            <tr key={it.id}>
+              <td className="c">{i + 1}</td>
+              <td>
+                {itemTitle(it, t)}
+                {/* Размеры деталей, станок, материал работы — под названием: после
+                    оформления заказа иначе нигде не видно, из чего сложены метры. */}
+                {spec.length > 0 && <span className="doc-sub">{spec.join(" · ")}</span>}
+              </td>
+              <td className="r">{qty(it.quantity)}</td>
+              <td className="c">{it.unit_code ? t(`unit.${it.unit_code}`) : it.unit_label}</td>
+              <td className="r">
+                {/* Правила прайса: цена до них — зачёркнутой над итоговой, чтобы
+                    на бумаге было видно, откуда цена (D-62). */}
+                {lineRuled(it) && it.catalog_price != null && (
+                  <s className="doc-was">{money(it.catalog_price)}</s>
+                )}
+                {money(it.price_per_item)}
+              </td>
+              <td className="r">{money(it.line_total)}</td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
     {rounded && <p className="doc-note">{t("print.roundedNote")}</p>}
@@ -124,13 +137,13 @@ function SignRow({ left, right, leftName, rightName }) {
   );
 }
 
-export default function PrintDocs({ receipt, onClose }) {
+export default function PrintDocs({ receipt, onClose, initial = "CHECK" }) {
   const { t, i18n } = useTranslation();
   // Язык документа = язык интерфейса: заголовок, шапка таблицы и сумма
   // прописью на одном языке, а не «SALES RECEIPT № 2 ОТ 16.08.2026».
   const lang = i18n.resolvedLanguage;
   const { dialogProps, titleId } = useDialog({ onClose, guardInput: false });
-  const [kind, setKind] = useState("CHECK");
+  const [kind, setKind] = useState(DOCS.includes(initial) ? initial : "CHECK");
   const [client, setClient] = useState(null);
 
   useEffect(() => {
@@ -180,7 +193,7 @@ export default function PrintDocs({ receipt, onClose }) {
                 aria-pressed={kind === d}
                 onClick={() => setKind(d)}
               >
-                {t(`print.doc${d[0]}${d.slice(1).toLowerCase()}`)}
+                {t(DOC_LABEL[d])}
               </button>
             ))}
           </div>
@@ -231,6 +244,8 @@ export default function PrintDocs({ receipt, onClose }) {
               />
             </>
           )}
+
+          {kind === "WORKORDER" && <PrintWorkOrder receipt={receipt} items={items} />}
         </div>
 
         <div className="row no-print" style={{ marginTop: 16 }}>

@@ -16,10 +16,23 @@ import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
+import { formatNumber } from "../utils/format.js";
+import { parseNumber } from "../utils/pasteTable.js";
 import RefSelect from "./RefSelect.jsx";
 import { useUI } from "./UIProvider.jsx";
 
 const trim = (v) => String(v).replace(/\.?0+$/, "").replace(".", ",");
+
+/** Число из ячейки русского Excel (XL-01): «1,22», «2 679», «2 679,50 сом».
+ * Пусто → "", не число → null, иначе строка с точкой для сервера. Ячейки —
+ * текстовые (inputMode="decimal"), а не type=number: тот на «1,22» отдаёт
+ * пустую строку, и ячейка выглядела пустой, хотя в ней лежал текст. */
+function numText(raw) {
+  const s = String(raw ?? "").trim().replace(/\s*(сомов|сома|сом|som)\.?$/i, "");
+  if (!s) return "";
+  const n = parseNumber(s);
+  return n === null ? null : String(n);
+}
 
 // Название, которое соберётся само, если ячейку оставить пустой.
 // Не экспортируется намеренно: лишний экспорт из файла с компонентом ломает
@@ -65,6 +78,10 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
   const [rows, setRows] = useState(() => Array.from({ length: 8 }, () => ({ ...BLANK })));
   const [errors, setErrors] = useState({});   // {rowIndex: {field: [сообщение]}}
   const [busy, setBusy] = useState(false);
+  // «Обновить существующие по названию» (XL-05): та же вставка из Excel меняет
+  // цены у материалов, которые уже есть, — сначала предпросмотр «было → стало».
+  const [upsert, setUpsert] = useState(false);
+  const [preview, setPreview] = useState(null);
   const gridRef = useRef(null);
 
   // Колонки сгруппированы шапкой в два яруса — как в складском листе заказчика:
@@ -112,6 +129,7 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
   }, [COLS, t]);
 
   function setCell(rowIndex, key, value) {
+    setPreview(null);   // правка после предпросмотра — предпросмотр устарел
     setRows((prev) => {
       const next = prev.map((row, i) => (i === rowIndex ? { ...row, [key]: value } : row));
       // Печатаешь в последней строке — снизу появляется ещё одна пустая, как в
@@ -143,15 +161,23 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
         line.forEach((value, dc) => {
           const col = COLS[colIndex + dc];
           if (!col) return;
-          next[target][col.key] = col.options
-            ? matchOption(col.options, value)
-            : value.trim();
+          if (col.options) {
+            next[target][col.key] = matchOption(col.options, value);
+          } else if (col.num) {
+            // Число — сразу в нормальном виде; не число — как есть, чтобы
+            // человек видел, что именно вставилось, а не пустую клетку.
+            const n = numText(value);
+            next[target][col.key] = n === null ? value.trim() : n;
+          } else {
+            next[target][col.key] = value.trim();
+          }
         });
       });
       if (!isEmptyRow(next[next.length - 1])) next.push({ ...BLANK });
       return next;
     });
     setErrors({});
+    setPreview(null);
   }
 
   /** Enter — вниз по тому же столбцу, как в таблице. */
@@ -165,12 +191,40 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
 
   const filled = rows.filter((row) => !isEmptyRow(row));
 
-  async function save() {
+  /** Числа сетки → вид для сервера; ячейки, где не число, — ошибкой в ячейке. */
+  function normalizeRows() {
+    const bad = {};
+    const out = rows.map((row, rowIndex) => {
+      if (isEmptyRow(row)) return row;
+      const next = { ...row };
+      COLS.forEach((col) => {
+        if (!col.num) return;
+        const n = numText(row[col.key]);
+        if (n === null) {
+          bad[rowIndex] = { ...(bad[rowIndex] || {}), [col.key]: [t("stock2.notNumber", { value: row[col.key] })] };
+        } else {
+          next[col.key] = n;
+        }
+      });
+      return next;
+    });
+    return { out, bad };
+  }
+
+  async function save(apply = false) {
     if (!filled.length) return;
+    const { out: normalized, bad } = normalizeRows();
+    if (Object.keys(bad).length) {
+      setErrors(bad);
+      toast(t("grid.hasErrors", { count: Object.keys(bad).length }), "error");
+      return;
+    }
+    setRows(normalized);
     setBusy(true);
     setErrors({});
     try {
-      const payload = filled.map((row) => {
+      const payload = normalized.filter((row) => !isEmptyRow(row)).map((row) => {
+        if (upsert) return upsertRow(row);
         const sheet = row.sheet_width && row.sheet_height;
         const out = {
           name: row.name || "",
@@ -197,8 +251,15 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
         }
         return out;
       });
-      const r = await api.post("/warehouse/materials/bulk/", { rows: payload });
-      toast(t("grid.saved", { count: r.data.created }));
+      if (upsert && !apply) {
+        const r = await api.post("/warehouse/materials/bulk/", { rows: payload, mode: "upsert", preview: true });
+        setPreview(r.data);
+        return;
+      }
+      const r = await api.post("/warehouse/materials/bulk/", { rows: payload, ...(upsert ? { mode: "upsert" } : {}) });
+      toast(upsert
+        ? t("stock2.upsertDone", { created: r.data.created, updated: r.data.updated })
+        : t("grid.saved", { count: r.data.created }));
       onDone?.();
     } catch (e) {
       const rowErrors = e.response?.data?.errors;
@@ -218,6 +279,21 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
     } finally {
       setBusy(false);
     }
+  }
+
+  /** Строка для режима обновления: пустые ячейки НЕ отправляем — у
+   * существующего материала пустая клетка значит «не трогать», а не ноль. */
+  function upsertRow(row) {
+    const out = { name: row.name || "" };
+    ["type", "color", "article", "production"].forEach((k) => { if (row[k]) out[k] = row[k]; });
+    COLS.forEach((col) => {
+      if (col.num && row[col.key] !== "" && row[col.key] != null && col.key !== "piece_price") out[col.key] = row[col.key];
+    });
+    if (row.piece_price !== "" && row.piece_price != null) {
+      if (row.sheet_width && row.sheet_height) out.piece_price = row.piece_price;
+      else out.price_per_unit = row.piece_price;
+    }
+    return out;
   }
 
   const errorList = Object.entries(errors).flatMap(([rowIndex, fields]) =>
@@ -277,14 +353,20 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
                     ) : (
                       <input
                         data-cell={`${rowIndex}-${colIndex}`}
-                        type={col.num ? "number" : "text"}
-                        step={col.num ? "any" : undefined}
+                        type="text"
+                        inputMode={col.num ? "decimal" : undefined}
                         value={row[col.key]}
                         placeholder={col.key === "name" ? suggestedName(row, types) : ""}
+                        // Ошибка — у самой ячейки (XL-01): раньше подсвечивалась
+                        // строка, а в ячейке было пусто.
+                        aria-invalid={errors[rowIndex]?.[col.key] ? "true" : undefined}
                         // Собранное название длиннее ячейки — показываем целиком
                         // по наведению, обрезанное «Форекс молочный 8 м…» не
                         // даёт понять, тот ли это материал.
-                        title={col.key === "name" ? row.name || suggestedName(row, types) : undefined}
+                        title={
+                          errors[rowIndex]?.[col.key]?.[0]
+                          || (col.key === "name" ? row.name || suggestedName(row, types) : undefined)
+                        }
                         onChange={(e) => setCell(rowIndex, col.key, e.target.value)}
                         onPaste={(e) => handlePaste(e, rowIndex, colIndex)}
                         onKeyDown={(e) => handleKeyDown(e, rowIndex, colIndex)}
@@ -308,12 +390,57 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
         </div>
       )}
 
+      {preview && (
+        <div className="card" style={{ marginTop: 12, padding: 12 }}>
+          <strong>{t("stock2.upsertPreview")}</strong>
+          {preview.create.length > 0 && (
+            <p style={{ fontSize: 13, margin: "6px 0" }}>
+              {t("stock2.willCreate", { count: preview.create.length })}: {preview.create.join(", ")}
+            </p>
+          )}
+          {preview.update.length > 0 ? (
+            <table className="table" style={{ marginTop: 6 }}>
+              <tbody>
+                {preview.update.flatMap((row) =>
+                  row.changes.map((c, i) => (
+                    <tr key={`${row.id}-${c.field}`}>
+                      <td>{i === 0 ? row.name : ""}</td>
+                      <td className="muted">{c.label}</td>
+                      <td>{formatNumber(c.before, { max: 2 })} → <strong>{formatNumber(c.after, { max: 2 })}</strong></td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          ) : (
+            <p className="muted" style={{ fontSize: 13 }}>{t("stock2.nothingToUpdate")}</p>
+          )}
+          {preview.unchanged > 0 && (
+            <p className="muted" style={{ fontSize: 12 }}>{t("stock2.unchanged", { count: preview.unchanged })}</p>
+          )}
+          <div className="row" style={{ gap: 10, justifyContent: "flex-end", marginTop: 8 }}>
+            <button className="secondary" onClick={() => setPreview(null)}>{t("stock2.back")}</button>
+            <button onClick={() => save(true)} disabled={busy || (!preview.create.length && !preview.update.length)}>
+              {t("stock2.applyUpsert")}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="row" style={{ marginTop: 16, justifyContent: "space-between", alignItems: "center" }}>
         <span className="muted">{t("grid.readyCount", { count: filled.length })}</span>
-        <div className="row" style={{ margin: 0, gap: 10 }}>
+        <div className="row" style={{ margin: 0, gap: 10, alignItems: "center" }}>
+          <label style={{ fontSize: 13, display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={upsert}
+              onChange={(e) => { setUpsert(e.target.checked); setPreview(null); }}
+            />
+            {t("stock2.upsertMode")}
+          </label>
           <button className="secondary" onClick={onClose}>{t("common.cancel")}</button>
-          <button onClick={save} disabled={busy || !filled.length}>
-            {busy ? t("common.loading") : t("grid.save", { count: filled.length })}
+          <button onClick={() => save(false)} disabled={busy || !filled.length || !!preview}>
+            {busy ? t("common.loading") : upsert ? t("stock2.previewUpsert") : t("grid.save", { count: filled.length })}
           </button>
         </div>
       </div>

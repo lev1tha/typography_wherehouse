@@ -5,8 +5,10 @@ import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
 import Field, { focusFirstInvalid } from "../../components/Field.jsx";
 import Icon from "../../components/Icon.jsx";
+import RateMatrixEditor from "../../components/RateMatrixEditor.jsx";
 import ServiceFormModal from "../../components/ServiceFormModal.jsx";
 import ServiceRecipeModal from "../../components/ServiceRecipeModal.jsx";
+import ThicknessCoefCard from "../../components/ThicknessCoefCard.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { formatNumber } from "../../utils/format.js";
 
@@ -48,6 +50,8 @@ function ServiceCard({ service, materials, onSaved }) {
     ...Object.fromEntries(fields.map(([key]) => [key, clean(service[key])])),
     // Минимум строки этой услуги: пусто — действует общий из «Правил прайса».
     min_line_amount: clean(service.min_line_amount),
+    // Цена по договорённости: цену за единицу вписывают в кассе (и складовщик).
+    negotiable_price: !!service.negotiable_price,
   });
   const [busy, setBusy] = useState(false);
   const [recipes, setRecipes] = useState(false);
@@ -139,6 +143,22 @@ function ServiceCard({ service, materials, onSaved }) {
           />
         </Field>
       </div>
+      {/* «По договорённости»: у гравировки и отходов цену в кассе вписывают
+          всегда, у остальных — только если включить. Админ вписывает цену у
+          любой услуги, флаг открывает это складовщику. */}
+      {!["ENGRAVING", "WASTE"].includes(service.kind) && (
+        <label className="check" style={{ display: "flex", gap: 8, alignItems: "center", margin: "0 0 10px" }}>
+          <input
+            type="checkbox"
+            checked={form.negotiable_price}
+            onChange={(e) => setForm({ ...form, negotiable_price: e.target.checked })}
+          />
+          <span>{t("pricing.negotiable")}</span>
+        </label>
+      )}
+      {form.negotiable_price && !["ENGRAVING", "WASTE"].includes(service.kind) && (
+        <p className="muted" style={{ fontSize: 12, marginTop: -4 }}>{t("pricing.negotiableHint")}</p>
+      )}
       {/* Подсказка про отходы — одна на карточку: полей у них три, и под
           каждым она повторялась бы трижды. */}
       {service.uses_free_measure && (
@@ -152,7 +172,11 @@ function ServiceCard({ service, materials, onSaved }) {
               <span>{r.material_name}</span>
               <span className="muted recipe-qty">
                 {formatNumber(r.consumption_per_unit, { max: 3 })}{" "}
-                / {r.consumption_mode === "PER_SQM" ? t("pricing.perSqm") : t("pricing.perOrder")}
+                / {r.consumption_mode === "PER_SQM"
+                  ? t("pricing.perSqm")
+                  : r.consumption_mode === "PER_PM"
+                  ? t("pricing.perPm")
+                  : t("pricing.perOrder")}
               </span>
             </div>
           ))
@@ -170,6 +194,11 @@ function ServiceCard({ service, materials, onSaved }) {
           {t("recipes.edit")}
         </button>
       </div>
+
+      {/* Матрица «материал / толщина → ставка» — у услуг с площадью. */}
+      {service.uses_area && !service.uses_free_measure && (
+        <RateMatrixEditor service={service} materials={materials} onChanged={onSaved} />
+      )}
 
       {recipes && (
         <ServiceRecipeModal
@@ -200,7 +229,16 @@ export default function Pricing() {
   const [savingC, setSavingC] = useState(false);
   // Правила прайса (CALC-01): общий минимум строки услуги и наценка за
   // срочность. 0 — правило выключено, цены как раньше.
-  const [rules, setRules] = useState({ min_line_amount: "", urgency_percent: "" });
+  const [rules, setRules] = useState({
+    min_line_amount: "",
+    urgency_percent: "",
+    min_mode: "PART",
+    rounding_mode: "LINE",
+    confirm_line_total: "",
+    staff_line_cap: "",
+    staff_min_price_percent: "",
+    debt_warn_days: "",
+  });
   const [rulesErr, setRulesErr] = useState({});
   const [savingR, setSavingR] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -219,6 +257,12 @@ export default function Pricing() {
       setRules({
         min_line_amount: clean(r.data.min_line_amount),
         urgency_percent: clean(r.data.urgency_percent),
+        min_mode: r.data.min_mode || "PART",
+        rounding_mode: r.data.rounding_mode || "LINE",
+        confirm_line_total: clean(r.data.confirm_line_total),
+        staff_line_cap: clean(r.data.staff_line_cap),
+        staff_min_price_percent: clean(r.data.staff_min_price_percent),
+        debt_warn_days: clean(r.data.debt_warn_days),
       });
     });
   }
@@ -245,6 +289,10 @@ export default function Pricing() {
     const bad = {};
     if (rules.min_line_amount === "" || !(Number(rules.min_line_amount) >= 0)) bad.min_line_amount = t("common.needValue");
     if (rules.urgency_percent === "" || !(Number(rules.urgency_percent) >= 0)) bad.urgency_percent = t("common.needValue");
+    ["confirm_line_total", "staff_line_cap", "staff_min_price_percent", "debt_warn_days"].forEach((key) => {
+      if (rules[key] === "" || !(Number(rules[key]) >= 0)) bad[key] = t("common.needValue");
+    });
+    if (Number(rules.staff_min_price_percent) > 100) bad.staff_min_price_percent = t("pricing.percentMax");
     setRulesErr(bad);
     if (Object.keys(bad).length) return focusFirstInvalid();
     setSavingR(true);
@@ -312,8 +360,45 @@ export default function Pricing() {
           </Field>
         </div>
         <p className="muted" style={{ fontSize: 12 }}>{t("pricing.rulesOrder")}</p>
+        <div className="row" style={{ alignItems: "flex-start" }}>
+          <Field className="grow" label={t("pricing.minMode")} hint={t(`pricing.minModeHint_${rules.min_mode}`)}>
+            <select value={rules.min_mode} onChange={(e) => setRules({ ...rules, min_mode: e.target.value })}>
+              {["PART", "WORK", "ORDER"].map((m) => (
+                <option key={m} value={m}>{t(`pricing.minMode_${m}`)}</option>
+              ))}
+            </select>
+          </Field>
+          <Field className="grow" label={t("pricing.roundingMode")} hint={t(`pricing.roundingHint_${rules.rounding_mode}`)}>
+            <select value={rules.rounding_mode} onChange={(e) => setRules({ ...rules, rounding_mode: e.target.value })}>
+              {["LINE", "ORDER"].map((m) => (
+                <option key={m} value={m}>{t(`pricing.rounding_${m}`)}</option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        <h4 style={{ margin: "8px 0 4px" }}>{t("pricing.limitsTitle")}</h4>
+        <div className="row" style={{ alignItems: "flex-start" }}>
+          <Field className="grow" label={t("pricing.confirmLine")} error={rulesErr.confirm_line_total} hint={t("pricing.confirmLineHint")}>
+            <input type="number" inputMode="decimal" min="0" value={rules.confirm_line_total}
+              onChange={(e) => setRules({ ...rules, confirm_line_total: e.target.value })} />
+          </Field>
+          <Field className="grow" label={t("pricing.staffCap")} error={rulesErr.staff_line_cap} hint={t("pricing.staffCapHint")}>
+            <input type="number" inputMode="decimal" min="0" value={rules.staff_line_cap}
+              onChange={(e) => setRules({ ...rules, staff_line_cap: e.target.value })} />
+          </Field>
+          <Field className="grow" label={t("pricing.staffFloor")} error={rulesErr.staff_min_price_percent} hint={t("pricing.staffFloorHint")}>
+            <input type="number" inputMode="decimal" min="0" max="100" value={rules.staff_min_price_percent}
+              onChange={(e) => setRules({ ...rules, staff_min_price_percent: e.target.value })} />
+          </Field>
+          <Field className="grow" label={t("pricing.debtWarnDays")} error={rulesErr.debt_warn_days} hint={t("pricing.debtWarnDaysHint")}>
+            <input type="number" inputMode="numeric" min="0" step="1" value={rules.debt_warn_days}
+              onChange={(e) => setRules({ ...rules, debt_warn_days: e.target.value })} />
+          </Field>
+        </div>
         <button onClick={saveRules} disabled={savingR}>{t("common.save")}</button>
       </div>
+
+      <ThicknessCoefCard />
 
       {services
         .filter((s) => s.is_active !== false)

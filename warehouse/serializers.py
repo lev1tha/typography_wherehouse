@@ -14,9 +14,39 @@ from .models import (
     Roll,
     RollStocktake,
     Supplier,
+    SupplierOpeningDebt,
+    SupplierPayment,
+    SupplierReturn,
     Supply,
     SupplyLine,
 )
+
+
+MAX_BACKDATE_DAYS = 366   # как у заказа задним числом (sales/views.py)
+
+
+def check_op_day(value, what="Дата операции"):
+    """Дата складской операции: не в будущем и не дальше года назад.
+
+    Будущее — денег и материала ещё нет. Дальше года — почти всегда опечатка в
+    годе («2025» вместо «2026»), а запись уехала бы в чужой отчёт. Закрытый
+    период проверяет вьюха (`finance.periods.ensure_open`): ей нужен 400 с
+    текстом про замок, а не про формат даты.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    if value is None:
+        return value
+    today = timezone.localdate()
+    if value > today:
+        raise serializers.ValidationError(f"{what} не может быть в будущем.")
+    if value < today - timedelta(days=MAX_BACKDATE_DAYS):
+        raise serializers.ValidationError(
+            f"{what} — больше года назад. Проверьте год."
+        )
+    return value
 
 
 def _sees_money(context) -> bool:
@@ -84,8 +114,50 @@ class MaterialImageSerializer(serializers.ModelSerializer):
         read_only_fields = ["uploaded_at"]
 
 
+class PriceTierSerializer(serializers.Serializer):
+    """Ступень опта: «от N листов — цена за лист» (CLI-02)."""
+
+    min_qty = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+
+
 class MaterialSerializer(serializers.ModelSerializer):
     images = MaterialImageSerializer(many=True, read_only=True)
+    # Ступени опта (CLI-02, волна 2). Прислали список — он заменяет прежний.
+    price_tiers = PriceTierSerializer(many=True, required=False)
+
+    def validate_price_tiers(self, value):
+        seen = set()
+        for row in value:
+            if row["min_qty"] in seen:
+                raise serializers.ValidationError(f"Порог «от {row['min_qty']}» повторяется.")
+            seen.add(row["min_qty"])
+        return sorted(value, key=lambda r: r["min_qty"])
+
+    def _set_tiers(self, material, tiers):
+        from .models import MaterialPriceTier
+
+        material.price_tiers.all().delete()
+        MaterialPriceTier.objects.bulk_create(
+            MaterialPriceTier(material=material, min_qty=r["min_qty"], price=r["price"]) for r in tiers
+        )
+        # Список мог быть подгружен заранее (prefetch) — иначе журнал и ответ
+        # увидели бы старые ступени.
+        getattr(material, "_prefetched_objects_cache", {}).pop("price_tiers", None)
+
+    def create(self, validated_data):
+        tiers = validated_data.pop("price_tiers", None)
+        material = super().create(validated_data)
+        if tiers is not None:
+            self._set_tiers(material, tiers)
+        return material
+
+    def update(self, instance, validated_data):
+        tiers = validated_data.pop("price_tiers", None)
+        material = super().update(instance, validated_data)
+        if tiers is not None:
+            self._set_tiers(material, tiers)
+        return material
     primary_image = serializers.SerializerMethodField()
     is_below_critical = serializers.BooleanField(read_only=True)
     sqm_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
@@ -97,6 +169,8 @@ class MaterialSerializer(serializers.ModelSerializer):
         max_digits=12, decimal_places=2, read_only=True, allow_null=True
     )
     sells_by_metre = serializers.BooleanField(read_only=True)
+    # Рулон продаётся ещё и по кв.м изделия (CALC-10): задана цена за кв.м.
+    sells_roll_by_area = serializers.BooleanField(read_only=True)
     stock_value = serializers.DecimalField(
         max_digits=14, decimal_places=2, read_only=True
     )
@@ -104,6 +178,43 @@ class MaterialSerializer(serializers.ModelSerializer):
     production_name = serializers.CharField(source="production.name", read_only=True)
     # Подсказка для формы: как назвался бы материал по заполненным полям.
     suggested_name = serializers.CharField(read_only=True)
+    # Закуп последней партии, цена по наценке и маржа (STK-03) — только тем,
+    # кто видит деньги.
+    pricing = serializers.SerializerMethodField()
+    # Остаток и стоимость по площадкам хранения (STK-05). Пусто — площадки не
+    # указаны нигде.
+    by_site = serializers.SerializerMethodField()
+
+    def get_by_site(self, obj):
+        from .sites import site_stock
+
+        names = self.context.get("_site_names")
+        if names is None:
+            names = {s.pk: s.name for s in ProductionSite.objects.all()}
+            self.context["_site_names"] = names
+        rows = site_stock(obj, names)
+        if not _sees_money(self.context):
+            for row in rows:
+                row["value"] = None
+        return rows
+
+    # Остаток и минимум в единицах материала (STK-06): листы, метры, штуки.
+    stock_units = serializers.SerializerMethodField()
+
+    def get_stock_units(self, obj):
+        from .reorder import min_in_units, stock_in_units, unit_kind, unit_label
+
+        return {
+            "kind": unit_kind(obj), "label": unit_label(obj),
+            "stock": stock_in_units(obj), "min": min_in_units(obj),
+        }
+
+    def get_pricing(self, obj):
+        if not _sees_money(self.context):
+            return None
+        from .pricing import pricing_hint
+
+        return pricing_hint(obj)
 
     class Meta:
         model = Material
@@ -130,11 +241,19 @@ class MaterialSerializer(serializers.ModelSerializer):
             "piece_area",
             "wholesale_price",
             "wholesale_min_qty",
+            "price_tiers",
             "cut_rate_per_pm",
+            "markup_percent",
+            "pricing",
+            "kim_percent",
+            "min_stock",
+            "stock_units",
+            "by_site",
             "roll_width",
             "price_per_pm",
             "metres_remaining",
             "sells_by_metre",
+            "sells_roll_by_area",
             "production",
             "production_name",
             "sqm_price",
@@ -158,6 +277,8 @@ class MaterialSerializer(serializers.ModelSerializer):
         if not _sees_money(self.context):
             data["purchase_price"] = None
             data["stock_value"] = None
+            # Наценка вместе с ценой продажи выдаёт закуп.
+            data["markup_percent"] = None
         return data
 
     def get_primary_image(self, obj):
@@ -182,6 +303,15 @@ class MaterialSerializer(serializers.ModelSerializer):
             if name in attrs:
                 return attrs[name]
             return getattr(self.instance, name, None) if self.instance is not None else None
+
+        kim = attrs.get("kim_percent")
+        if kim is not None and not (Decimal("1") <= kim <= Decimal("100")):
+            raise serializers.ValidationError(
+                {"kim_percent": "КИМ — от 1 до 100 %. Пусто — списывать ровно площадь деталей."}
+            )
+        markup = attrs.get("markup_percent")
+        if markup is not None and not (Decimal("-90") <= markup <= Decimal("1000")):
+            raise serializers.ValidationError({"markup_percent": "Наценка — от −90 до 1000 %."})
 
         is_roll = current("is_roll_material")
         form = current("intake_form")
@@ -286,6 +416,18 @@ class MaterialBulkRowSerializer(serializers.ModelSerializer):
             "price_per_sqm", "piece_price", "cut_rate_per_pm",
             "wholesale_price", "wholesale_min_qty", "production",
         ]
+
+    NUMERIC = (
+        "thickness_mm", "sheet_width", "sheet_height", "roll_width", "price_per_pm",
+        "critical_balance", "purchase_price", "price_per_unit", "price_per_sqm",
+        "piece_price", "cut_rate_per_pm", "wholesale_price", "wholesale_min_qty",
+    )
+
+    def to_internal_value(self, data):
+        # Вставка из русского Excel (XL-01): «1,22», «2 679», «2 679,50 сом».
+        from .numbers import normalize_numbers
+
+        return super().to_internal_value(normalize_numbers(data, self.NUMERIC))
 
     def validate(self, attrs):
         # Форму выводим из ЗАПОЛНЕННЫХ полей, без отдельной колонки «форма»:
@@ -401,18 +543,75 @@ class QuickIntakeSerializer(serializers.Serializer):
 
 
 
-class AdjustmentSerializer(serializers.Serializer):
-    """Inventory adjustment — reconcile actual vs system stock."""
+def _sheets_to_area(material, sheets, field):
+    """Листы → кв.м по площади листа карточки, без округления до сотых
+    (XL-03: «6 листов» = 17.8608, а не 17.86)."""
+    if not (material.is_roll_material and material.piece_area and material.piece_area > 0):
+        raise serializers.ValidationError(
+            {field: f"У «{material.name}» не задан размер листа — вводите количество в кв.м."}
+        )
+    return (Decimal(sheets) * material.piece_area).quantize(Decimal("0.0001"))
+
+
+class _NumbersMixin:
+    """Числа с запятой и пробелами (как пишет русский Excel) — в точку."""
+
+    NUMERIC: tuple = ()
+
+    def to_internal_value(self, data):
+        from .numbers import normalize_numbers
+
+        return super().to_internal_value(normalize_numbers(data, self.NUMERIC))
+
+
+class AdjustmentSerializer(_NumbersMixin, serializers.Serializer):
+    """Inventory adjustment — reconcile actual vs system stock.
+
+    Количество — кв.м до 4 знаков (`counted_quantity`) или ЛИСТАМИ
+    (`counted_sheets`) у листового материала: сервер переводит листы по площади
+    листа без округления. Раньше форма слала кв.м с 2 знаками, и «6 листов»
+    1.22×2.44 становились 17.86 вместо 17.8608 — последний лист было не продать
+    (XL-03).
+    """
+
+    NUMERIC = ("counted_quantity", "counted_sheets")
 
     material = serializers.PrimaryKeyRelatedField(queryset=Material.objects.all())
     counted_quantity = serializers.DecimalField(
-        max_digits=12, decimal_places=2, min_value=0
+        max_digits=14, decimal_places=4, min_value=0, required=False, allow_null=True,
+    )
+    counted_sheets = serializers.DecimalField(
+        max_digits=12, decimal_places=4, min_value=0, required=False, allow_null=True,
     )
     reason = serializers.CharField(required=False, allow_blank=True)
+    # Дата пересчёта (G3-N3): недостача ложится в месяц пересчёта, а не ввода.
+    happened_on = serializers.DateField(required=False, allow_null=True)
+
+    def validate_happened_on(self, value):
+        return check_op_day(value, "Дата пересчёта")
+
+    def validate(self, attrs):
+        sheets = attrs.get("counted_sheets")
+        qty = attrs.get("counted_quantity")
+        if (sheets is None) == (qty is None):
+            raise serializers.ValidationError(
+                {"counted_quantity": "Укажите пересчитанное количество — в кв.м или листами."}
+            )
+        if sheets is not None:
+            attrs["counted_quantity"] = _sheets_to_area(attrs["material"], sheets, "counted_sheets")
+        return attrs
 
 
-class WriteOffSerializer(serializers.Serializer):
-    """Write off stock for damage / defect / loss / expiry."""
+class WriteOffSerializer(_NumbersMixin, serializers.Serializer):
+    """Write off stock for damage / defect / loss / expiry.
+
+    Количество — до 4 знаков или листами (`sheets`) у листового материала;
+    хвост округления ≤ 0.01 кв.м при списании последнего листа уходит в ноль
+    (`rolls.snap_tail`, STK-08): раньше 2.9768 не принималось, 2.98 было
+    «больше остатка», а 2.97 оставляло 0.0068 кв.м пыли.
+    """
+
+    NUMERIC = ("quantity", "sheets")
 
     REASONS = {
         "DAMAGE": "Порча",
@@ -424,23 +623,41 @@ class WriteOffSerializer(serializers.Serializer):
 
     material = serializers.PrimaryKeyRelatedField(queryset=Material.objects.all())
     quantity = serializers.DecimalField(
-        max_digits=12, decimal_places=2, min_value=0,
+        max_digits=14, decimal_places=4, min_value=0, required=False, allow_null=True,
         help_text="Списываемое количество (положительное число)",
+    )
+    sheets = serializers.DecimalField(
+        max_digits=12, decimal_places=4, min_value=0, required=False, allow_null=True,
     )
     reason_code = serializers.ChoiceField(choices=list(REASONS.keys()))
     note = serializers.CharField(required=False, allow_blank=True)
+    # Дата списания (брак нашли вчера — вносят сегодня). Пусто — сегодня.
+    # Закрытый период держит вьюха (F4/PNL-01): списание датой принятого месяца
+    # меняло бы его прибыль.
+    happened_on = serializers.DateField(required=False, allow_null=True)
 
-    def validate_quantity(self, value):
-        if value <= 0:
-            raise serializers.ValidationError("Количество должно быть больше нуля.")
-        return value
+    def validate_happened_on(self, value):
+        return check_op_day(value, "Дата списания")
 
     def validate(self, attrs):
+        from .rolls import snap_tail
+
         material = attrs["material"]
-        if attrs["quantity"] > material.quantity:
+        sheets, qty = attrs.get("sheets"), attrs.get("quantity")
+        if (sheets is None) == (qty is None):
+            raise serializers.ValidationError(
+                {"quantity": "Укажите, сколько списать — в единицах материала или листами."}
+            )
+        if sheets is not None:
+            qty = _sheets_to_area(material, sheets, "sheets")
+        if qty <= 0:
+            raise serializers.ValidationError({"quantity": "Количество должно быть больше нуля."})
+        qty = snap_tail(material, qty)
+        if qty > material.quantity:
             raise serializers.ValidationError(
                 {"quantity": f"Нельзя списать больше, чем на складе ({material.quantity})."}
             )
+        attrs["quantity"] = qty
         return attrs
 
     def reason_text(self) -> str:
@@ -472,6 +689,22 @@ class RollSerializer(serializers.ModelSerializer):
     shortfall = serializers.DecimalField(
         max_digits=10, decimal_places=2, read_only=True, allow_null=True
     )
+
+    # Площадка хранения и где лежат части партии (STK-05).
+    site_name = serializers.CharField(source="site.name", read_only=True, default=None)
+    placements = serializers.SerializerMethodField()
+
+    def get_placements(self, obj):
+        from .sites import placements
+
+        names = self.context.get("_site_names")
+        if names is None:
+            names = {s.pk: s.name for s in ProductionSite.objects.all()}
+            self.context["_site_names"] = names
+        return [
+            {"site": sid, "name": names.get(sid) if sid else None, "area": area}
+            for sid, area in placements(obj).items()
+        ]
 
     # Накладная партии (если пришла документом) — карточке партии и кнопке
     # «Исправить приход»: исправление двигает и сумму накладной.
@@ -515,6 +748,9 @@ class RollSerializer(serializers.ModelSerializer):
             # («бишкек · 26,54 лист.») читает человек, а не машина.
             "production",
             "production_name",
+            "site",
+            "site_name",
+            "placements",
             "form",
             "width",
             "length",
@@ -552,6 +788,10 @@ class RollIntakeSerializer(serializers.Serializer):
     # производство из карточки материала. Раньше это писали словом в
     # маркировку («бишкек»), и свести по производству было нельзя.
     production = serializers.PrimaryKeyRelatedField(
+        queryset=ProductionSite.objects.all(), required=False, allow_null=True
+    )
+    # Где партия будет лежать (STK-05). Пусто — площадка не указана.
+    site = serializers.PrimaryKeyRelatedField(
         queryset=ProductionSite.objects.all(), required=False, allow_null=True
     )
     # Чем заплатили за поставку: «наличные» / «банк» пишут расход в кассу,
@@ -656,6 +896,10 @@ class RollWriteOffSerializer(serializers.Serializer):
     metres = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
     reason_code = serializers.ChoiceField(choices=list(WriteOffSerializer.REASONS.keys()))
     note = serializers.CharField(required=False, allow_blank=True)
+    happened_on = serializers.DateField(required=False, allow_null=True)
+
+    def validate_happened_on(self, value):
+        return check_op_day(value, "Дата списания")
 
     def validate_metres(self, value):
         if value <= 0:
@@ -772,16 +1016,20 @@ class ProductionSiteSerializer(serializers.ModelSerializer):
 
 class SupplierSerializer(serializers.ModelSerializer):
     """Справочник поставщиков. Читают все, правит любой, кто принимает товар:
-    новую фирму заводит складовщик прямо в накладной."""
+    новую фирму заводит складовщик прямо в накладной.
+
+    Деньги (долг, сальдо, аванс) — только администратору и бухгалтеру:
+    складовщику приходит null (STAFF-07)."""
 
     supplies_count = serializers.SerializerMethodField()
     debt = serializers.SerializerMethodField()
+    balance = serializers.SerializerMethodField()
 
     class Meta:
         model = Supplier
         fields = [
             "id", "name", "phone", "inn", "note", "is_archived",
-            "supplies_count", "debt",
+            "supplies_count", "debt", "balance",
         ]
         # Уникальность проверяем сами (ниже), без регистра и лишних пробелов, с
         # человеческим текстом: стандартное «поставщик с таким название уже
@@ -804,11 +1052,22 @@ class SupplierSerializer(serializers.ModelSerializer):
         return clean
 
     def get_supplies_count(self, obj) -> int:
-        return obj.supplies.count()
+        return len(obj.supplies.all())
 
     def get_debt(self, obj):
-        """Сколько мы должны этому поставщику по всем его накладным."""
-        return sum((s.debt for s in obj.supplies.prefetch_related("lines")), Decimal("0"))
+        """Сколько мы должны этому поставщику по его накладным (с платежами)."""
+        if not _sees_money(self.context):
+            return None
+        return sum((s.debt for s in obj.supplies.all()), Decimal("0"))
+
+    def get_balance(self, obj):
+        """Сальдо: начальный долг + накладные − платежи. Плюс — мы должны,
+        минус — деньги лежат у поставщика (аванс, переплата)."""
+        if not _sees_money(self.context):
+            return None
+        from .supplier_ledger import supplier_balance
+
+        return supplier_balance(obj)
 
 
 class SupplyLineSerializer(serializers.ModelSerializer):
@@ -819,26 +1078,59 @@ class SupplyLineSerializer(serializers.ModelSerializer):
     # Код единицы для перевода на фронте (`unit.*`): русская подпись `unit` в
     # кыргызской или английской накладной торчала чужим словом.
     unit_code = serializers.SerializerMethodField()
+    # «Вернуть поставщику»: в чём считают возврат (лист, м, шт), сколько ещё на
+    # полке и сколько принято в этих единицах.
+    return_unit = serializers.SerializerMethodField()
+    returnable = serializers.SerializerMethodField()
+    return_total = serializers.SerializerMethodField()
 
     class Meta:
         model = SupplyLine
         fields = [
             "id", "material", "material_name", "form",
             "width", "height", "length", "sheet_count",
-            "quantity", "unit", "unit_code", "cost", "unit_cost", "code",
+            "quantity", "unit", "unit_code", "cost", "cost_fc", "unit_cost", "code",
             # Партия строки — кнопке «Исправить приход» в карточке накладной.
-            "roll",
+            "roll", "return_unit", "returnable", "return_total",
         ]
         extra_kwargs = {
             "roll": {"read_only": True},
             # У штучного материала количество ВВОДЯТ, у площадного оно считается
             # из размеров и присланное значение игнорируется (см. `line_quantity`).
             "quantity": {"required": False},
-            # Сумма строки — обязательна и не отрицательна: она идёт в закуп
-            # месяца и в себестоимость партии. Ноль допустим явно (подарок
-            # поставщика), пустоту сетка до сервера не доносит.
-            "cost": {"min_value": Decimal("0")},
+            # Сумма строки в сомах обязательна для сомовой накладной (это
+            # проверяет накладная целиком: в валюте её считает сервер из
+            # `cost_fc` по курсу) и не отрицательна: она идёт в закуп месяца и
+            # в себестоимость партии. Ноль допустим явно (подарок поставщика).
+            "cost": {"required": False, "min_value": Decimal("0")},
+            "cost_fc": {"required": False, "allow_null": True, "min_value": Decimal("0")},
         }
+
+    def _return_info(self, obj):
+        # Считаем только для чтения готовой накладной, один раз на строку.
+        cache = self.context.setdefault("_return_info", {})
+        if obj.pk not in cache:
+            from .supplier_returns import returnable
+
+            cache[obj.pk] = returnable(obj) if obj.pk else (None, None, None)
+        return cache[obj.pk]
+
+    def get_return_unit(self, obj):
+        return self._return_info(obj)[0]
+
+    def get_returnable(self, obj):
+        return self._return_info(obj)[1]
+
+    def get_return_total(self, obj):
+        return self._return_info(obj)[2]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Закупочные цены — не складовщику (STAFF-07).
+        if not _sees_money(self.context):
+            data["cost"] = data["cost_fc"] = data["unit_cost"] = None
+            data["returnable"] = data["return_total"] = None
+        return data
 
     def get_unit(self, obj):
         return "кв.м" if obj.material.is_roll_material and obj.form != SupplyLine.Form.QTY \
@@ -847,6 +1139,73 @@ class SupplyLineSerializer(serializers.ModelSerializer):
     def get_unit_code(self, obj):
         return "SQM" if obj.material.is_roll_material and obj.form != SupplyLine.Form.QTY \
             else obj.material.unit
+
+
+class SupplierPaymentSerializer(serializers.ModelSerializer):
+    supplier_name = serializers.CharField(source="supplier.name", read_only=True, default="")
+    supply_number = serializers.SerializerMethodField()
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default="")
+    kind_label = serializers.CharField(source="get_kind_display", read_only=True)
+    settled = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    is_advance = serializers.BooleanField(read_only=True)
+    advance_left = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SupplierPayment
+        fields = [
+            "id", "supplier", "supplier_name", "supply", "supply_number", "source", "kind",
+            "kind_label", "paid_on", "account", "amount", "settled", "fx_diff", "currency",
+            "amount_fc", "rate", "note", "created_by", "created_by_name", "created_at",
+            "is_advance", "advance_left",
+        ]
+        read_only_fields = fields
+
+    def get_supply_number(self, obj):
+        if not obj.supply_id:
+            return ""
+        return obj.supply.number or f"#{obj.supply_id}"
+
+    def get_advance_left(self, obj):
+        if not obj.is_advance:
+            return None
+        from .supplier_ledger import advance_remaining
+
+        return advance_remaining(obj)
+
+
+class SupplierReturnSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default="")
+    lines = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SupplierReturn
+        fields = [
+            "id", "supply", "returned_on", "amount", "refund", "refund_account", "note",
+            "created_by_name", "created_at", "lines",
+        ]
+        read_only_fields = fields
+
+    def get_lines(self, obj):
+        return [
+            {"material": l.material_id, "label": l.label, "quantity": l.quantity,
+             "area": l.area, "cost": l.cost}
+            for l in obj.lines.all()
+        ]
+
+
+class SupplierOpeningDebtSerializer(serializers.ModelSerializer):
+    supplier_name = serializers.CharField(source="supplier.name", read_only=True)
+
+    class Meta:
+        model = SupplierOpeningDebt
+        fields = ["id", "supplier", "supplier_name", "as_of", "amount", "note", "created_at"]
+        read_only_fields = ["created_at"]
+
+
+_MONEY_FIELDS = (
+    "stated_total", "paid_amount", "paid_account", "total_cost", "discrepancy", "debt",
+    "paid_total", "overpaid", "total_foreign", "paid_foreign", "debt_foreign",
+)
 
 
 class SupplySerializer(serializers.ModelSerializer):
@@ -860,6 +1219,14 @@ class SupplySerializer(serializers.ModelSerializer):
     total_cost = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     discrepancy = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     debt = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    paid_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    overpaid = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    total_foreign = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    paid_foreign = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    debt_foreign = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    payments = SupplierPaymentSerializer(many=True, read_only=True)
+    returns = SupplierReturnSerializer(many=True, read_only=True)
+    possible_duplicate_of = serializers.SerializerMethodField()
 
     class Meta:
         model = Supply
@@ -867,10 +1234,103 @@ class SupplySerializer(serializers.ModelSerializer):
             "id", "number", "supplier", "supplier_name",
             "supplier_inn", "supplier_phone", "received_on",
             "stated_total", "paid_amount", "paid_account", "note", "lines",
-            "total_cost", "discrepancy", "debt",
+            "is_opening", "currency", "rate",
+            "total_cost", "discrepancy", "debt", "paid_total", "overpaid",
+            "total_foreign", "paid_foreign", "debt_foreign",
+            "payments", "returns", "possible_duplicate_of",
             "created_by", "created_by_name", "created_at",
         ]
         read_only_fields = ["created_by", "created_at"]
+
+    def get_possible_duplicate_of(self, obj):
+        return (self.context.get("dupes") or {}).get(obj.id)
+
+    def validate_currency(self, value):
+        code = (value or "KGS").strip().upper()
+        if code not in Supply.CURRENCIES:
+            raise serializers.ValidationError(
+                "Валюта: " + ", ".join(Supply.CURRENCIES) + "."
+            )
+        return code
+
+    def validate_paid_amount(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("Оплата не может быть отрицательной.")
+        return value
+
+    def validate(self, attrs):
+        inst = self.instance
+        if inst is not None:
+            # Валюта, курс и режим «начальные остатки» задают цены партий — после
+            # проведения не меняются.
+            for name in ("currency", "rate", "is_opening"):
+                if name in attrs and attrs[name] != getattr(inst, name):
+                    raise serializers.ValidationError({
+                        name: "После проведения не меняется: отмените накладную и заведите заново."
+                    })
+            if "paid_amount" in attrs or "paid_account" in attrs:
+                amount = attrs.get("paid_amount", inst.paid_amount) or Decimal("0")
+                account = attrs.get("paid_account", inst.paid_account)
+                if amount > 0 and account not in ("CASH", "BANK"):
+                    raise serializers.ValidationError({
+                        "paid_account": "Укажите, чем платили: наличными или с банка."
+                    })
+            return attrs
+
+        currency = attrs.get("currency") or "KGS"
+        attrs["currency"] = currency
+        if currency == "KGS":
+            attrs["rate"] = Decimal("1")
+        else:
+            rate = attrs.get("rate")
+            if rate is None or rate <= 0:
+                raise serializers.ValidationError({
+                    "rate": f"Накладная в {currency}: укажите курс — сколько сом за единицу валюты."
+                })
+        paid = attrs.get("paid_amount") or Decimal("0")
+        account = attrs.get("paid_account") or ""
+        if attrs.get("is_opening"):
+            if currency != "KGS":
+                raise serializers.ValidationError({"currency": "Начальные остатки вводятся в сомах."})
+            if paid > 0 or account:
+                raise serializers.ValidationError({
+                    "paid_amount": "Начальные остатки — склад на дату переезда: оплаты по ним нет. "
+                                   "Долг поставщику вносится отдельно, в его карточке."
+                })
+        elif paid > 0 and account not in ("CASH", "BANK"):
+            # Раньше оплата без счёта молча не попадала в кассу (аудит F1).
+            raise serializers.ValidationError({
+                "paid_account": "Укажите, чем платили: наличными или с банка. Без счёта "
+                                "оплата не попадает в кассу."
+            })
+        problems, bad = [], False
+        for line in attrs.get("lines") or []:
+            errs = {}
+            if currency == "KGS":
+                if line.get("cost") is None:
+                    errs["cost"] = ["Укажите сумму строки."]
+            else:
+                fc = line.get("cost_fc")
+                if fc is None:
+                    errs["cost_fc"] = [f"Укажите сумму строки в {currency}."]
+                else:
+                    line["cost"] = (fc * attrs["rate"]).quantize(Decimal("0.01"))
+            bad = bad or bool(errs)
+            problems.append(errs)
+        if bad:
+            raise serializers.ValidationError({"lines": problems})
+        return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Деньги накладной и платежей — админу и бухгалтеру; складовщик
+        # принимает товар, а почём купили и сколько должны, ему знать незачем.
+        if not _sees_money(self.context):
+            for name in _MONEY_FIELDS:
+                data[name] = None
+            data["payments"] = None
+            data["returns"] = None
+        return data
 
 
 class WasteLineSerializer(serializers.Serializer):
@@ -928,7 +1388,9 @@ class WasteLineSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 f"«{material.name}»: не из чего посчитать количество — проверьте размеры или количество."
             )
-        if qty > material.quantity:
+        from .rolls import snap_tail
+
+        if snap_tail(material, qty) > material.quantity:
             unit = "кв.м" if material.is_roll_material else material.get_unit_display()
             raise serializers.ValidationError(
                 f"«{material.name}»: в отход {qty.normalize():f} {unit}, а на складе "
@@ -950,11 +1412,7 @@ class WasteSerializer(serializers.Serializer):
         return value
 
     def validate_happened_on(self, value):
-        from django.utils import timezone
-
-        if value and value > timezone.localdate():
-            raise serializers.ValidationError("Дата отхода не может быть в будущем.")
-        return value
+        return check_op_day(value, "Дата отхода")
 
 
 class LotCorrectionSerializer(serializers.Serializer):
@@ -987,3 +1445,65 @@ class LotCorrectionSerializer(serializers.Serializer):
         if bool(attrs.get("roll")) == bool(attrs.get("supply_line")):
             raise serializers.ValidationError("Укажите партию или строку накладной.")
         return attrs
+
+
+class StockTransferInputSerializer(_NumbersMixin, serializers.Serializer):
+    """Перемещение между площадками (STK-05/G4-N4): сколько — в единицах
+    хранения (`quantity`), листами (`sheets`) или метрами с рулона (`metres`
+    + `roll`)."""
+
+    NUMERIC = ("quantity", "sheets", "metres")
+
+    material = serializers.PrimaryKeyRelatedField(queryset=Material.objects.all())
+    from_site = serializers.PrimaryKeyRelatedField(
+        queryset=ProductionSite.objects.all(), required=False, allow_null=True)
+    to_site = serializers.PrimaryKeyRelatedField(
+        queryset=ProductionSite.objects.all(), required=False, allow_null=True)
+    roll = serializers.PrimaryKeyRelatedField(queryset=Roll.objects.all(), required=False, allow_null=True)
+    quantity = serializers.DecimalField(max_digits=14, decimal_places=4, min_value=0, required=False, allow_null=True)
+    sheets = serializers.DecimalField(max_digits=12, decimal_places=4, min_value=0, required=False, allow_null=True)
+    metres = serializers.DecimalField(max_digits=12, decimal_places=4, min_value=0, required=False, allow_null=True)
+    happened_on = serializers.DateField(required=False, allow_null=True)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+    def validate_happened_on(self, value):
+        return check_op_day(value, "Дата перемещения")
+
+    def validate(self, attrs):
+        material, roll = attrs["material"], attrs.get("roll")
+        if roll is not None and roll.material_id != material.id:
+            raise serializers.ValidationError({"roll": "Партия другого материала."})
+        given = [k for k in ("quantity", "sheets", "metres") if attrs.get(k) is not None]
+        if len(given) != 1:
+            raise serializers.ValidationError({"quantity": "Укажите, сколько перемещаете: количество, листы или метры."})
+        if attrs.get("sheets") is not None:
+            attrs["quantity"] = _sheets_to_area(material, attrs["sheets"], "sheets")
+        elif attrs.get("metres") is not None:
+            if roll is None or not roll.width:
+                raise serializers.ValidationError({"roll": "Метрами — с конкретного рулона: выберите рулон."})
+            attrs["quantity"] = (attrs["metres"] * roll.width).quantize(Decimal("0.0001"))
+        if attrs["quantity"] <= 0:
+            raise serializers.ValidationError({"quantity": "Количество должно быть больше нуля."})
+        if attrs.get("from_site") == attrs.get("to_site"):
+            raise serializers.ValidationError({"to_site": "Откуда и куда — одна и та же площадка."})
+        return attrs
+
+
+class StockTransferSerializer(serializers.ModelSerializer):
+    material_name = serializers.CharField(source="material.name", read_only=True)
+    from_site_name = serializers.CharField(source="from_site.name", read_only=True, default=None)
+    to_site_name = serializers.CharField(source="to_site.name", read_only=True, default=None)
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    cost = serializers.SerializerMethodField()
+
+    def get_cost(self, obj):
+        return obj.cost if _sees_money(self.context) else None
+
+    class Meta:
+        from .models import StockTransfer
+
+        model = StockTransfer
+        fields = [
+            "id", "material", "material_name", "from_site", "from_site_name", "to_site",
+            "to_site_name", "area", "cost", "happened_on", "note", "created_by_name", "created_at",
+        ]

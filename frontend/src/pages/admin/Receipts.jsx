@@ -6,6 +6,7 @@ import api from "../../api/api.js";
 import { apiError } from "../../api/errors.js";
 import { useAuth } from "../../auth/AuthContext.jsx";
 import AddToOrderModal from "../../components/AddToOrderModal.jsx";
+import AuditJournal from "../../components/AuditJournal.jsx";
 import ClientPicker from "../../components/ClientPicker.jsx";
 import DataTable from "../../components/DataTable.jsx";
 import EditReceiptModal from "../../components/EditReceiptModal.jsx";
@@ -16,12 +17,14 @@ import LoadError from "../../components/LoadError.jsx";
 import Pager, { usePage } from "../../components/Pager.jsx";
 import PayDebtModal from "../../components/PayDebtModal.jsx";
 import PrintDocs from "../../components/PrintDocs.jsx";
-import { FulfillmentBadge, PaymentBadge } from "../../components/StatusBadge.jsx";
+import ReceiptCard from "../../components/ReceiptCard.jsx";
+import { FulfillmentBadge, PaymentBadge, WarrantyBadge } from "../../components/StatusBadge.jsx";
 import Tabs, { tabPanel } from "../../components/Tabs.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { isCanceled, useLatest } from "../../utils/latest.js";
 import { receiptRuled, rulesLabel } from "../../utils/pricingRules.js";
 import { formatDate, formatDateTime, formatMoney, formatTime } from "../../utils/format.js";
+import { downloadFile } from "../../utils/download.js";
 
 const som = (n) => formatMoney(n);
 
@@ -53,6 +56,9 @@ function ReceiptsTab() {
   const [editing, setEditing] = useState(null);
   const [adding, setAdding] = useState(null);
   const [refunding, setRefunding] = useState(null);
+  // Открытая карточка заказа: состав с размерами деталей, оплаты, выдача по
+  // позициям, списание долга. Щелчок по строке таблицы или кнопка «Открыть».
+  const [open, setOpen] = useState(null);
   // Заказ, по которому открыты печатные формы (чек / накладная / счёт).
   const [printing, setPrinting] = useState(null);
   const [sort, setSort] = useState({ key: "_debt", dir: "desc" });
@@ -80,7 +86,8 @@ function ReceiptsTab() {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "desc" ? "asc" : "desc" } : { key, dir: "desc" }));
   }
 
-  function load() {
+  // Фильтры списка — одни для страницы, плиток и выгрузки CSV.
+  function listParams() {
     const params = {};
     if (method) params.payment_method = method;
     if (pstatus) params.payment_status = pstatus;
@@ -89,6 +96,18 @@ function ReceiptsTab() {
     if (dateFrom) params.date_from = dateFrom;
     if (dateTo) params.date_to = dateTo;
     if (onlyChange) params.has_change = "1";
+    return params;
+  }
+
+  // CSV «Чеки со строками» (волна 2): те же фильтры и сортировка, все страницы.
+  function exportCsv() {
+    downloadFile("/sales/receipts/export/", { ...listParams(), ordering: orderingParam() }, "cheki.csv").catch((e) =>
+      toast(apiError(e, t("common.error")), "error")
+    );
+  }
+
+  function load() {
+    const params = listParams();
     api
       .get("/sales/receipts/", {
         params: { ...params, ordering: orderingParam(), ...(page > 1 ? { page } : {}) },
@@ -121,7 +140,7 @@ function ReceiptsTab() {
   // Шаг назад по производству. Нужен только для ошибочного нажатия: вперёд
   // заказ идёт сам, а назад его возвращают, когда готовность или выдачу
   // отметили раньше времени. Из «Готовится» назад некуда — кнопки там нет.
-  const PREV = { ISSUED: "READY", READY: "PROCESSING" };
+  const PREV = { ISSUED: "READY", PARTIALLY_ISSUED: "READY", READY: "PROCESSING" };
   const backShort = (s) =>
     PREV[s] === "READY" ? t("receipts.toReady") : t("receipts.toProcessing");
 
@@ -141,7 +160,13 @@ function ReceiptsTab() {
 
   const advance = (r, e) =>
     move(r, r.fulfillment_status === "PROCESSING" ? "READY" : "ISSUED", e);
-  const rollback = (r, e) => move(r, PREV[r.fulfillment_status], e);
+  // Откат из «Выдан частично» снимает отметки «выдано» по всем позициям — это
+  // история выдачи, поэтому спрашиваем.
+  const rollback = async (r, e) => {
+    e?.stopPropagation();
+    if (r.fulfillment_status === "PARTIALLY_ISSUED" && !(await confirm(t("issue.rollbackAsk")))) return;
+    return move(r, PREV[r.fulfillment_status], e);
+  };
 
   // Удаление — не возврат: возврат клиент принёс обратно, и в отчётах он обязан
   // остаться; удаление — это «такого заказа не было». Поэтому и текст
@@ -199,9 +224,15 @@ function ReceiptsTab() {
     {
       key: "order_number",
       label: t("receipts.number"),
+      sortKey: "order_number",
       render: (r) => (
         <>
           <strong>№{r.order_number ?? "—"}</strong>
+          {r.is_warranty && (
+            <div style={{ marginTop: 3 }}>
+              <WarrantyBadge />
+            </div>
+          )}
           {r.title ? <div className="muted" style={{ fontSize: 12 }}>{r.title}</div> : null}
         </>
       ),
@@ -306,6 +337,13 @@ function ReceiptsTab() {
                 <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
                   {t("receipts.costShort")}: {Number(r.cost_total) > 0 ? som(r.cost_total) : "—"}
                 </div>
+                {/* Гарантийные переделки исходного заказа: материал на них
+                    списан, а выручки с них нет — честная маржа ниже. */}
+                {Number(r.warranty_cost) > 0 && r.margin_net != null && (
+                  <div className="muted" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                    {t("warranty.afterShort")}: <strong>{som(r.margin_net)}</strong>
+                  </div>
+                )}
               </>
             ),
           },
@@ -391,6 +429,16 @@ function ReceiptsTab() {
       label: isAdmin ? t("receipts.actions") : "",
       render: (r) => (
         <div className="row-actions">
+          {/* Карточка заказа. Щелчок по строке открывает её мышью; кнопка — для
+              клавиатуры и для экранного диктора (сама строка не фокусируется). */}
+          <button
+            className="ghost row-btn"
+            onClick={(e) => { e.stopPropagation(); setOpen(r); }}
+            aria-label={t("receiptsV2.openCard", { number: r.order_number })}
+            title={t("receiptsV2.openCard", { number: r.order_number })}
+          >
+            <Icon name="arrow-right" size={14} /> {t("receiptsV2.open")}
+          </button>
           {/* «Повторить» — половина заказов у типографии повторные: те же
               визитки, та же вывеска. Состав переносится в кассу, цены берутся
               сегодняшние; кассиру остаётся нажать «Оформить». */}
@@ -483,8 +531,8 @@ function ReceiptsTab() {
         <input
           className="search"
           type="search"
-          aria-label={t("common.search")}
-          placeholder={t("common.search")}
+          aria-label={t("receiptsV2.searchPh")}
+          placeholder={t("receiptsV2.searchPh")}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -537,6 +585,7 @@ function ReceiptsTab() {
             {t("common.reset")}
           </button>
         )}
+        <button className="secondary" onClick={exportCsv}>{t("clients.exportCsv")}</button>
       </div>
       {/* С себестоимостью и маржой колонок стало одиннадцать — таблица
           прокручивается вбок сама, а не тянет за собой всю страницу. */}
@@ -549,6 +598,7 @@ function ReceiptsTab() {
             rows={rows}
             sort={sort}
             onSort={onSort}
+            onRowClick={setOpen}
             filtered={!!filtered}
             onReset={resetFilters}
           />
@@ -573,6 +623,17 @@ function ReceiptsTab() {
       )}
 
       {printing && <PrintDocs receipt={printing} onClose={() => setPrinting(null)} />}
+
+      {open && (
+        <ReceiptCard
+          receipt={open}
+          onClose={() => setOpen(null)}
+          onChange={(data) => {
+            setOpen(data);
+            load();
+          }}
+        />
+      )}
 
       {editing && (
         <EditReceiptModal
@@ -602,79 +663,6 @@ function ReceiptsTab() {
   );
 }
 
-function auditIcon(action = "") {
-  const a = action.toLowerCase();
-  if (a.includes("вход")) return "key";
-  if (a.includes("возврат")) return "undo";
-  if (a.includes("цен")) return "tag";
-  if (a.includes("оформлен чек") || a.includes("чек")) return "receipt";
-  if (a.includes("инвентар")) return "clipboard";
-  if (a.includes("списан")) return "trash";
-  if (a.includes("поступлен")) return "inbox";
-  if (a.includes("готов") || a.includes("выдан")) return "check-circle";
-  if (a.includes("дозаказ")) return "plus-circle";
-  if (a.includes("реферер")) return "shuffle";
-  return "dot";
-}
-
-function AuditTab() {
-  const { t } = useTranslation();
-  const { toast } = useUI();
-  const [rows, setRows] = useState([]);
-  const [count, setCount] = useState(0);
-  const [failed, setFailed] = useState(false);
-  const [page, setPage] = usePage("audit");
-  const next = useLatest();
-
-  function load() {
-    api
-      .get("/audit/logs/", { params: page > 1 ? { page } : {}, signal: next() })
-      .then((r) => {
-        setRows(r.data.results);
-        setCount(r.data.count ?? r.data.results.length);
-        setFailed(false);
-      })
-      .catch((e) => {
-        if (isCanceled(e)) return;
-        if (e.response?.status === 404 && page > 1) return setPage(1);
-        setFailed(true);
-        toast(apiError(e, t("common.loadFailed")), "error");
-      });
-  }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(load, [page]);
-
-  if (failed && !rows.length) return <LoadError onRetry={load} />;
-
-  if (!rows.length) {
-    return (
-      <div className="empty-state">
-        <Icon name="archive" size={40} className="es-icon" />
-        {t("common.empty")}
-      </div>
-    );
-  }
-
-  return (
-    <>
-      <div className="feed">
-        {rows.map((r) => (
-          <div className="feed-item" key={r.id}>
-            <div className="feed-icon"><Icon name={auditIcon(r.action)} size={17} /></div>
-            <div className="feed-body">
-              <div className="feed-action">{r.action}</div>
-              <div className="feed-meta">
-                {r.username || "—"} · {formatDateTime(r.created_at)}
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-      <Pager page={page} count={count} onPage={setPage} />
-    </>
-  );
-}
-
 export default function Receipts() {
   const { t } = useTranslation();
   const [tab, setTab] = useState("receipts");
@@ -693,7 +681,7 @@ export default function Receipts() {
         ]}
       />
       <div {...tabPanel("receipts", tab)}>
-        {tab === "receipts" ? <ReceiptsTab /> : <AuditTab />}
+        {tab === "receipts" ? <ReceiptsTab /> : <AuditJournal />}
       </div>
     </>
   );

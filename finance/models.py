@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.core.validators import MaxValueValidator
 from django.db import models
 from django.utils import timezone
 from django.utils.text import slugify
@@ -95,6 +96,18 @@ class ExpenseKind(models.Model):
     IMPROVEMENT = "IMPROVEMENT"
     TAX = "TAX"
     INTEREST = "INTEREST"
+    # Списания, которые не были тратой денег или пришли из другого учёта
+    # (2026-10-10): безнадёжный долг клиента, переделка по гарантии, курсовая
+    # разница. Операционные расходы блока «Переменные»; коды постоянны — на них
+    # ссылаются модули клиентов, продаж и поставок.
+    BAD_DEBT = "BAD_DEBT"
+    WARRANTY = "WARRANTY"
+    FX_DIFF = "FX_DIFF"
+
+    # Виды, траты которых НЕ двигают кассу: долг клиента списан, а деньги в
+    # ящик не приходили и не уходили. В ОПиУ это расход месяца, в ОДДС — ничего,
+    # в сверке — своя строка «Списанные долги» (`finance.reports.bridge`).
+    NO_CASH_CODES = (BAD_DEBT,)
 
     # Роли, траты которых уменьшают прибыль напрямую (капвложения — через
     # амортизацию, её считает отчёт). По ним же держится устаревший `in_profit`.
@@ -102,6 +115,11 @@ class ExpenseKind(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+    @property
+    def moves_cash(self) -> bool:
+        """Трата этого вида пишется в кассовую книгу расходом?"""
+        return self.role != self.Role.NOT_CASH and self.code not in self.NO_CASH_CODES
 
     @classmethod
     def role_for_block(cls, block) -> str:
@@ -186,6 +204,26 @@ class ExpenseEntry(models.Model):
         help_text=_("Первое число месяца выбытия. Пусто — до конца срока службы."),
     )
     note = models.TextField(_("примечание"), blank=True)
+    # Запись БЕЗ ДЕНЕГ: в кассовую книгу не пишется (2026-10-10). Две системные
+    # причины: начисление зарплаты по ведомости («начислено, не выплачено» —
+    # деньги пойдут выплатами) и карточка актива, купленного в рассрочку
+    # (амортизация считается от полной цены, а деньги идут платежами по
+    # активу, `asset`). Руками правятся только карточки активов.
+    is_cashless = models.BooleanField(
+        _("без денег"), default=False,
+        help_text=_("Начисление или карточка актива: в кассу не пишется."),
+    )
+    # Платёж по активу, купленному в рассрочку: деньги ушли (ОДДС — инвестиции),
+    # а в ОПиУ платёж не идёт — в прибыль актив попадает амортизацией карточки.
+    asset = models.ForeignKey(
+        "self", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="installments", verbose_name=_("актив"),
+    )
+    # Запись создана расписанием повторяющейся траты.
+    recurring = models.ForeignKey(
+        "finance.RecurringExpense", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="entries", verbose_name=_("повторяющаяся трата"),
+    )
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="expense_entries",
@@ -216,6 +254,16 @@ class ExpenseEntry(models.Model):
     @property
     def is_capitalized(self) -> bool:
         return self.useful_life_months is not None
+
+    @property
+    def is_asset_card(self) -> bool:
+        """Карточка актива в рассрочку: полная цена, амортизация, денег нет."""
+        return self.is_cashless and self.kind.role == ExpenseKind.Role.CAPEX
+
+    @property
+    def moves_cash(self) -> bool:
+        """Пишется ли трата в кассовую книгу расходом."""
+        return not self.is_cashless and self.kind.moves_cash
 
     @staticmethod
     def life_cap(kind, spent_at):
@@ -251,6 +299,7 @@ class ExpenseEntry(models.Model):
         if (
             self._state.adding
             and self.useful_life_months is None
+            and self.asset_id is None        # платёж по активу — не новая покупка
             and self.kind.role == ExpenseKind.Role.CAPEX
             and self.amount >= FinanceSettings.load().capitalization_threshold
         ):
@@ -363,6 +412,10 @@ class CashEntry(models.Model):
         # Обычный пересчёт (COUNT) — наоборот: недостача или излишек, и они
         # идут и в поток, и в прибыль.
         OPENING = "OPENING", _("Ввод начального остатка")
+        # Выплата зарплаты по ведомости (2026-10-10): аванс и расчёт сотруднику.
+        # В ОПиУ не идёт — зарплата там уже начислена за месяц (`PayrollAccrual`);
+        # здесь только деньги.
+        PAYROLL = "PAYROLL", _("Выплата зарплаты по ведомости")
         OTHER = "OTHER", _("Прочее")
 
     account = models.CharField(
@@ -413,6 +466,11 @@ class CashEntry(models.Model):
     # Запись создана системой, а не человеком: такие не правятся руками, иначе
     # касса разойдётся с чеками.
     is_auto = models.BooleanField(_("создана системой"), default=False)
+    # Отметка «сверено с выпиской» (2026-10-10): владелец идёт по банковской
+    # выписке и ставит галочку у каждой найденной операции. Только пометка —
+    # на деньги, остатки и отчёты она не влияет и замком периода не закрыта.
+    reconciled = models.BooleanField(_("сверено с выпиской"), default=False)
+    reconciled_at = models.DateTimeField(_("когда сверено"), null=True, blank=True)
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="cash_entries",
@@ -541,6 +599,22 @@ class FinanceSettings(models.Model):
         _("аренда помещения до"), null=True, blank=True,
         help_text=_("Ограничивает срок амортизации улучшений цеха. Пусто — 60 мес."),
     )
+    # Зарплата по ведомости (2026-10-10). Выплата зарплаты (не аванс), сделанная
+    # не позже этого числа месяца, по умолчанию относится к ПРОШЛОМУ месяцу:
+    # расчёт за сентябрь платят в начале октября. 0 — всегда к текущему месяцу.
+    # Период можно выбрать руками в форме выплаты — это лишь подсказка.
+    payroll_prev_month_until_day = models.PositiveSmallIntegerField(
+        _("расчёт за прошлый месяц — до числа"), default=31,
+        validators=[MaxValueValidator(31)],
+        help_text=_("Выплата зарплаты до этого числа по умолчанию — за прошлый месяц. 0 — всегда за текущий."),
+    )
+    # Доля мастера в себестоимости строки — ТОЛЬКО в отчётах маржи (PNL-05).
+    # ОПиУ она не касается: там зарплата уже расходом (ведомость), и вторая
+    # копия задвоила бы расход.
+    master_share_in_margin = models.BooleanField(
+        _("учитывать долю мастера в марже строки"), default=False,
+        help_text=_("Отчёты маржи по услугам вычтут долю мастера из маржи. В ОПиУ не влияет."),
+    )
     # Реферальная программа
     referral_bonus = models.DecimalField(
         _("бонус за приведённого клиента"), max_digits=14, decimal_places=2, default=Decimal("0"),
@@ -589,6 +663,15 @@ class TaxRate(models.Model):
         _("ставка, %"), max_digits=5, decimal_places=2,
         help_text=_("Процент от выручки месяца, например 4.00."),
     )
+    class Basis(models.TextChoices):
+        ACCRUAL = "ACCRUAL", _("По начислению (от выручки)")
+        CASH = "CASH", _("По кассе (от полученных денег)")
+
+    # Основа налога (PNL-14): с какой суммы месяца берётся ставка. История та
+    # же, что у ставки, — меняется с месяца начала и подчиняется замку периода.
+    basis = models.CharField(
+        _("основа налога"), max_length=10, choices=Basis.choices, default=Basis.ACCRUAL,
+    )
     note = models.CharField(_("примечание"), max_length=255, blank=True)
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
@@ -611,6 +694,17 @@ class TaxRate(models.Model):
         super().save(*args, **kwargs)
 
     @classmethod
+    def basis_for(cls, month) -> str:
+        """Основа налога месяца: по записи, действующей на его первое число."""
+        from .periods import month_start
+
+        row = (
+            cls.objects.filter(valid_from__lte=month_start(month))
+            .order_by("-valid_from").values_list("basis", flat=True).first()
+        )
+        return row or cls.Basis.ACCRUAL
+
+    @classmethod
     def rate_for(cls, month) -> Decimal:
         """Ставка (в процентах) месяца, в который попадает дата. Нет — 0."""
         from .periods import month_start
@@ -620,3 +714,64 @@ class TaxRate(models.Model):
             .order_by("-valid_from").values_list("rate", flat=True).first()
         )
         return row if row is not None else Decimal("0")
+
+
+class RecurringExpense(models.Model):
+    """Повторяющаяся трата: «аренда 25 000 каждого 10-го до декабря».
+
+    Система сама заводит обычные траты по расписанию: по одной на месяц, от
+    `start_month` до `until_month` (или до текущего месяца), в день `day`
+    (в коротком месяце — последний день). Запись вносится, когда её день
+    наступил, и не раньше: будущее не пишется. Месяц, закрытый замком периода,
+    пропускается и попадает в ответ отдельным списком. Повторный запуск ничего
+    не задвоит — месяц уже внесён, если есть трата с этой ссылкой и «за какой
+    месяц». Запускается командой `generate_recurring` и при открытии «Финансов».
+    """
+
+    kind = models.ForeignKey(
+        ExpenseKind, on_delete=models.PROTECT, related_name="recurring", verbose_name=_("вид расхода"),
+    )
+    name = models.CharField(_("за что / кому"), max_length=255, blank=True)
+    amount = models.DecimalField(_("сумма"), max_digits=14, decimal_places=2)
+    account = models.CharField(
+        _("чем заплатили"), max_length=10, choices=ExpenseEntry.Account.choices,
+        default=ExpenseEntry.Account.CASH,
+    )
+    day = models.PositiveSmallIntegerField(
+        _("число месяца"), default=1,
+        help_text=_("В коротком месяце — последний день."),
+    )
+    start_month = models.DateField(_("с месяца"))
+    until_month = models.DateField(_("по месяц включительно"), null=True, blank=True)
+    is_active = models.BooleanField(_("действует"), default=True)
+    note = models.CharField(_("примечание"), max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="recurring_expenses",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("повторяющаяся трата")
+        verbose_name_plural = _("повторяющиеся траты")
+        ordering = ["-is_active", "kind__block", "name", "id"]
+
+    def __str__(self) -> str:
+        return f"{self.kind.name}: {self.name} — {self.amount} (каждого {self.day}-го)"
+
+    def save(self, *args, **kwargs):
+        from .periods import month_start
+
+        self.start_month = month_start(self.start_month)
+        if self.until_month:
+            self.until_month = month_start(self.until_month)
+        super().save(*args, **kwargs)
+
+
+from .payroll_models import (  # noqa: E402,F401  (модели ведомости — в своём файле)
+    PayRate,
+    PayScheme,
+    PayrollAccrual,
+    PayrollAdjustment,
+    PayrollPayment,
+)

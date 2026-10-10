@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import (
-    Case, DecimalField, Exists, F, IntegerField, OuterRef, Q, Sum, Value, When,
+    Case, DecimalField, Exists, F, IntegerField, OuterRef, Q, Subquery, Sum, Value, When,
 )
 from django.db.models.functions import Coalesce
 from django.utils import timezone
@@ -25,27 +25,38 @@ from warehouse.models import InventoryLog
 from warehouse.rolls import InsufficientStock
 
 from . import idempotency
-from .models import Receipt, TransactionItem
+from .models import Quote, Receipt, TransactionItem
 from .reporting import day_after, day_start
 from .sale_service import (
     DeleteRejected,
     ItemEditRejected,
+    NeedsConfirmation,
     OrderClosed,
+    OrderRejected,
     PaymentRejected,
     add_items_to_receipt,
     apply_payment,
+    cancel_payment,
+    check_order_limits,
     create_sale,
     day_to_moment,
     delete_receipt,
+    drop_writeoff_expenses,
     give_change,
+    issue_items,
     lock_receipt,
+    move_first_payment_cash,
     parse_amount,
     parse_paid_on,
+    receipt_owed,
     receipt_summary,
     refund_receipt,
+    reprice_receipt,
     return_applied_change,
     strip_cost,
+    undo_refund,
     update_receipt_items,
+    writeoff_total,
 )
 from .serializers import (
     RefundSerializer,
@@ -59,7 +70,8 @@ from .serializers import (
 _FULFILLMENT_ORDER = {
     Receipt.FulfillmentStatus.PROCESSING: 0,
     Receipt.FulfillmentStatus.READY: 1,
-    Receipt.FulfillmentStatus.ISSUED: 2,
+    Receipt.FulfillmentStatus.PARTIALLY_ISSUED: 2,
+    Receipt.FulfillmentStatus.ISSUED: 3,
 }
 
 
@@ -99,6 +111,17 @@ def _receipt_lines_text(receipt: Receipt) -> str:
     return "\n".join(lines)
 
 
+def _line_executors(receipt: Receipt) -> dict:
+    """{id строки работы: (название, ФИО исполнителя или "")} — для журнала."""
+    out = {}
+    for item in receipt.items.filter(type=TransactionItem.Type.SERVICE).select_related(
+        "service", "executor"
+    ):
+        label = item.service.name if item.service_id else "работа"
+        out[item.pk] = (label, item.executor.full_name if item.executor_id else "")
+    return out
+
+
 def _parse_date(value):
     """'YYYY-MM-DD' → date, иначе None (пустой/битый ввод = без фильтра)."""
     from datetime import date as _date
@@ -125,10 +148,17 @@ def _price_override_forbidden(items, user):
     складовщик с консолью браузера оформлял лист и резку за 0 при
     себестоимости 4 087. Молча выбрасывать значения нельзя — отвечаем отказом,
     чтобы расхождение «что просили / что оформили» было видно сразу.
+
+    Складовщику цену можно вписать там, где это разрешено (материал клиента,
+    гравировка, отходы, услуга с флагом «по договорённости»), но не ниже
+    границы из настроек (`staff_min_price_percent`, % от каталога) и не нулевую.
     """
     if user.is_admin_role:
         return None
+    from services.models import PricingSettings
+
     only_admin = "Цену материала и ставку резки при продаже правит только администратор."
+    percent = PricingSettings.load().staff_min_price_percent
     for item in items:
         if item.get("material_price") is not None:
             return only_admin
@@ -148,7 +178,63 @@ def _price_override_forbidden(items, user):
                 "Работа за 0 сом — это подарок, и оформить его может только "
                 "администратор. Укажите цену больше нуля."
             )
+        floor = _staff_rate_floor(item, percent)
+        if floor is not None and Decimal(str(rate)) < floor:
+            return (
+                f"Цена работы ниже допустимой: складовщик не может поставить меньше "
+                f"{floor} сом ({percent}% от каталога). Нужна цена выше — позовите администратора."
+            )
     return None
+
+
+def _ignored_price_fields(items):
+    """Текст ошибки, если цена вписана туда, где она ничего не значит, иначе None.
+
+    `material_price` у услуги без материала по площади (монтаж, буквы,
+    гравировка, отходы) раньше принималась и молча терялась — кассир видел в
+    чеке каталожную цену и думал, что вписал свою. Права проверяются раньше
+    (`_price_override_forbidden`): складовщику здесь 403, а не подсказка.
+    """
+    for item in items:
+        service = item.get("service")
+        if (
+            item.get("type") == TransactionItem.Type.SERVICE
+            and item.get("material_price") is not None
+            and not (service is not None and service.uses_material and item.get("material") is not None)
+        ):
+            return (
+                f"«{service.name if service else 'Услуга'}»: цена материала вписывается "
+                "только у реза и монтажа по площади с выбранным материалом. Цену самой "
+                "услуги задаёт поле cut_rate."
+            )
+    return None
+
+
+def _staff_rate_floor(item, percent):
+    """Нижняя граница ручной цены работы складовщика: % от каталожной ставки.
+    None — границы нет (выключена, чужой материал или в каталоге ставки нет)."""
+    from decimal import ROUND_CEILING
+
+    from services.pricing import resolve_rate
+
+    service = item.get("service")
+    if not percent or percent <= 0 or service is None or item.get("own_material"):
+        return None
+    if service.uses_free_measure:
+        reference = {
+            "METER": service.rate_per_pm, "PIECE": service.rate_per_piece,
+        }.get(item.get("mode"), service.rate_flat)
+    elif service.uses_area:
+        reference = resolve_rate(service, item.get("material")).rate
+    elif service.uses_pieces:
+        reference = service.rate_per_piece
+    else:
+        reference = service.base_price
+    if not reference or reference <= 0:
+        return None
+    return (Decimal(reference) * percent / Decimal("100")).quantize(
+        Decimal("0.01"), rounding=ROUND_CEILING
+    )
 
 
 def _order_pricing(data, client, user):
@@ -278,8 +364,9 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     делается: поиск ищет одно слово, а не пересечение двух условий.
     """
 
-    queryset = Receipt.objects.select_related("client", "cashier").prefetch_related(
-        "items__material", "items__service", "items__roll", "payments"
+    queryset = Receipt.objects.select_related("client", "cashier", "warranty_of").prefetch_related(
+        "items__material", "items__service", "items__roll", "items__work_material",
+        "items__executor", "payments__created_by", "warranty_orders__items",
     )
     serializer_class = ReceiptSerializer
     # Бухгалтер чеки видит (с себестоимостью и маржой), но не оформляет: он
@@ -287,12 +374,17 @@ class ReceiptViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsNotAccountant]
     filterset_fields = ["payment_method", "payment_status", "status", "cashier", "client"]
     filter_backends = [DjangoFilterBackend, ReceiptSearchFilter, OrderingFilter]
-    search_fields = ["order_number", "title", "client__phone", "client__full_name", "client__company_name"]
+    # Поиск видит и состав заказа (XL-10): материал, услугу и комментарий к
+    # строке — «найти все заказы с акрилом 3 мм» больше не требует выгрузки.
+    search_fields = [
+        "order_number", "title", "client__phone", "client__full_name", "client__company_name",
+        "buyer_name", "items__material__name", "items__service__name", "items__note",
+    ]
     # По умолчанию: у кого долг выше — тот вверху, затем по дате (новые выше).
     # Долг — вычисляемое поле, поэтому аннотируем `_debt` в get_queryset.
     ordering = ["-_debt", "-created_at"]
     # Разрешённые колонки для сортировки по клику (?ordering=...).
-    ordering_fields = ["_debt", "created_at", "total_price", "change_due"]
+    ordering_fields = ["_debt", "created_at", "total_price", "change_due", "order_number"]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -322,7 +414,19 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         # закрыты отдельной проверкой, финансовые разделы — паролем.
         # Долг = остаток (сумма − оплачено − возвраты) для открытых чеков, иначе 0.
         # Совпадает с логикой свойства Receipt.debt; используется для сортировки.
+        from clients.models import BalanceOffset
+
+        advance_sum = (
+            BalanceOffset.objects.filter(receipt=OuterRef("pk"), source=BalanceOffset.Source.ADVANCE)
+            .values("receipt").annotate(v=Sum("amount")).values("v")[:1]
+        )
         return qs.annotate(
+            # Зачтено из аванса клиента (волна 2) — одним подзапросом на страницу.
+            _advance_applied=Coalesce(
+                Subquery(advance_sum, output_field=DecimalField(max_digits=14, decimal_places=2)),
+                Value(Decimal("0")),
+                output_field=DecimalField(max_digits=14, decimal_places=2),
+            ),
             # Признак «есть услуга» — одним запросом на страницу, а не
             # по запросу на каждый чек (`Receipt.has_service`).
             _has_service=Exists(
@@ -507,6 +611,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         # полдень — чек и его списание уезжали в хронологии, а журнал действий
         # уверял «client, order_date, title», хотя ничего из этого не трогали.
         changed = []
+        old_created_at = receipt.created_at
         if "title" in request.data:
             title = (request.data.get("title") or "").strip()[:255]
             if title != receipt.title:
@@ -549,8 +654,15 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 changed.append("order_date")
         if not changed:
             return self._fresh_response(receipt)
+        old_day = timezone.localtime(old_created_at).date()
         receipt.save(update_fields=["title", "client", "created_at", "updated_at"])
         if moment is not None:
+            # Деньги первой оплаты, лежавшие в кассе днём заказа, едут за ним
+            # (cash-04): иначе касса и ОДДС старого дня остались бы с чужим
+            # приходом.
+            move_first_payment_cash(
+                receipt, old_day, timezone.localtime(moment).date(), user=request.user
+            )
             # Списание материала передвигаем следом: дата заказа опорная для
             # ВСЕЙ отчётности, и расход, оставшийся в прежнем месяце, увёл бы
             # складской лист от выручки.
@@ -653,9 +765,37 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         response["Idempotent-Replay"] = "true"
         return response
 
+    @action(detail=False, methods=["get"], url_path="export")
+    def export(self, request):
+        """GET /receipts/export/ — CSV «Чеки со строками» (волна 2) с теми же
+        фильтрами, поиском и сортировкой, что список, — все страницы сразу.
+        Себестоимость — только тем, кто видит закупку."""
+        from .export import receipts_csv
+
+        queryset = self.filter_queryset(self.get_queryset()).select_related("client", "cashier")
+        return receipts_csv(queryset, with_cost=getattr(request.user, "sees_money", False))
+
     @action(detail=False, methods=["post"], url_path="checkout")
     def checkout(self, request):
-        """POST /receipts/checkout/ — create a sale (the main selling flow)."""
+        """POST /receipts/checkout/ — create a sale (the main selling flow).
+
+        Сомнительный заказ (строка выше порога, деталь больше листа, долг выше
+        лимита) без `confirmed_warnings` отвечает 409 и ничего не создаёт:
+        касса показывает предупреждения и присылает тот же заказ с кодами,
+        которые человек подтвердил.
+        """
+        return self._checkout(request, dry_run=False)
+
+    @action(detail=False, methods=["post"], url_path="preview")
+    def preview(self, request):
+        """POST /receipts/preview/ — тот же расчёт, что и при оформлении, но
+        НИЧЕГО не сохраняется (транзакция откатывается): цены по правилам,
+        итог, предупреждения и — только для админа и бухгалтера — себестоимость
+        и маржа до оформления (CALC-08). Себестоимость — предпросмотр по
+        партиям FIFO на сейчас; складовщик её не получает."""
+        return self._checkout(request, dry_run=True)
+
+    def _checkout(self, request, *, dry_run):
         serializer = SaleCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -663,15 +803,25 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         forbidden = _price_override_forbidden(data["items"], request.user)
         if forbidden:
             return Response({"detail": forbidden}, status=status.HTTP_403_FORBIDDEN)
+        ignored = _ignored_price_fields(data["items"])
+        if ignored:
+            return Response({"detail": ignored}, status=status.HTTP_400_BAD_REQUEST)
+        # Гарантийный заказ (бесплатная переделка) оформляет только админ: это
+        # подарок, как и цена 0.
+        if data.get("is_warranty") and not request.user.is_admin_role:
+            return Response(
+                {"detail": "Гарантийный заказ (переделку за счёт цеха) оформляет только администратор."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         try:
-            idem_key = idempotency.key_from(request)
+            idem_key = None if dry_run else idempotency.key_from(request)
         except idempotency.InvalidKey as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         client = data.get("client_id")
         name_mismatch = False
-        if client is None and data.get("client"):
+        if client is None and data.get("client") and not dry_run:
             client, name_mismatch = self._resolve_inline_client(data["client"])
 
         pricing, refused = _order_pricing(data, client, request.user)
@@ -699,7 +849,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         # иначе под погашение попал бы и сам новый заказ, и с клиента взяли бы
         # больше, чем он должен. Право то же, что у «Погасить долг» в карточке
         # клиента, — только админ: складовщик деньги за прошлые заказы не берёт.
-        pay_debt = bool(data.get("pay_debt")) and client is not None
+        pay_debt = bool(data.get("pay_debt")) and client is not None and not dry_run
         if pay_debt and not request.user.is_admin_role:
             return Response(
                 {"detail": "Погасить долг клиента может только администратор."},
@@ -708,19 +858,24 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         debt_ids = (
             [r.id for r in client.receipts.all() if r.debt > 0] if pay_debt else []
         )
+        # Входящий долг на дату переезда (волна 2) гасится вместе с заказами — первым.
+        from clients.opening import opening_debt
+
+        pay_opening = pay_debt and opening_debt(client) > 0
         # Долг гасится ТЕМИ ЖЕ деньгами, что принесли за заказ: «Платит сейчас»
         # — всё, что клиент отдал, сначала заказ, остаток в долги. Раньше сумма
         # сверх заказа становилась сдачей, а долги закрывались отдельно и
         # целиком — кассир, вписавший «заказ + долг», получал двойной счёт.
         # Пустая сумма без «Вся сумма» — платить долг нечем; молча закрывать
         # его нельзя, это и есть тот самый двойной счёт наоборот.
-        if debt_ids and data.get("amount_paid") is None and not data.get("pay_full"):
+        if (debt_ids or pay_opening) and data.get("amount_paid") is None and not data.get("pay_full"):
             return Response(
                 {"detail": "Укажите, сколько принёс клиент: из этой суммы закрывается "
                            "заказ, а остаток гасит долг. Или нажмите «Вся сумма»."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        payload = None
         try:
             # Ключ повтора занимается в той же транзакции, что и продажа: упала
             # продажа — откатился и ключ, повтор пройдёт как первый.
@@ -736,23 +891,68 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 receipt = create_sale(
                     client=client,
                     cashier=request.user,
-                    payment_method=data["payment_method"],
+                    payment_method=(
+                        Receipt.PaymentMethod.CASH if dry_run else data["payment_method"]
+                    ),
                     items_data=data["items"],
                     amount_paid=data.get("amount_paid"),
                     pay_full=bool(data.get("pay_full")),
                     use_change=bool(data.get("use_change")),
+                    use_advance=bool(data.get("use_advance")),
                     title=data.get("title", ""),
                     created_at=day_to_moment(order_date),
                     pay_debt_ids=debt_ids,
+                    pay_opening=pay_opening,
                     is_urgent=is_urgent,
                     urgency_percent=urgency_percent,
                     discount_percent=discount_percent,
+                    is_warranty=bool(data.get("is_warranty")),
+                    warranty_of=data.get("warranty_of"),
+                    warranty_reason=data.get("warranty_reason", ""),
+                    warranty_culprit=data.get("warranty_culprit", ""),
+                    buyer_name=data.get("buyer_name", ""),
                 )
+                live = list(
+                    receipt.items.filter(is_returned=False)
+                    .select_related("material", "service", "work_material")
+                )
+                # Потолок складовщика и «спросить человека»: без подтверждения
+                # заказ откатывается целиком (в предпросмотре — только
+                # возвращается списком, чтобы показать до оформления).
+                receipt.order_warnings = check_order_limits(
+                    receipt, live, request.user, data.get("confirmed_warnings") or [],
+                    raise_pending=not dry_run,
+                )
+                # Долг без клиента — взыскать не с кого: хотя бы имя покупателя.
+                if (
+                    not dry_run and receipt.client_id is None
+                    and receipt.debt > 0 and not receipt.buyer_name
+                ):
+                    raise OrderRejected(
+                        "Заказ в долг без клиента: укажите имя покупателя "
+                        "(или выберите клиента) — иначе взыскать долг не с кого."
+                    )
                 if record is not None:
                     record.receipt = receipt
                     record.save(update_fields=["receipt"])
+                if dry_run:
+                    payload = self._preview_payload(receipt, request)
+                    transaction.set_rollback(True)
         except InsufficientStock as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except OrderRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except NeedsConfirmation as e:
+            return Response(
+                {
+                    "detail": "Проверьте заказ: " + " ".join(w["message"] for w in e.warnings),
+                    "needs_confirmation": True,
+                    "warnings": e.warnings,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        if dry_run:
+            return Response(payload, status=status.HTTP_200_OK)
 
         debt_paid = getattr(receipt, "debt_paid", Decimal("0"))
         debt_error = getattr(receipt, "debt_error", "")
@@ -763,11 +963,26 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 f"{receipt.order_number}: {debt_paid} сом",
             )
 
+        # Заказ оформлен из КП — КП закрывается (заказ ссылается на него).
+        if data.get("quote_id"):
+            Quote.objects.filter(pk=data["quote_id"], status=Quote.Status.ACTIVE).update(
+                status=Quote.Status.ORDERED, receipt=receipt,
+            )
+
         # Send the electronic receipt to the customer's Telegram (if linked).
-        if client:
+        if client and not receipt.is_warranty:
             send_customer_receipt(client, receipt, _receipt_lines_text(receipt))
 
-        AuditLog.record(request.user, f"Оформлен чек {receipt.order_number} на {receipt.total_price} сом")
+        if receipt.is_warranty:
+            AuditLog.record(
+                request.user,
+                f"Оформлена гарантийная переделка {receipt.order_number} к заказу "
+                f"{receipt.warranty_of.order_number if receipt.warranty_of_id else '—'}: "
+                f"{receipt.warranty_reason}"
+                + (f" (виновник: {receipt.warranty_culprit})" if receipt.warranty_culprit else ""),
+            )
+        else:
+            AuditLog.record(request.user, f"Оформлен чек {receipt.order_number} на {receipt.total_price} сом")
         payload = ReceiptSerializer(receipt, context={"request": request}).data
         # Предупреждения оформления (сейчас одно: «себестоимость неизвестна») —
         # продажу они не блокируют, но кассир и владелец должны их видеть.
@@ -776,15 +991,33 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         payload["client_name_mismatch"] = name_mismatch
         # Погашение долга — не часть чека, но кассир должен увидеть, что с ним
         # стало: сколько ушло на прошлые заказы и не отказал ли сервер.
-        if debt_ids:
+        if debt_ids or pay_opening:
             payload["debt_paid"] = debt_paid
             if debt_error:
                 payload["debt_error"] = debt_error
         return Response(payload, status=status.HTTP_201_CREATED)
 
+    def _preview_payload(self, receipt, request):
+        """Ответ предпросмотра: чек так, как он лёг бы, без сохранения.
+        Себестоимость и маржа — через `ReceiptSerializer` (только тем, кто видит
+        деньги); складовщик получает те же цены без закупочных цифр."""
+        fresh = self.get_queryset().get(pk=receipt.pk)
+        payload = dict(ReceiptSerializer(fresh, context={"request": request}).data)
+        payload["dry_run"] = True
+        payload["warnings"] = strip_cost(getattr(receipt, "cost_warnings", []), request.user)
+        payload["confirm_warnings"] = getattr(receipt, "order_warnings", [])
+        return payload
+
     @action(detail=True, methods=["post"])
     def refund(self, request, pk=None):
-        """POST /receipts/<id>/refund/ — refund whole receipt or given items."""
+        """POST /receipts/<id>/refund/ — refund whole receipt or given items.
+
+        Тело: `item_ids` (пусто — весь заказ), `method` (с какого счёта отдали
+        деньги; пусто — с того, куда пришли), `reason`. Не-админ, возвращающий
+        ОПЛАЧЕННЫЙ заказ, обязан назвать причину — она идёт в журнал действий
+        (STAFF-08). Часть количества строки — `quantities: [{id, quantity}]`
+        (волна 2): часть отделяется в свою строку, сумма заказа не меняется.
+        """
         receipt = self.get_object()
         # Возврат датируется ДНЁМ ОФОРМЛЕНИЯ и двигает цифры этого дня, а не
         # месяца заказа. Поэтому и замок проверяем по сегодняшней дате: заказ
@@ -792,13 +1025,21 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         ensure_open(timezone.localdate(), "Оформить возврат этой датой")
         serializer = RefundSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        reason = (serializer.validated_data.get("reason") or "").strip()
+        if not request.user.is_admin_role and receipt.amount_paid > 0 and not reason:
+            return Response(
+                {"reason": ["Укажите причину возврата оплаченного заказа — она попадёт в журнал."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             receipt = refund_receipt(
                 receipt,
                 item_ids=serializer.validated_data.get("item_ids") or None,
                 user=request.user,
+                method=serializer.validated_data.get("method") or None,
+                quantities=serializer.validated_data.get("quantities") or None,
             )
-        except ItemEditRejected as e:
+        except (ItemEditRejected, PaymentRejected) as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         if receipt.client:
             notify_customer(
@@ -806,29 +1047,105 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 f"↩️ Оформлен возврат по чеку №{receipt.order_number}. "
                 f"Сумма возврата: {receipt.refunded_amount} сом.",
             )
-        AuditLog.record(request.user, f"Возврат по чеку {receipt.order_number}")
+        AuditLog.record(
+            request.user,
+            f"Возврат по чеку {receipt.order_number}" + (f": {reason}" if reason else ""),
+        )
         return self._fresh_response(receipt)
 
-    # Деньги и откат оплаты — только админ: складовщик оформляет продажу,
-    # но не решает, погашен ли долг и не отменяет принятую оплату.
-    @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
+    @action(detail=True, methods=["post"], url_path="undo-refund", permission_classes=[IsAdmin])
+    def undo_refund_action(self, request, pk=None):
+        """POST /receipts/<id>/undo-refund/ — отменить возврат (админ).
+
+        Тело: `item_ids` — какие возвращённые строки вернуть в продажу (пусто —
+        все). Материал снова списывается со склада, деньги, отданные клиенту,
+        возвращаются в кассу приходом по статье «Возврат». Возврат — событие
+        своего дня, поэтому замок периода проверяется по дню возврата и по
+        сегодняшнему.
+        """
+        receipt = self.get_object()
+        ensure_open(timezone.localdate(), "Отменить возврат этой датой")
+        ids = request.data.get("item_ids") or None
+        if ids is not None and not isinstance(ids, list):
+            return Response({"item_ids": ["Ожидается список."]}, status=status.HTTP_400_BAD_REQUEST)
+        lines = receipt.items.filter(is_returned=True)
+        if ids:
+            lines = lines.filter(id__in=ids)
+        for item in lines:
+            if item.returned_at:
+                ensure_open(timezone.localtime(item.returned_at), "Отменить возврат закрытого периода")
+        try:
+            receipt = undo_refund(receipt, item_ids=ids, user=request.user)
+        except (ItemEditRejected, InsufficientStock) as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        AuditLog.record(request.user, f"Отменён возврат по чеку {receipt.order_number}")
+        return self._fresh_response(receipt)
+
+    # Откат оплаты и списание долга — только админ. Принять оплату долга может и
+    # складовщик (CLI-08): запись оплаты хранит, кто её принял, админ видит это
+    # и может отменить. Бухгалтер, как и раньше, денег не принимает (403).
+    @action(detail=True, methods=["post"])
     def pay(self, request, pk=None):
         """POST /receipts/<id>/pay/ — принять оплату долга (полную или частичную).
 
         Увеличивает amount_paid; когда долг погашен — статус становится PAID.
         Принесли больше долга — лишнее записывается СДАЧЕЙ (`keep_change`), а не
         отбрасывается: деньги в кассе, и цех должен их клиенту.
-        Необязательные `paid_on` (дата задним числом) и `method` попадают в
-        запись оплаты; общая выплата за несколько заказов — в разделе клиентов
-        (POST /clients/<id>/pay-debt/).
+        Необязательные `paid_on` (дата задним числом, только админ), `method` и
+        `note` попадают в запись оплаты. `use_change` — сначала закрыть долг
+        сдачей клиента с его других заказов (`amount` тогда — наличные). Сумма
+        больше долга в 3+ раза без `confirm_overpay` — 409: лишний ноль в
+        «5000» вместо «500» не должен уйти в сдачу. Общая выплата за несколько
+        заказов — в разделе клиентов (POST /clients/<id>/pay-debt/).
         """
         receipt = self.get_object()
+        is_admin = request.user.is_admin_role
+        # Один выключатель на оба пути приёма долга (этот и «общая выплата» в
+        # клиентах): владелец решает, берёт ли деньги складовщик (CLI-08).
+        if not is_admin:
+            from clients.models import ClientSettings
+
+            if not ClientSettings.load().storekeeper_takes_debt:
+                return Response(
+                    {"detail": "Оплату долга принимает только администратор."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
         # Разбор даты — внутри try: кривая дата это 400, а не пятисотка.
         try:
             paid_on = parse_paid_on(request.data.get("paid_on"))
+            amount = parse_amount(request.data.get("amount"))
         except PaymentRejected as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        if not is_admin and paid_on and paid_on != timezone.localdate():
+            return Response(
+                {"detail": "Принять оплату задним числом может только администратор."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        method_raw = request.data.get("method") or None
+        if not is_admin and str(method_raw or "").upper() == "WRITE_OFF":
+            return Response(
+                {"detail": "Списать долг может только администратор."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         ensure_open(paid_on or timezone.localdate(), "Принять оплату этой датой")
+        writing_off = str(method_raw or "").upper() == "WRITE_OFF"
+        owed = receipt_owed(receipt)
+        if (
+            amount is not None and owed > 0 and not writing_off
+            and amount > owed * 3 and not request.data.get("confirm_overpay")
+        ):
+            warning = {
+                "code": "overpay", "amount": amount, "debt": owed,
+                "message": (
+                    f"Вы вводите {amount} сом при долге {owed} сом — больше в "
+                    f"{(amount / owed).quantize(Decimal('0.1'))} раза. Излишек останется "
+                    "сдачей клиенту. Всё верно?"
+                ),
+            }
+            return Response(
+                {"detail": warning["message"], "needs_confirmation": True, "warnings": [warning]},
+                status=status.HTTP_409_CONFLICT,
+            )
         try:
             idem_key = idempotency.key_from(request)
         except idempotency.InvalidKey as e:
@@ -843,13 +1160,15 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                     )
                     if replay:
                         return self._replay_response(record, checkout=False)
-                amount = apply_payment(
+                credited = apply_payment(
                     receipt,
-                    parse_amount(request.data.get("amount")),
+                    amount,
                     user=request.user,
                     paid_on=paid_on,
-                    method=request.data.get("method") or None,
+                    method=method_raw,
+                    note=(request.data.get("note") or "")[:255],
                     keep_change=True,
+                    use_change=bool(request.data.get("use_change")),
                 )
                 if record is not None:
                     record.receipt = receipt
@@ -863,11 +1182,75 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 if receipt.payment_status == Receipt.PaymentStatus.PAID
                 else f"Остаток долга: {receipt.debt} сом."
             )
-            notify_customer(
-                receipt.client,
-                f"💰 Принята оплата {amount} сом по чеку №{receipt.order_number}. {tail}",
+            if not writing_off:
+                notify_customer(
+                    receipt.client,
+                    f"💰 Принята оплата {credited} сом по чеку №{receipt.order_number}. {tail}",
+                )
+        label = "Списан долг" if writing_off else "Оплата долга"
+        AuditLog.record(request.user, f"{label} по чеку {receipt.order_number}: +{credited} сом")
+        return self._fresh_response(receipt)
+
+    @action(detail=True, methods=["post"], url_path="write-off", permission_classes=[IsAdmin])
+    def write_off(self, request, pk=None):
+        """POST /receipts/<id>/write-off/ {amount?, note, paid_on?} — списать
+        безнадёжный долг по заказу (админ).
+
+        Долг уменьшается (пусто в `amount` — весь), денег в кассе нет, в ОПиУ
+        появляется расход «Безнадёжные долги» (вид BAD_DEBT) датой списания.
+        Причина (`note`) обязательна: списание — потеря, и по ней вспоминают,
+        почему деньги не пришли. Общий путь для нескольких заказов клиента —
+        `pay-debt` с `method=WRITE_OFF`.
+        """
+        receipt = self.get_object()
+        note = (request.data.get("note") or "").strip()
+        if not note:
+            return Response(
+                {"note": ["Укажите причину списания долга."]}, status=status.HTTP_400_BAD_REQUEST
             )
-        AuditLog.record(request.user, f"Оплата долга по чеку {receipt.order_number}: +{amount} сом")
+        try:
+            paid_on = parse_paid_on(request.data.get("paid_on"))
+            amount = parse_amount(request.data.get("amount"))
+        except PaymentRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        ensure_open(paid_on or timezone.localdate(), "Списать долг этой датой")
+        try:
+            credited = apply_payment(
+                receipt, amount, user=request.user, paid_on=paid_on,
+                method="WRITE_OFF", note=note[:255],
+            )
+        except PaymentRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        AuditLog.record(
+            request.user,
+            f"Списан безнадёжный долг по чеку {receipt.order_number}: {credited} сом ({note})",
+        )
+        return self._fresh_response(receipt)
+
+    @action(detail=True, methods=["post"], url_path="cancel-payment", permission_classes=[IsAdmin])
+    def cancel_payment_action(self, request, pk=None):
+        """POST /receipts/<id>/cancel-payment/ {payment, reason?} — отменить ОДНУ
+        принятую оплату долга (админ), а не весь заказ.
+
+        Запись оплаты убирается, в кассу пишется встречная запись (исходная
+        остаётся в книге), в журнале действий — кто, что и почему. Замок
+        периода — по СЕГОДНЯШНЕЙ дате: встречная запись ложится сегодня и
+        закрытый месяц не меняет.
+        """
+        receipt = self.get_object()
+        ensure_open(timezone.localdate(), "Отменить оплату этой датой")
+        reason = (request.data.get("reason") or "").strip()[:200]
+        try:
+            amount = cancel_payment(
+                receipt, request.data.get("payment"), user=request.user, reason=reason
+            )
+        except PaymentRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        AuditLog.record(
+            request.user,
+            f"Отмена оплаты по чеку {receipt.order_number}: −{amount} сом"
+            + (f" ({reason})" if reason else ""),
+        )
         return self._fresh_response(receipt)
 
     @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
@@ -879,7 +1262,10 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         отгружён при продаже). Недоступно для отменённых и возвращённых чеков.
         """
         receipt = self.get_object()
-        ensure_open(timezone.localtime(receipt.created_at), "Откатить оплату закрытого периода")
+        # Встречная запись в кассу ложится СЕГОДНЯ, выручка заказа не меняется
+        # (она по дате заказа) — поэтому замок по сегодняшнему дню, а не по дате
+        # заказа: оплату по заказу закрытого месяца откатить можно.
+        ensure_open(timezone.localdate(), "Откатить оплату этой датой")
         # Одна транзакция с замком на чек: раньше откат шёл по частям без
         # `atomic`, и два одновременных запроса писали по встречной записи в
         # кассу (UNPAY дважды), а упавший посередине оставлял чек наполовину
@@ -915,8 +1301,12 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         # приходила — и уходить ей неоткуда. Раньше она списывалась тоже:
         # заказ на 60, закрытый сдачей, после отката уводил кассу в −60, а
         # клиент терял свою сдачу и снова был должен 60 — платил дважды.
-        returned_cash = returned - receipt.change_applied + receipt.change_due
+        # Списанный долг денег в кассу не приносил — откатывать нечего, а его
+        # расход «Безнадёжные долги» уходит вместе с оплатой.
+        written_off = writeoff_total(receipt)
+        returned_cash = returned - receipt.change_applied + receipt.change_due - written_off
         own_change = receipt.change_due
+        drop_writeoff_expenses(receipt)
         # Сдача клиента возвращается ему — на другой его заказ, а если других
         # нет, то сдачей на этот же (`return_applied_change`).
         return_applied_change(receipt)
@@ -959,6 +1349,7 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         before = receipt_summary(receipt)
+        executors_before = _line_executors(receipt)
         try:
             update_receipt_items(receipt, changes, user=request.user)
         except ItemEditRejected as e:
@@ -967,11 +1358,27 @@ class ReceiptViewSet(viewsets.ModelViewSet):
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
         receipt.refresh_from_db()
-        AuditLog.record(
-            request.user,
-            f"Правка состава чека {receipt.order_number}: было {before} → стало "
-            f"{receipt_summary(receipt)}",
+        only_executors = all(
+            isinstance(c, dict) and set(c) <= {"id", "executor"} for c in changes
         )
+        if not only_executors:
+            AuditLog.record(
+                request.user,
+                f"Правка состава чека {receipt.order_number}: было {before} → стало "
+                f"{receipt_summary(receipt)}",
+            )
+        # Исполнитель работы — отдельной строкой журнала «было → стало»: от него
+        # зависит, кому в ведомости пойдёт выработка.
+        executors_after = _line_executors(receipt)
+        for item_id, (label, was) in executors_before.items():
+            now = executors_after.get(item_id, (label, was))[1]
+            if now != was:
+                AuditLog.record(
+                    request.user,
+                    f"Исполнитель в чеке {receipt.order_number}, строка «{label}»: "
+                    f"{was or 'не указан'} → {now or 'не указан'}",
+                    kind="order",
+                )
         response = self._fresh_response(receipt)
         response.data["warnings"] = strip_cost(getattr(receipt, "cost_warnings", []), request.user)
         return response
@@ -992,7 +1399,10 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         """
         receipt = self.get_object()
         try:
-            given = give_change(receipt, parse_amount(request.data.get("amount")), user=request.user)
+            given = give_change(
+                receipt, parse_amount(request.data.get("amount")), user=request.user,
+                method=request.data.get("method") or None,
+            )
         except PaymentRejected as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1025,12 +1435,22 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         forbidden = _price_override_forbidden(serializer.validated_data, request.user)
         if forbidden:
             return Response({"detail": forbidden}, status=status.HTTP_403_FORBIDDEN)
+        confirmed = request.data.get("confirmed_warnings") or []
         try:
             receipt, surcharge = add_items_to_receipt(
-                receipt, serializer.validated_data, user=request.user
+                receipt, serializer.validated_data, user=request.user, confirmed=confirmed,
             )
-        except (OrderClosed, InsufficientStock) as e:
+        except (OrderClosed, InsufficientStock, OrderRejected) as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except NeedsConfirmation as e:
+            return Response(
+                {
+                    "detail": "Проверьте заказ: " + " ".join(w["message"] for w in e.warnings),
+                    "needs_confirmation": True,
+                    "warnings": e.warnings,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         if receipt.client and surcharge:
             notify_customer(
                 receipt.client,
@@ -1079,10 +1499,26 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         was = receipt.fulfillment_status
         if was == status_value:
             return self._fresh_response(receipt)
+        if status_value == Receipt.FulfillmentStatus.PARTIALLY_ISSUED:
+            raise ItemEditRejected(
+                "«Выдан частично» ставится выдачей по позициям (POST …/issue/): "
+                "статус сам не знает, что именно отдали."
+            )
         receipt.fulfillment_status = status_value
         receipt.save(update_fields=["fulfillment_status", "updated_at"])
-        if receipt.client:
-            notify_customer(receipt.client, FULFILLMENT_MESSAGES[was, status_value])
+        # Выдача целиком отмечает все позиции выданными; откат из «Выдан» (или
+        # «частично») снимает отметки — иначе статус и позиции разошлись бы.
+        lines = receipt.items.filter(is_returned=False)
+        if status_value == Receipt.FulfillmentStatus.ISSUED:
+            for item in lines:
+                if item.issued_qty != item.quantity:
+                    item.issued_qty = item.quantity
+                    item.save(update_fields=["issued_qty"])
+        elif was in (Receipt.FulfillmentStatus.ISSUED, Receipt.FulfillmentStatus.PARTIALLY_ISSUED):
+            lines.update(issued_qty=Decimal("0"))
+        message = FULFILLMENT_MESSAGES.get((was, status_value))
+        if receipt.client and message:
+            notify_customer(receipt.client, message)
         AuditLog.record(
             request.user,
             f"Заказ по чеку {receipt.order_number}: "
@@ -1097,9 +1533,9 @@ class ReceiptViewSet(viewsets.ModelViewSet):
         receipt = self.get_object()
         try:
             self._ensure_fulfillable(receipt)
+            return self._set_fulfillment(request, receipt, status_value)
         except ItemEditRejected as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        return self._set_fulfillment(request, receipt, status_value)
 
     @action(detail=True, methods=["post"], url_path="mark-ready")
     def mark_ready(self, request, pk=None):
@@ -1139,3 +1575,53 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return self._fulfillment_action(request, wanted)
+
+    @action(detail=True, methods=["post"], url_path="issue")
+    def issue(self, request, pk=None):
+        """POST /receipts/<id>/issue/ {items: [{id, quantity}]} — выдача по
+        позициям (G1-N4): отдали часть заказа, остальное дорезают.
+
+        Статус заказа считается сам: всё выдано — «Выдан», часть — «Выдан
+        частично». `quantity` — сколько выдали СЕЙЧАС.
+        """
+        receipt = self.get_object()
+        was = receipt.fulfillment_status
+        try:
+            receipt = issue_items(receipt, request.data.get("items"), user=request.user)
+        except ItemEditRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        receipt.refresh_from_db()
+        if receipt.fulfillment_status != was:
+            if receipt.client:
+                notify_customer(
+                    receipt.client,
+                    _ISSUED if receipt.fulfillment_status == Receipt.FulfillmentStatus.ISSUED
+                    else f"📦 По заказу №{receipt.order_number} выдана часть позиций. "
+                         "Остальное сообщим, когда будет готово.",
+                )
+            AuditLog.record(
+                request.user,
+                f"Заказ по чеку {receipt.order_number}: "
+                f"«{Receipt.FulfillmentStatus(was).label}» → "
+                f"«{Receipt.FulfillmentStatus(receipt.fulfillment_status).label}»",
+            )
+        return self._fresh_response(receipt)
+
+    @action(detail=True, methods=["post"], url_path="reprice", permission_classes=[IsAdmin])
+    def reprice(self, request, pk=None):
+        """POST /receipts/<id>/reprice/ — пересчитать открытый неоплаченный
+        заказ по сегодняшнему прайсу (админ).
+
+        Строки с вписанной вручную ценой и договорные не трогаются; ответ —
+        чек и `reprice`: было/стало и что осталось нетронутым. Запись в
+        журнале действий.
+        """
+        receipt = self.get_object()
+        ensure_open(timezone.localtime(receipt.created_at), "Пересчитать заказ закрытого периода")
+        try:
+            result = reprice_receipt(receipt, user=request.user)
+        except ItemEditRejected as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        response = self._fresh_response(receipt)
+        response.data["reprice"] = result
+        return response

@@ -32,11 +32,13 @@ def _send_message(token: str, chat_id, text: str, **kwargs) -> bool:
 
 
 def notify_low_stock(material) -> None:
-    """Alert the staff chat(s) when a material drops below critical balance."""
-    text = (
-        f"⚠️ <b>Внимание!</b> Материал «{material.name}» на исходе. "
-        f"Осталось всего {material.quantity}. Требуется закупка!"
-    )
+    """Alert the staff chat(s) when a material drops below critical balance.
+
+    Текст — со склада (STK-06, волна 2): остаток в единицах материала (листы,
+    метры, штуки) и сколько заказать, а не «Осталось всего 11.9072000»."""
+    from warehouse.reorder import low_stock_text
+
+    text = low_stock_text(material)
     token = settings.TELEGRAM_STAFF_BOT_TOKEN
     for chat_id in settings.TELEGRAM_STAFF_CHAT_IDS:
         _send_message(token, chat_id, text)

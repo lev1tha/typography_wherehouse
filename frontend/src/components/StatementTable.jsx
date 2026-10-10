@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { useTranslation } from "react-i18next";
 
 import Hint from "./Hint.jsx";
@@ -47,23 +48,35 @@ function cell(row, value) {
   return money(value);
 }
 
+// Квартал, целиком лежащий в будущем, — прочерком; начавшийся — числами (в нём
+// уже есть месяцы с данными).
+const quarterOf = (data, q) => (data.quarters || [])[q];
+
 function i18nHas(t, key) {
   return t(key, { defaultValue: "" }) !== "";
 }
 
-export default function StatementTable({ data, kind }) {
+export default function StatementTable({ data, kind, showQuarters = false }) {
   const { t } = useTranslation();
   const months = data.months || [];
+  const withQuarters = showQuarters && (data.quarters || []).length === 4;
   return (
     <div className="sheet-wrap stmt-wrap">
       <table className="sheet-table stmt-table">
         <thead>
           <tr>
             <th className="stmt-label">{t("statements.article")}</th>
-            {months.map((m) => (
-              <th key={m.month} className={m.future ? "stmt-future" : undefined}>
-                <span className="sheet-num">{t(`statements.m${m.month}`, MONTHS_RU[m.month - 1])}</span>
-              </th>
+            {months.map((m, i) => (
+              <Fragment key={m.month}>
+                <th className={m.future ? "stmt-future" : undefined}>
+                  <span className="sheet-num">{t(`statements.m${m.month}`, MONTHS_RU[m.month - 1])}</span>
+                </th>
+                {withQuarters && i % 3 === 2 && (
+                  <th className="stmt-quarter-col">
+                    <span className="sheet-num">{t("statements.quarterShort", { n: Math.floor(i / 3) + 1 })}</span>
+                  </th>
+                )}
+              </Fragment>
             ))}
             <th className="stmt-total-col">
               <span className="sheet-num">{t("statements.yearTotal")}</span>
@@ -79,15 +92,25 @@ export default function StatementTable({ data, kind }) {
                 {row.warn && <Hint tone="warn" text={t("statements.unmatchedWarn", { defaultValue: row.warn })} />}
               </td>
               {row.values.map((v, i) => (
-                <td
-                  key={i}
-                  className={[
-                    months[i]?.future ? "stmt-future" : "",
-                    row.kind !== "percent" && Number(v) < 0 ? "stmt-neg" : "",
-                  ].join(" ")}
-                >
-                  <span className="sheet-num">{months[i]?.future ? "—" : cell(row, v)}</span>
-                </td>
+                <Fragment key={i}>
+                  <td
+                    className={[
+                      months[i]?.future ? "stmt-future" : "",
+                      row.kind !== "percent" && Number(v) < 0 ? "stmt-neg" : "",
+                    ].join(" ")}
+                  >
+                    <span className="sheet-num">{months[i]?.future ? "—" : cell(row, v)}</span>
+                  </td>
+                  {withQuarters && i % 3 === 2 && (() => {
+                    const q = Math.floor(i / 3);
+                    const qv = (row.quarters || [])[q];
+                    return (
+                      <td className={`stmt-quarter-col ${row.kind !== "percent" && Number(qv) < 0 ? "stmt-neg" : ""}`}>
+                        <span className="sheet-num">{quarterOf(data, q)?.future ? "—" : cell(row, qv)}</span>
+                      </td>
+                    );
+                  })()}
+                </Fragment>
               ))}
               <td className={`stmt-total-col ${row.kind !== "percent" && Number(row.total) < 0 ? "stmt-neg" : ""}`}>
                 <span className="sheet-num">{cell(row, row.total)}</span>
@@ -102,12 +125,23 @@ export default function StatementTable({ data, kind }) {
 
 // CSV той же таблицы — владелец привык сверять в Excel. Разделитель «;» и
 // BOM: так русский Excel открывает файл сразу по колонкам и без кракозябр.
-export function statementCsv(data, title, t, kind) {
-  const head = [t("statements.article"), ...data.months.map((m) => MONTHS_RU[m.month - 1]), t("statements.yearTotal")];
+export function statementCsv(data, title, t, kind, withQuarters = false) {
+  const quarters = withQuarters && (data.quarters || []).length === 4;
+  const monthHead = [];
+  data.months.forEach((m, i) => {
+    monthHead.push(MONTHS_RU[m.month - 1]);
+    if (quarters && i % 3 === 2) monthHead.push(t("statements.quarterShort", { n: Math.floor(i / 3) + 1 }));
+  });
+  const head = [t("statements.article"), ...monthHead, t("statements.yearTotal")];
   const lines = [head.join(";")];
   for (const row of data.rows) {
     const fmt = (v) => (v === null || v === undefined ? "" : row.kind === "percent" ? String(v) : String(Math.round(Number(v) || 0)));
-    lines.push([`${"  ".repeat(row.level)}${rowLabel(row, t, kind)}`, ...row.values.map(fmt), fmt(row.total)].join(";"));
+    const cells = [];
+    row.values.forEach((v, i) => {
+      cells.push(fmt(v));
+      if (quarters && i % 3 === 2) cells.push(fmt((row.quarters || [])[Math.floor(i / 3)]));
+    });
+    lines.push([`${"  ".repeat(row.level)}${rowLabel(row, t, kind)}`, ...cells, fmt(row.total)].join(";"));
   }
   const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv" });
   const a = document.createElement("a");

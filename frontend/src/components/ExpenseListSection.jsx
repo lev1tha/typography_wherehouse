@@ -111,6 +111,12 @@ export default function ExpenseListSection({ title, subtitle, kinds, period, rel
           {r.source === "SUPPLY" && (
             <span className="chip" style={{ marginLeft: 6 }}>{t("expenses.fromSupply")}</span>
           )}
+          {r.asset && (
+            <span className="chip" style={{ marginLeft: 6 }}>{t("assetCard.paymentChip")}</span>
+          )}
+          {r.recurring && (
+            <span className="chip" style={{ marginLeft: 6 }}>{t("expenses.recurringBadge")}</span>
+          )}
         </>
       ),
     },

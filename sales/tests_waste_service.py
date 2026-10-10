@@ -249,7 +249,7 @@ class WasteServiceTests(APITestCase):
         rid = r.data["id"]
         item_id = r.data["items"][0]["id"]
         r = self.client.post(
-            f"/api/sales/receipts/{rid}/refund/", {"items": [item_id]}, format="json"
+            f"/api/sales/receipts/{rid}/refund/", {"item_ids": [item_id]}, format="json"
         )
         self.assertEqual(r.status_code, 200, r.data)
         self.assertTrue(TransactionItem.objects.get(pk=item_id).is_returned)

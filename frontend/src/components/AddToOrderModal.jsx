@@ -2,21 +2,27 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { apiError } from "../api/errors.js";
 import { useAuth } from "../auth/AuthContext.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 import { areaOf } from "../utils/area.js";
-import { formatMoney } from "../utils/format.js";
+import { formatMoney, formatNumber } from "../utils/format.js";
 import { rulesLabel } from "../utils/pricingRules.js";
 import Field from "./Field.jsx";
 
 // Как на сервере (TransactionItem.line_total): каждая строка — вверх до сома.
 const ceilSom = (v) => Math.max(0, Math.ceil((Number(v) || 0) - 1e-6));
+const price = (v) => `${formatNumber(v, { max: 2 })}\u00a0сом`;
 
 const EMPTY_CFG = {
   qty: "1",
   width: "",
   length: "",
+  // Деталей одинакового размера и проходов (резка, гравировка): площадь и длина
+  // реза умножаются на число деталей, ставка — на число проходов.
+  parts: "1",
+  passes: "1",
   letter_type: "FLAT",
   materialId: "",
   running_meters: "",
@@ -29,6 +35,9 @@ const EMPTY_CFG = {
   // уходит на сервер ЯВНО: без него сервер раньше подставлял «кв.м», и
   // «дозаказать 1 лист» превращалось в 1 кв.м по цене за квадрат.
   saleMode: "PIECE",
+  // Рулон: метрами на всю ширину (METER) или по кв.м изделия (SQM, CALC-10) —
+  // второй способ есть, только если у рулона задана цена за кв.м.
+  rollMode: "METER",
   // Материал клиента (только резка) и комментарий к работе — что резали или
   // гравировали. У такой строки своего материала нет, и без комментария её
   // потом не узнать.
@@ -43,7 +52,7 @@ const EMPTY_CFG = {
 /** Configure and append one item (дозаказ) to an existing receipt. */
 export default function AddToOrderModal({ receiptId, receipt = null, onClose, onAdded }) {
   const { t } = useTranslation();
-  const { toast } = useUI();
+  const { toast, confirm } = useUI();
   const { isAdmin } = useAuth();
   const [services, setServices] = useState([]);
   const [materials, setMaterials] = useState([]);
@@ -78,9 +87,19 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
   const matRoll = !!mat?.sells_by_metre;
   const matSheet = !!mat && !!mat.is_roll_material && !matRoll;
   const matPiecePrice = Number(mat?.piece_price || 0);
+  // Рулон с ценой за кв.м изделия (CALC-10) продаётся ещё и по площади
+  // изделия: ширина × длина × цена за кв.м, со склада — вся ширина × длина.
+  const matRollArea = matRoll && Number(mat?.price_per_sqm) > 0;
   // Продажа листом возможна только при цене за лист — иначе только площадь.
-  const matMode = matSheet ? (cfg.saleMode === "PIECE" && matPiecePrice > 0 ? "PIECE" : "SQM") : matRoll ? "METER" : null;
-  const matArea = matMode === "SQM" ? areaOf(cfg.width, cfg.length) || 0 : 0;
+  const matMode = matSheet
+    ? (cfg.saleMode === "PIECE" && matPiecePrice > 0 ? "PIECE" : "SQM")
+    : matRoll
+    ? (matRollArea && cfg.rollMode === "SQM" ? "ROLL_SQM" : "METER")
+    : null;
+  const matArea = matMode === "SQM" || matMode === "ROLL_SQM" ? areaOf(cfg.width, cfg.length) || 0 : 0;
+  const matRollPrice = matMode === "ROLL_SQM" ? Number(mat.price_per_sqm) : 0;
+  const matRollTooWide =
+    matMode === "ROLL_SQM" && Number(mat.roll_width) > 0 && Number(cfg.width) > Number(mat.roll_width);
   const matAreaPrice = mat ? Number(mat.sqm_price ?? mat.price_per_sqm ?? mat.price_per_unit ?? 0) : 0;
   const matQty = Number(cfg.qty) || 0;
   const matWholesale =
@@ -121,6 +140,12 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
   const matSqmPrice = cfgMat
     ? Number(cfgMat.sqm_price ?? cfgMat.price_per_sqm ?? cfgMat.price_per_unit ?? 0)
     : 0;
+  // Деталей и проходов: у материала клиента деталей нет (размеров куска он не
+  // имеет), проходы есть.
+  const parts = ownCut ? 1 : Math.max(1, Math.floor(Number(cfg.parts)) || 1);
+  const passes = Math.max(1, Math.floor(Number(cfg.passes)) || 1);
+  // Площадь всех деталей, один раз до 0.001, как на сервере.
+  const partsArea = (w, l) => Math.round((areaOf(w, l, 6) || 0) * parts * 1000 + 1e-7) / 1000;
   // Длина реза в погонных метрах: у обычного реза это ОДНА сторона куска
   // («Длина»), у фигурного — то, что ввёл мастер.
   const runM = ownCut
@@ -135,6 +160,7 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
     // листового, за единицу у штучного. Раньше здесь всегда стояла цена за
     // единицу — у листа она нулевая, и окно молчало о сумме.
     if (matMode === "METER") preview = ceilSom(Number(mat.price_per_pm || 0) * Number(cfg.length || 0));
+    else if (matMode === "ROLL_SQM") preview = ceilSom(matRollPrice * matArea);
     else if (matMode === "PIECE") preview = ceilSom(matPieceUnit * matQty);
     else if (matMode === "SQM") preview = ceilSom(matAreaPrice * matArea);
     else preview = ceilSom(Number(sel.obj.price_per_unit) * matQty);
@@ -142,15 +168,16 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
     preview = ceilSom(wasteAmount * wasteRate);
   } else if (ownCut) {
     // Материал клиента: только работа.
-    preview = ceilSom(runM * rate);
+    preview = ceilSom(runM * rate * passes);
   } else if (isEngraving) {
-    preview = ceilSom((areaOf(cfg.width, cfg.length) || 0) * rate);
+    preview = ceilSom(partsArea(cfg.width, cfg.length) * rate * passes);
   } else if (svc?.uses_area) {
-    const area = areaOf(cfg.width, cfg.length) || 0;
+    const area = partsArea(cfg.width, cfg.length);
     // Резка: работа = пог.м × ставка, материал = площадь × цена за кв.м. Пока
     // погонные метры не введены, работа = 0 — площадь вместо длины реза давала
-    // цену втрое ниже реальной.
-    const work = usesRunM ? runM * rate : area * rate;
+    // цену втрое ниже реальной. Метры вводят на одну деталь — на все детали их
+    // умножает сервер; проходы умножают ставку.
+    const work = usesRunM ? runM * parts * rate * passes : area * rate * passes;
     preview = ceilSom(work) + ceilSom(area * matSqmPrice);
   } else if (svc?.uses_pieces) preview = ceilSom(Number(svc.rate_per_piece) * Number(cfg.qty || 0));
   else if (svc) preview = ceilSom(Number(svc.base_price) * Number(cfg.qty || 0));
@@ -160,6 +187,8 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
       const it = { type: "MATERIAL", material: sel.obj.id };
       // Режим — явно, как шлёт касса: сервер его не подставляет.
       if (matMode === "METER") return { ...it, quantity: Number(cfg.length), mode: "METER" };
+      // Рулон по кв.м изделия: размеры изделия, площадь считает сервер.
+      if (matMode === "ROLL_SQM") return { ...it, mode: "SQM", width: Number(cfg.width), length: Number(cfg.length) };
       if (matMode === "PIECE") return { ...it, quantity: matQty, mode: "PIECE" };
       if (matMode === "SQM") return { ...it, quantity: matArea, mode: "SQM" };
       return { ...it, quantity: matQty };
@@ -177,15 +206,25 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
     }
     if (ownCut) {
       // Цену шлём всегда: она видна и правится в окне у всех, каталожной нет.
-      return { type: "SERVICE", service: svc.id, own_material: true, running_meters: runM, cut_rate: rate, note: cfg.note.trim() };
+      const it = { type: "SERVICE", service: svc.id, own_material: true, running_meters: runM, cut_rate: rate, note: cfg.note.trim() };
+      if (passes > 1) it.passes = passes;
+      return it;
     }
     if (isEngraving) {
-      return { type: "SERVICE", service: svc.id, width: Number(cfg.width), length: Number(cfg.length), cut_rate: rate, note: cfg.note.trim() };
+      const it = { type: "SERVICE", service: svc.id, width: Number(cfg.width), length: Number(cfg.length), cut_rate: rate, note: cfg.note.trim() };
+      // «Деталей» и «проходов» шлём, только когда они не единица: сервер больше
+      // не принимает лишних полей, а единица — и так значение по умолчанию.
+      if (parts > 1) it.parts_count = parts;
+      if (passes > 1) it.passes = passes;
+      return it;
     }
     if (svc.uses_area) {
+      // Количества здесь нет намеренно: при размерах сервер его отклоняет —
+      // число одинаковых деталей задаёт `parts_count`.
       const it = { type: "SERVICE", service: svc.id, material: Number(cfg.materialId), width: Number(cfg.width), length: Number(cfg.length) };
-      if (svc.uses_letter_type) it.letter_type = cfg.letter_type;
       if (usesRunM) it.running_meters = runM;
+      if (parts > 1) it.parts_count = parts;
+      if (passes > 1) it.passes = passes;
       if (isAdmin && cfg.cutRate !== "") it.cut_rate = Number(cfg.cutRate) || 0;
       return it;
     }
@@ -203,6 +242,7 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
   const matPriceMissing =
     sel?.type === "material" &&
     (matMode === "METER" ? !(Number(mat.price_per_pm) > 0)
+      : matMode === "ROLL_SQM" ? !(matRollPrice > 0)
       : matMode === "PIECE" ? !(matPieceUnit > 0)
       : matMode === "SQM" ? !(matAreaPrice > 0)
       : !(Number(sel.obj.price_per_unit) > 0));
@@ -212,6 +252,8 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
       ? !matPriceMissing &&
         (matMode === "METER"
           ? Number(cfg.length) > 0
+          : matMode === "ROLL_SQM"
+          ? matArea > 0 && !matRollTooWide
           : matMode === "SQM"
           ? matArea > 0
           : matQty > 0)
@@ -228,11 +270,37 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
   async function add() {
     setBusy(true);
     try {
-      const { data } = await api.post(`/sales/receipts/${receiptId}/add-items/`, { items: [buildItem()] });
+      const url = `/sales/receipts/${receiptId}/add-items/`;
+      const items = [buildItem()];
+      let data;
+      try {
+        ({ data } = await api.post(url, { items }));
+      } catch (e) {
+        // Сомнительный дозаказ (строка дороже порога, деталь больше листа)
+        // сервер не отвергает, а просит подтвердить: показываем его слова и,
+        // если «да», повторяем тот же запрос с кодами предупреждений.
+        const found = e.response?.status === 409 && e.response.data?.needs_confirmation
+          ? e.response.data.warnings
+          : null;
+        if (!found?.length) throw e;
+        const ok = await confirm(
+          `${t("receiptsV2.confirmIntro")} ${found.map((w) => w.message).join(" ")}`,
+        );
+        if (!ok) return;
+        ({ data } = await api.post(url, { items, confirmed_warnings: found.map((w) => w.code) }));
+      }
       toast(t("receipts.added"));
+      // Прайс поменяли, пока заказ был открыт: дозаказ ушёл по новой цене, а
+      // прежние строки остались по старой. Говорим об этом сразу, а не оставляем
+      // кассира гадать, откуда разница.
+      for (const w of data.warnings || []) {
+        if (w.code === "price_changed") {
+          toast(t("receiptsV2.priceChanged", { name: w.name, was: price(w.was), now: price(w.now) }), "warning");
+        }
+      }
       onAdded(data);
     } catch (e) {
-      toast(e.response?.data?.detail || t("common.error"), "error");
+      toast(apiError(e, t("common.error")), "error");
     } finally {
       setBusy(false);
     }
@@ -306,10 +374,10 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
             <>
               <div className="row">
                 <Field className="grow" label={t("supply.width")}>
-                  <input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value, wasteAmount: "" })} />
+                  <input type="number" step="0.001" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value, wasteAmount: "" })} />
                 </Field>
                 <Field className="grow" label={t("supply.length")}>
-                  <input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value, wasteAmount: "" })} />
+                  <input type="number" step="0.001" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value, wasteAmount: "" })} />
                 </Field>
               </div>
               <Field label={t("checkout.wasteAreaDirect")}>
@@ -379,10 +447,10 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
           {!ownCut && (
           <div className="row">
             <Field className="grow" label={t("supply.width")}>
-              <input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} />
+              <input type="number" step="0.001" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} />
             </Field>
             <Field className="grow" label={t("supply.length")}>
-              <input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} />
+              <input type="number" step="0.001" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} />
             </Field>
           </div>
           )}
@@ -399,6 +467,37 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
               {!(runM > 0) && (
                 <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "4px 0 0" }}>{t("checkout.ownCutNeedLength")}</p>
               )}
+            </div>
+          )}
+          {/* Деталей одинакового размера и проходов. Размеры выше — ОДНОЙ детали:
+              площадь и длина реза умножаются на число деталей, ставка — на число
+              проходов. У материала клиента размеров куска нет, деталей тоже. */}
+          {(usesRunM || isEngraving) && (
+            <div className="row">
+              {!ownCut && (
+                <Field className="grow" label={t("receiptsV2.parts")} hint={t("receiptsV2.partsHint")}>
+                  <input
+                    type="number"
+                    min="1"
+                    max="1000"
+                    step="1"
+                    inputMode="numeric"
+                    value={cfg.parts}
+                    onChange={(e) => setCfg({ ...cfg, parts: e.target.value })}
+                  />
+                </Field>
+              )}
+              <Field className="grow" label={t("receiptsV2.passes")} hint={t("receiptsV2.passesHint")}>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  step="1"
+                  inputMode="numeric"
+                  value={cfg.passes}
+                  onChange={(e) => setCfg({ ...cfg, passes: e.target.value })}
+                />
+              </Field>
             </div>
           )}
           {/* Как считать длину реза — так же, как в кассе: обычный рез берёт
@@ -479,21 +578,61 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
           )}
         </>
       )}
-      {sel?.type === "material" && matPriceMissing && matMode !== "METER" && (
+      {sel?.type === "material" && matPriceMissing && matMode !== "METER" && matMode !== "ROLL_SQM" && (
         <p style={{ color: "var(--danger-ink)", fontSize: 12, margin: "0 0 8px" }}>{t("checkout.priceMissing")}</p>
       )}
 
-      {/* Рулон: одно поле — длина; ширина надписью, режем поперёк на всю. */}
-      {matMode === "METER" && (
+      {/* Рулон: ширина надписью, режем поперёк на всю. Метрами — одно поле,
+          длина; по кв.м изделия (CALC-10) — ширина и длина изделия. */}
+      {matRoll && (
         <>
           <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
             {t("checkout.rollWidthFixed", { width: mat.roll_width })}
           </p>
-          <Field label={t("checkout.rollLength")}>
-            <input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} autoFocus />
-          </Field>
-          {!(Number(mat.price_per_pm) > 0) && (
-            <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "0 0 8px" }}>{t("checkout.rollNoPrice")}</p>
+          {matRollArea && (
+            <div className="tabs" style={{ marginTop: 0 }} role="group" aria-label={t("rollArea.modeLabel")}>
+              {["METER", "SQM"].map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={(cfg.rollMode || "METER") === mode ? "active" : ""}
+                  aria-pressed={(cfg.rollMode || "METER") === mode}
+                  onClick={() => setCfg({ ...cfg, rollMode: mode })}
+                >
+                  {t(mode === "SQM" ? "rollArea.modeSqm" : "rollArea.modeMetre")}
+                </button>
+              ))}
+            </div>
+          )}
+          {matMode === "ROLL_SQM" ? (
+            <>
+              <div className="row">
+                <Field className="grow" label={<>{t("rollArea.width")} *</>}>
+                  <input type="number" step="0.001" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} autoFocus />
+                </Field>
+                <Field className="grow" label={<>{t("checkout.rollLength")} *</>}>
+                  <input type="number" step="0.001" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} />
+                </Field>
+              </div>
+              <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>
+                {t("rollArea.hintSqm", { width: mat.roll_width })}
+                {matArea > 0 ? ` · ${matArea} ${t("unit.SQM")} × ${matRollPrice}` : ""}
+              </p>
+              {matRollTooWide && (
+                <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "0 0 8px" }}>
+                  {t("checkout.usedWidthTooWide", { width: mat.roll_width })}
+                </p>
+              )}
+            </>
+          ) : (
+            <>
+              <Field label={t("checkout.rollLength")}>
+                <input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} autoFocus />
+              </Field>
+              {!(Number(mat.price_per_pm) > 0) && (
+                <p style={{ color: "var(--danger-ink)", fontSize: 13, margin: "0 0 8px" }}>{t("checkout.rollNoPrice")}</p>
+              )}
+            </>
           )}
         </>
       )}
@@ -526,10 +665,10 @@ export default function AddToOrderModal({ receiptId, receipt = null, onClose, on
             <>
               <div className="row">
                 <Field className="grow" label={t("supply.width")}>
-                  <input type="number" step="any" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} />
+                  <input type="number" step="0.001" value={cfg.width} onChange={(e) => setCfg({ ...cfg, width: e.target.value })} />
                 </Field>
                 <Field className="grow" label={t("supply.length")}>
-                  <input type="number" step="any" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} />
+                  <input type="number" step="0.001" value={cfg.length} onChange={(e) => setCfg({ ...cfg, length: e.target.value })} />
                 </Field>
               </div>
               <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>

@@ -1,0 +1,56 @@
+"""Типы записей журнала действий — для фильтра «Тип» (XL-07, F3).
+
+Новые записи несут тип сами (`AuditLog.kind`). Записи, сделанные до появления
+поля (и места кода, что тип не передают), разбираются по началу текста — список
+ниже. Порядок значений — порядок в выпадающем списке.
+"""
+from __future__ import annotations
+
+from django.db.models import Q
+
+# тип → начала текста («Касса: …», «Оформлен чек …»), по которым узнаются старые записи
+LEGACY_PREFIXES = {
+    "login": ["Вход в систему"],
+    "order": [
+        "Оформлен чек", "Правка чека", "Удалён чек", "Возврат по чеку", "Оплата долга", "Откат оплаты",
+        "Дозаказ", "Чек ",
+    ],
+    "cash": ["Касса:", "Пересчёт кассы"],
+    "expense": ["Трата"],
+    "payroll": ["Правила оплаты", "Выплата зарплаты", "Удержание", "Зарплата за", "Начисление зарплаты"],
+    "tax": ["Ставка налога", "Налог"],
+    "settings": ["Период", "Изменены реквизиты", "Порог", "Настройки финансов"],
+    "stock": [
+        "Материал", "Каталог", "Поступление", "Приход", "Инвентаризация", "Списание", "Брак", "Накладная",
+        "Отменена приходная", "Исправление прихода", "Партия",
+    ],
+    "price": ["Изменена цена", "Изменён % ЗП", "Цена", "Прайс", "Услуга"],
+    "client": ["Выдан пароль кабинета", "Клиент", "Телефон клиента", "Реферер"],
+    "staff": ["Создана учётная запись", "Сменён пароль", "Сотрудник", "Учётная запись"],
+}
+KINDS = list(LEGACY_PREFIXES) + ["other"]
+
+
+def classify(action: str) -> str:
+    """Тип записи по тексту — для строк без сохранённого типа."""
+    text = (action or "").lstrip()
+    for kind, prefixes in LEGACY_PREFIXES.items():
+        if any(text.startswith(prefix) for prefix in prefixes):
+            return kind
+    return "other"
+
+
+def kind_q(kind: str) -> Q:
+    """Условие «запись такого типа»: сохранённый тип или узнанный по тексту."""
+    q = Q(kind=kind)
+    legacy = Q(kind="")
+    if kind == "other":
+        known = Q()
+        for prefixes in LEGACY_PREFIXES.values():
+            for prefix in prefixes:
+                known |= Q(action__startswith=prefix)
+        return Q(kind="other") | (legacy & ~known)
+    prefix_q = Q()
+    for prefix in LEGACY_PREFIXES.get(kind, []):
+        prefix_q |= Q(action__startswith=prefix)
+    return q | (legacy & prefix_q) if prefix_q else q

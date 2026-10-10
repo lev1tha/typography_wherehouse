@@ -21,7 +21,7 @@ from sales import reporting
 from sales.models import Receipt, TransactionItem
 from warehouse.models import InventoryLog, Material, Roll, Supply
 
-from . import cash
+from . import auditing, cash
 from .material_sheet import (
     collect_flows,
     collect_manual,
@@ -40,8 +40,10 @@ from .models import (
     PeriodLock,
     TaxRate,
 )
+from .exports import csv_response
+from .filters import CashEntryFilter
 from .periods import (
-    PeriodClosed, add_months, ensure_month_open, ensure_open, is_closed, month_start,
+    PeriodClosed, add_months, ensure_month_open, ensure_open, is_closed, month_end, month_start,
 )
 from .serializers import (
     CashEntrySerializer,
@@ -213,7 +215,9 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
     pagination_class = None
 
     def get_queryset(self):
-        qs = ExpenseEntry.objects.select_related("kind")
+        qs = ExpenseEntry.objects.select_related("kind", "asset", "payroll_accrual").prefetch_related(
+            "installments"
+        )
         # `?basis=accrued` — отбор по «за какой месяц», а не по дате оплаты:
         # строка расхода в «Сводке» считается так же (2026-10-07, D-2), и окно
         # вида обязано показывать те же траты, что дали её сумму.
@@ -240,6 +244,38 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
         # траты: показывала один приход, и «сколько в ящике» было завышено на
         # всю аренду с зарплатами (на проде 19.09 — на 86 877 сом).
         cash.sync_expense(entry, user=self.request.user)
+        auditing.record(
+            self.request.user,
+            f"Трата добавлена: {self._label(entry)} — {auditing.fmt(entry.amount)} сом "
+            f"от {auditing.fmt(entry.spent_at)}"
+            + (" (карточка актива в рассрочку, без движения денег)" if entry.is_cashless else "")
+            + (f" (платёж по активу «{entry.asset.name or entry.asset.kind.name}»)" if entry.asset_id else ""),
+            "expense",
+        )
+
+    # Поля, правка которых пишется в журнал «было → стало».
+    AUDIT_LABELS = {
+        "kind": "вид", "name": "за что", "amount": "сумма", "account": "счёт",
+        "spent_at": "дата оплаты", "period": "за месяц", "useful_life_months": "срок службы, мес.",
+        "depreciate_until": "амортизировать до", "note": "примечание",
+    }
+
+    @classmethod
+    def _snap(cls, entry) -> dict:
+        snap = auditing.snapshot(entry, [k for k in cls.AUDIT_LABELS if k != "kind"])
+        snap["kind"] = entry.kind.name
+        return snap
+
+    @staticmethod
+    def _label(entry) -> str:
+        return f"«{entry.kind.name}»" + (f" {entry.name}" if entry.name else "")
+
+    def _guard_payroll(self, entry):
+        """Начисление зарплаты — запись ведомости: править и удалять только там."""
+        if hasattr(entry, "payroll_accrual"):
+            raise PeriodClosed(
+                "Это начисление зарплаты по ведомости — правится и снимается в «Ведомости»."
+            )
 
     # Поля графика амортизации: их правят и у покупки, сделанной в уже
     # закрытом месяце (станок купили в январе, сломался в октябре), — со своим
@@ -250,7 +286,9 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         entry = serializer.instance
+        self._guard_payroll(entry)
         data = serializer.validated_data
+        before = self._snap(entry)
         changed = {
             name for name, value in data.items() if getattr(entry, name) != value
         }
@@ -287,12 +325,28 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
         # Правка суммы/даты/счёта двигает и кассовую запись: иначе в книге
         # осталась бы старая цифра, и остаток разошёлся бы с отчётом.
         cash.sync_expense(entry, user=self.request.user)
+        diff = auditing.changes(before, self._snap(entry), self.AUDIT_LABELS)
+        if diff:
+            auditing.record(
+                self.request.user,
+                f"Трата #{entry.pk} {self._label(entry)} изменена: {diff}", "expense",
+            )
 
     def perform_destroy(self, instance):
+        self._guard_payroll(instance)
         ensure_open(instance.spent_at, "Удалить трату закрытого периода")
         ensure_month_open(instance.period, "Удалить расход закрытого месяца")
+        if instance.installments.exists():
+            raise PeriodClosed(
+                "По этому активу уже есть платежи — сначала удалите их."
+            )
+        text = (
+            f"Трата #{instance.pk} {self._label(instance)} удалена: "
+            f"{auditing.fmt(instance.amount)} сом от {auditing.fmt(instance.spent_at)}"
+        )
         # Кассовую запись уносит каскад по ссылке `CashEntry.expense`.
         instance.delete()
+        auditing.record(self.request.user, text, "expense")
 
     @action(detail=False, methods=["get"])
     def feed(self, request):
@@ -321,7 +375,10 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
                 "spent_at": e.spent_at,
                 "note": e.note,
             }
-            for e in self.filter_queryset(self.get_queryset())
+            # Записи без денег (начисления по ведомости, карточки активов в
+            # рассрочку) в ленту оплаченных трат не входят: их видно в окне вида
+            # и в «Ведомости», а деньги по ним — платежами и выплатами.
+            for e in self.filter_queryset(self.get_queryset()).filter(is_cashless=False)
         ]
 
         purchase_kind = ExpenseKind.objects.filter(
@@ -331,7 +388,8 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
 
         # Приход накладной — ОДНА строка ленты на документ, а не на позицию:
         # заказчик платит за поставку целиком, и сверяет он тоже её.
-        supplies = Supply.objects.select_related("supplier").prefetch_related("lines")
+        # Начальные остатки — не закуп периода (STK-09): в ленте их нет.
+        supplies = Supply.objects.filter(is_opening=False).select_related("supplier").prefetch_related("lines")
         if d_from:
             supplies = supplies.filter(received_on__gte=d_from)
         if d_to:
@@ -410,7 +468,7 @@ class CompanyProfileView(APIView):
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        AuditLog.record(request.user, "Изменены реквизиты организации")
+        auditing.record(request.user, "Изменены реквизиты организации", "settings")
         return Response(serializer.data)
 
 
@@ -432,17 +490,28 @@ class TaxRateViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         ensure_month_open(serializer.validated_data["valid_from"], self.WHAT)
         rate = serializer.save(created_by=self.request.user)
-        AuditLog.record(self.request.user, f"Ставка налога: {rate.rate} % с {rate.valid_from:%m.%Y}")
+        auditing.record(
+            self.request.user,
+            f"Ставка налога: {rate.rate} % с {rate.valid_from:%m.%Y}, основа — {rate.get_basis_display().lower()}",
+            "tax",
+        )
+
+    TAX_LABELS = {"rate": "ставка, %", "basis": "основа", "valid_from": "с месяца", "note": "примечание"}
 
     def perform_update(self, serializer):
         ensure_month_open(serializer.instance.valid_from, self.WHAT)
         ensure_month_open(serializer.validated_data.get("valid_from"), self.WHAT)
+        before = auditing.snapshot(serializer.instance, self.TAX_LABELS)
         rate = serializer.save()
-        AuditLog.record(self.request.user, f"Ставка налога изменена: {rate.rate} % с {rate.valid_from:%m.%Y}")
+        diff = auditing.changes(before, auditing.snapshot(rate, self.TAX_LABELS), self.TAX_LABELS)
+        auditing.record(
+            self.request.user,
+            f"Налог (запись с {rate.valid_from:%m.%Y}) изменён: {diff or 'без изменений'}", "tax",
+        )
 
     def perform_destroy(self, instance):
         ensure_month_open(instance.valid_from, self.WHAT)
-        AuditLog.record(self.request.user, f"Ставка налога удалена: {instance}")
+        auditing.record(self.request.user, f"Ставка налога удалена: {instance}", "tax")
         instance.delete()
 
 
@@ -454,12 +523,24 @@ class FinanceSettingsView(APIView):
     def get(self, request):
         return Response(FinanceSettingsSerializer(FinanceSettings.load()).data)
 
+    LABELS = {
+        "stock_start": "остаток материалов на начало",
+        "referral_bonus": "бонус за клиента",
+        "capitalization_threshold": "порог капвложения",
+        "lease_until": "аренда до",
+        "payroll_prev_month_until_day": "расчёт за прошлый месяц до числа",
+        "master_share_in_margin": "доля мастера в марже строки",
+    }
+
     def patch(self, request):
-        serializer = FinanceSettingsSerializer(
-            FinanceSettings.load(), data=request.data, partial=True
-        )
+        current = FinanceSettings.load()
+        before = auditing.snapshot(current, self.LABELS)
+        serializer = FinanceSettingsSerializer(current, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        diff = auditing.changes(before, auditing.snapshot(serializer.instance, self.LABELS), self.LABELS)
+        if diff:
+            auditing.record(request.user, f"Настройки финансов изменены: {diff}", "settings")
         return Response(serializer.data)
 
 
@@ -502,6 +583,72 @@ class PnlView(APIView):
         if year is None:
             return Response({"detail": "Некорректный год."}, status=status.HTTP_400_BAD_REQUEST)
         return Response(pnl_year(year))
+
+
+class PeriodExportView(APIView):
+    """GET /api/finance/export/period/ — ОПиУ, ОДДС и сверка периода одним CSV.
+
+    Период: ?date_from=&date_to=, либо ?year=&quarter=1..4, либо ?year=&month=.
+    Файл открывается в Excel сразу по колонкам; ОДДС — с разрезом «наличные /
+    безнал», ОПиУ — с основой налога."""
+
+    permission_classes = [IsAdminOrAccountantRead]
+
+    def get(self, request):
+        from .reports.export import period_rows
+
+        d_from = _parse_date(request.query_params.get("date_from"))
+        d_to = _parse_date(request.query_params.get("date_to"))
+        year = _year_param(request) if request.query_params.get("year") else None
+        name = "otchet"
+        if request.query_params.get("year") and year is None:
+            return Response({"detail": "Некорректный год."}, status=status.HTTP_400_BAD_REQUEST)
+        if year:
+            try:
+                quarter = int(request.query_params.get("quarter") or 0)
+                month = int(request.query_params.get("month") or 0)
+            except ValueError:
+                return Response({"detail": "Некорректный период."}, status=status.HTTP_400_BAD_REQUEST)
+            if quarter and 1 <= quarter <= 4:
+                d_from = date(year, 3 * quarter - 2, 1)
+                d_to = month_end(date(year, 3 * quarter, 1))
+                name = f"otchet-{year}-Q{quarter}"
+            elif month and 1 <= month <= 12:
+                d_from, d_to = date(year, month, 1), month_end(date(year, month, 1))
+                name = f"otchet-{year}-{month:02d}"
+            elif not (d_from or d_to):
+                d_from, d_to = date(year, 1, 1), date(year, 12, 31)
+                name = f"otchet-{year}"
+        if d_from and d_to and d_from > d_to:
+            return Response({"detail": "Начало периода позже конца."}, status=status.HTTP_400_BAD_REQUEST)
+        return csv_response(period_rows(d_from, d_to), f"{name}.csv")
+
+
+class WhatIfView(APIView):
+    """GET /api/finance/pnl/what-if/?year=&price_pct=&cost_pct= — ОПиУ года при
+    другой цене услуг и закупе. Ничего не записывает."""
+
+    permission_classes = [IsAdminOrAccountantRead]
+
+    def get(self, request):
+        from .reports.whatif import HIGH, LOW, what_if_year
+
+        year = _year_param(request)
+        if year is None:
+            return Response({"detail": "Некорректный год."}, status=status.HTTP_400_BAD_REQUEST)
+        values = {}
+        for name in ("price_pct", "cost_pct"):
+            raw = request.query_params.get(name) or "0"
+            try:
+                value = Decimal(raw.replace(",", "."))
+            except ArithmeticError:
+                value = None
+            if value is None or not value.is_finite() or not (LOW <= value <= HIGH):
+                return Response(
+                    {"detail": f"Процент — число от {LOW} до {HIGH}."}, status=status.HTTP_400_BAD_REQUEST
+                )
+            values[name] = value
+        return Response(what_if_year(year, values["price_pct"], values["cost_pct"]))
 
 
 class CashFlowView(APIView):
@@ -691,6 +838,11 @@ class MaterialReportView(APIView):
             if it.sale_mode == TransactionItem.SaleMode.METER:
                 a["metres"] += q
                 a["area"] += q * it.roll_width
+            elif it.roll_area and it.length:
+                # Рулон по кв.м изделия (CALC-10): со склада ушла длина изделия
+                # на всю ширину рулона — как у продажи метрами.
+                a["metres"] += it.length * sign
+                a["area"] += it.length * sign * it.roll_width
             elif it.sale_mode == TransactionItem.SaleMode.PIECE:
                 a["sheets"] += q
                 if m.piece_area:
@@ -911,15 +1063,19 @@ class CashEntryViewSet(viewsets.ModelViewSet):
     инкассацию, внесение денег.
 
     Права как у остальных денежных экранов: админ ведёт, бухгалтер смотрит.
+
+    Фильтры (cash-05): ?account= ?kind= ?article= ?created_by= ?order= (номер
+    заказа) ?amount= ?amount_min= ?amount_max= ?reconciled= ?search= (примечание,
+    клиент, телефон, кассир, номер заказа) ?date_from= ?date_to=.
     """
 
     serializer_class = CashEntrySerializer
     permission_classes = [IsAdminOrAccountantRead]
-    filterset_fields = ["account", "kind", "article"]
+    filterset_class = CashEntryFilter
     ordering = ["-happened_on", "-created_at"]
 
     def get_queryset(self):
-        qs = CashEntry.objects.select_related("created_by", "receipt", "expense__kind")
+        qs = CashEntry.objects.select_related("created_by", "receipt__client", "expense__kind")
         d_from = _parse_date(self.request.query_params.get("date_from"))
         d_to = _parse_date(self.request.query_params.get("date_to"))
         if d_from:
@@ -928,13 +1084,40 @@ class CashEntryViewSet(viewsets.ModelViewSet):
             qs = qs.filter(happened_on__lte=d_to)
         return qs
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        # Остаток после операции — по всей книге один раз на запрос, а не на строку.
+        if self.action in ("list", "export"):
+            context["balances_after"] = cash.balances_after()
+        return context
+
+    OTHER_WARNING = {
+        "code": "other_not_in_pnl",
+        "message": (
+            "Расход со статьёй «Прочее» уменьшил кассу, но НЕ попадёт в ОПиУ: это не трата. "
+            "Если это аренда, расходники, зарплата — удалите запись и проведите её тратой в «Финансах»."
+        ),
+    }
+
+    def create(self, request, *args, **kwargs):
+        response = super().create(request, *args, **kwargs)
+        if (
+            response.status_code == status.HTTP_201_CREATED
+            and response.data.get("kind") == CashEntry.Kind.OUT
+            and response.data.get("article") == CashEntry.Article.OTHER
+        ):
+            response.data["warnings"] = [self.OTHER_WARNING]
+        return response
+
     def perform_create(self, serializer):
         ensure_open(serializer.validated_data.get("happened_on"), "Записать операцию этой датой")
         entry = serializer.save(created_by=self.request.user, is_auto=False)
-        AuditLog.record(
+        auditing.record(
             self.request.user,
-            f"Касса: {entry.get_kind_display().lower()} {entry.amount} сом "
-            f"({entry.get_article_display()}, {entry.get_account_display().lower()})",
+            f"Касса: {entry.get_kind_display().lower()} {auditing.fmt(entry.amount)} сом "
+            f"({entry.get_article_display()}, {entry.get_account_display().lower()}) "
+            f"от {auditing.fmt(entry.happened_on)}" + (f" — {entry.note}" if entry.note else ""),
+            "cash",
         )
 
     def _guard_auto(self, instance):
@@ -954,6 +1137,11 @@ class CashEntryViewSet(viewsets.ModelViewSet):
         blocked = self._guard_auto(self.get_object())
         return blocked or super().update(request, *args, **kwargs)
 
+    CASH_LABELS = {
+        "account": "счёт", "kind": "тип", "article": "статья", "amount": "сумма",
+        "happened_on": "дата", "note": "примечание",
+    }
+
     def perform_update(self, serializer):
         # Правка записи закрытого периода двигает принятый отчёт так же, как
         # удаление; перенос в закрытый период — так же, как создание. Раньше
@@ -961,7 +1149,13 @@ class CashEntryViewSet(viewsets.ModelViewSet):
         # при закрытом сентябре менялся на 9 000 или уезжал в октябрь.
         ensure_open(serializer.instance.happened_on, "Править кассовую запись закрытого периода")
         ensure_open(serializer.validated_data.get("happened_on"), "Перенести запись этой датой")
-        serializer.save()
+        before = auditing.snapshot(serializer.instance, self.CASH_LABELS)
+        entry = serializer.save()
+        diff = auditing.changes(before, auditing.snapshot(entry, self.CASH_LABELS), self.CASH_LABELS)
+        if diff:
+            auditing.record(
+                self.request.user, f"Касса: запись #{entry.pk} изменена: {diff}", "cash",
+            )
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
@@ -969,9 +1163,12 @@ class CashEntryViewSet(viewsets.ModelViewSet):
         if blocked:
             return blocked
         ensure_open(instance.happened_on, "Удалить кассовую запись закрытого периода")
-        AuditLog.record(
-            request.user, f"Касса: удалена запись {instance.amount} сом "
-                          f"({instance.get_article_display()})"
+        auditing.record(
+            request.user,
+            f"Касса: удалена запись {auditing.fmt(instance.amount)} сом "
+            f"({instance.get_article_display()}, {instance.get_account_display().lower()}) "
+            f"от {auditing.fmt(instance.happened_on)}",
+            "cash",
         )
         return super().destroy(request, *args, **kwargs)
 
@@ -1020,6 +1217,77 @@ class CashEntryViewSet(viewsets.ModelViewSet):
             "change_held": change_held,
         })
 
+    @action(detail=False, methods=["get"], url_path="day-totals")
+    def day_totals(self, request):
+        """Итоги дня: приход, расход и остаток на конец каждого дня периода
+        (cash-05). Остаток — по ВСЕЙ истории счёта до конца дня, как в книге."""
+        d_from = _parse_date(request.query_params.get("date_from"))
+        d_to = _parse_date(request.query_params.get("date_to"))
+        qs = CashEntry.objects.all()
+        if d_to:
+            qs = qs.filter(happened_on__lte=d_to)
+        running = {acc: Decimal("0") for acc in CashEntry.Account.values}
+        days = {}
+        for happened_on, account, kind, amount in qs.order_by("happened_on", "id").values_list(
+            "happened_on", "account", "kind", "amount"
+        ):
+            signed = amount if kind == CashEntry.Kind.IN else -amount
+            running[account] += signed
+            if d_from and happened_on < d_from:
+                continue
+            day = days.setdefault(happened_on, {
+                "date": happened_on, "income": Decimal("0"), "outcome": Decimal("0"),
+                "by_account": {acc: {"income": Decimal("0"), "outcome": Decimal("0")} for acc in running},
+            })
+            side = "income" if kind == CashEntry.Kind.IN else "outcome"
+            day[side] += amount
+            day["by_account"][account][side] += amount
+            day["closing"] = dict(running)
+        rows = sorted(days.values(), key=lambda r: r["date"], reverse=True)
+        for row in rows:
+            row["net"] = row["income"] - row["outcome"]
+            row["closing_total"] = sum(row["closing"].values(), Decimal("0"))
+        return Response({"results": rows})
+
+    @action(detail=False, methods=["get"])
+    def export(self, request):
+        """Кассовая книга в CSV (cash-05): те же фильтры, остаток после каждой
+        операции, порядок от старых к новым — как лист Excel."""
+        balances = cash.balances_after()
+        rows = [[
+            "Дата", "Счёт", "Тип", "Статья", "Сумма", "Остаток счёта после", "Заказ", "Клиент",
+            "Кассир", "Примечание", "Сверено с выпиской",
+        ]]
+        qs = self.filter_queryset(self.get_queryset()).order_by("happened_on", "created_at", "id")
+        for e in qs:
+            rows.append([
+                e.happened_on, e.get_account_display(), e.get_kind_display(), e.get_article_display(),
+                e.signed_amount, balances.get(e.id),
+                e.receipt.order_number if e.receipt_id else "",
+                e.receipt.client.display_name if e.receipt_id and e.receipt.client_id else "",
+                e.created_by.username if e.created_by_id else "система",
+                e.note, e.reconciled,
+            ])
+        return csv_response(rows, "kassa.csv")
+
+    @action(detail=False, methods=["post"])
+    def reconcile(self, request):
+        """Отметить записи «сверено с выпиской» (или снять отметку): {ids, reconciled}.
+
+        Только пометка для владельца — деньги, остатки и отчёты она не трогает
+        и замком периода не закрыта: сверять выписку за прошлый месяц нужно."""
+        if not request.user.is_admin_role:
+            return Response({"detail": "Отмечать записи может только администратор."},
+                            status=status.HTTP_403_FORBIDDEN)
+        ids = request.data.get("ids") or []
+        if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids):
+            return Response({"detail": "Передайте список ids."}, status=status.HTTP_400_BAD_REQUEST)
+        mark = bool(request.data.get("reconciled", True))
+        n = CashEntry.objects.filter(id__in=ids).update(
+            reconciled=mark, reconciled_at=timezone.now() if mark else None
+        )
+        return Response({"updated": n, "reconciled": mark})
+
     @action(detail=False, methods=["post"])
     def count(self, request):
         """Пересчёт кассы: «в ящике столько-то».
@@ -1027,6 +1295,11 @@ class CashEntryViewSet(viewsets.ModelViewSet):
         Как инвентаризация на складе: система пишет разницу отдельной строкой,
         а не переписывает историю. Недостача видна и остаётся в книге —
         затирать её значит терять единственный след того, что деньги пропали.
+
+        Дата пересчёта (`happened_on`, по умолчанию сегодня) — день, на который
+        насчитали: недостача 31 октября, записанная 1 ноября, остаётся в
+        октябре. Закрытый период не трогаем. Число должно быть конечным и не
+        отрицательным — в ящике не может лежать «минус сто» или бесконечность.
         """
         try:
             counted = Decimal(str(request.data.get("counted")))
@@ -1035,11 +1308,30 @@ class CashEntryViewSet(viewsets.ModelViewSet):
                 {"detail": "Укажите, сколько денег насчитали."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if not counted.is_finite():
+            return Response({"detail": "Укажите, сколько денег насчитали."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if counted < 0:
+            return Response({"detail": "В кассе не может быть меньше нуля."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if counted >= Decimal("1000000000000"):
+            return Response({"detail": "Слишком большая сумма — проверьте число."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        counted = counted.quantize(Decimal("0.01"))
         account = request.data.get("account") or CashEntry.Account.CASH
         if account not in CashEntry.Account.values:
             return Response({"detail": "Неизвестный счёт."}, status=status.HTTP_400_BAD_REQUEST)
+        raw_day = request.data.get("happened_on")
+        day = _parse_date(raw_day) if raw_day else timezone.localdate()
+        if raw_day and day is None:
+            return Response({"detail": "Дата пересчёта указана неверно."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if day > timezone.localdate():
+            return Response({"detail": "Дата пересчёта не может быть в будущем."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        ensure_open(day, "Записать пересчёт кассы этой датой")
 
-        current = CashEntry.balance(account)
+        current = CashEntry.balance(account, upto=day)
         diff = counted - current
         if diff == 0:
             return Response({"diff": "0", "detail": "Сошлось — расхождения нет."})
@@ -1048,13 +1340,16 @@ class CashEntryViewSet(viewsets.ModelViewSet):
             kind=CashEntry.Kind.IN if diff > 0 else CashEntry.Kind.OUT,
             article=CashEntry.Article.COUNT,
             amount=abs(diff),
-            note=request.data.get("note") or f"Пересчёт: было {current}, насчитали {counted}",
+            happened_on=day,
+            note=request.data.get("note") or f"Пересчёт на {day:%d.%m.%Y}: было {current}, насчитали {counted}",
             created_by=request.user,
             is_auto=False,
         )
-        AuditLog.record(
+        auditing.record(
             request.user,
-            f"Пересчёт кассы ({entry.get_account_display()}): {current} → {counted} сом",
+            f"Пересчёт кассы ({entry.get_account_display()}) на {auditing.fmt(day)}: "
+            f"{auditing.fmt(current)} → {auditing.fmt(counted)} сом",
+            "cash",
         )
         return Response(
             {"diff": str(diff), "entry": CashEntrySerializer(entry).data},
@@ -1090,9 +1385,10 @@ class PeriodLockView(APIView):
         now = serializer.instance.closed_through
         if now == was:
             return Response(serializer.data)
-        AuditLog.record(
+        auditing.record(
             request.user,
             f"Период закрыт по {now:%d.%m.%Y}" if now
             else f"Период ОТКРЫТ (был закрыт по {was:%d.%m.%Y})",
+            "settings",
         )
         return Response(serializer.data)

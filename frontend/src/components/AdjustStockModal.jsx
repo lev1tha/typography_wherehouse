@@ -6,7 +6,10 @@ import { apiError } from "../api/errors.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 import { formatNumber } from "../utils/format.js";
+import { parseNumber } from "../utils/pasteTable.js";
 import Field from "./Field.jsx";
+
+const today = () => new Date().toLocaleDateString("sv-SE");
 
 // Исправление остатка — инвентаризация одного материала.
 //
@@ -38,15 +41,21 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
   const [inSheets, setInSheets] = useState(roll && sheetArea > 0);
   const [counted, setCounted] = useState("");
   const [reason, setReason] = useState("");
+  // Дата пересчёта (G3-N3): считали 30.09, вносят 2.10 — недостача должна
+  // лечь в сентябрь, а не в октябрь.
+  const [day, setDay] = useState(today());
   const [busy, setBusy] = useState(false);
 
   const cur = Number(material.quantity) || 0;
   const enteredUnit = roll ? (inSheets ? wholeUnit : t("unit.SQM")) : unit;
   // Введённое число → количество в единицах хранения (кв.м у рулонного).
+  // Запятая — как в русском Excel: «17,8608».
+  const countedNum = counted === "" ? null : parseNumber(counted);
   const target =
-    counted === "" ? null : inSheets ? Number(counted) * sheetArea : Number(counted);
+    countedNum == null ? null : inSheets ? countedNum * sheetArea : countedNum;
   const delta = target == null ? 0 : target - cur;
-  const q2 = (n) => formatNumber(n, { max: 2 });
+  // Кв.м показываем до 4 знаков: лист 1.22×2.44 = 2.9768, и «6 листов» с
+  // двумя знаками превращались в 17.86 — последний лист было не продать (XL-03).
 
   async function submit() {
     if (target == null || target < 0) return;
@@ -54,8 +63,12 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
     try {
       await api.post("/warehouse/materials/adjust/", {
         material: material.id,
-        counted_quantity: Number(target.toFixed(2)),
+        // Листами — сервер сам переведёт по площади листа без округления.
+        ...(inSheets
+          ? { counted_sheets: countedNum }
+          : { counted_quantity: Number(target.toFixed(4)) }),
         reason,
+        happened_on: day || null,
       });
       toast(t("supply.done"));
       onDone?.();
@@ -87,10 +100,10 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
       <div className="crow">
         <span className="k">{t("supply.currentStock")}</span>
         <strong>
-          {q2(cur)} {roll ? t("unit.SQM") : unit}
+          {formatNumber(cur, { max: 4 })} {roll ? t("unit.SQM") : unit}
           {roll && sheetArea > 0 && (
             <span className="muted" style={{ fontWeight: 400 }}>
-              {" "}· ≈{q2(cur / sheetArea)} {t("warehouse.sheetsShort")}
+              {" "}· ≈{formatNumber(cur / sheetArea, { max: 2 })} {t("warehouse.sheetsShort")}
             </span>
           )}
         </strong>
@@ -112,13 +125,17 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
 
       <Field style={{ marginTop: 12 }} label={<>{`${t("supply.counted")}, ${enteredUnit}`}</>}>
         <input
-          type="number"
-          step="any"
-          min="0"
+          type="text"
+          inputMode="decimal"
           autoFocus
           value={counted}
+          aria-invalid={counted !== "" && countedNum == null ? "true" : undefined}
           onChange={(e) => setCounted(e.target.value)}
         />
+      </Field>
+
+      <Field label={t("stock2.countedOn")}>
+        <input type="date" value={day} max={today()} onChange={(e) => setDay(e.target.value)} />
       </Field>
 
       <Field label={t("supply.reason")}>
@@ -134,13 +151,13 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
           <div className="crow">
             <span className="k">{t("supply.becomes")}</span>
             <strong>
-              {q2(cur)} → {q2(target)} {roll ? t("unit.SQM") : unit}
+              {formatNumber(cur, { max: 4 })} → {formatNumber(target, { max: 4 })} {roll ? t("unit.SQM") : unit}
             </strong>
           </div>
           <div className="crow">
             <span className="k">{t("supply.diff")}</span>
             <strong style={{ color: delta < 0 ? "var(--danger-ink)" : "var(--ok-ink)" }}>
-              {delta > 0 ? "+" : ""}{q2(delta)} {roll ? t("unit.SQM") : unit}
+              {delta > 0 ? "+" : ""}{formatNumber(delta, { max: 4 })} {roll ? t("unit.SQM") : unit}
             </strong>
           </div>
         </div>

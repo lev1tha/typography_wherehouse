@@ -44,6 +44,7 @@ from ..models import CashEntry, ExpenseEntry, ExpenseKind, TaxRate
 from ..periods import add_months, local_day, month_end, month_start
 from . import depreciation
 from .money import SUM, ZERO, cumulative_split, pct, split_evenly, total
+from .quarters import add_quarters, quarter_meta
 from .scope import once, report_scope
 
 # Порядок блоков операционных расходов. «Инвестиции» здесь — покупки дешевле
@@ -148,14 +149,34 @@ def losses_qs(d_from=None, d_to=None):
     return qs
 
 
+def surplus_qs(d_from=None, d_to=None):
+    """Излишки инвентаризации и промера со стоимостью (F5/PNL-04, волна 2):
+    правка остатка в плюс, у которой записана цена. Старые излишки цены не
+    знают (`cost` пуст) — их здесь нет, прошлые месяцы не меняются."""
+    qs = InventoryLog.objects.filter(
+        type=InventoryLog.Type.ADJUSTMENT, quantity_changed__gt=0, cost__isnull=False,
+    )
+    if d_from:
+        qs = qs.filter(happened_at__date__gte=d_from)
+    if d_to:
+        qs = qs.filter(happened_at__date__lte=d_to)
+    return qs
+
+
 def losses(d_from=None, d_to=None):
-    """Потери по себестоимости — (сумма, записей без себестоимости).
+    """Потери по себестоимости НЕТТО — (сумма, записей без себестоимости).
+
+    Недостача и брак минус излишки периода (по дате операции): «насчитал 8 из
+    10, нашёл ещё 2» не оставляет убытка (F5/PNL-04). Излишков больше, чем
+    потерь, — строка уходит в минус: это доход от найденного.
 
     Записи до 04.09.2026 себестоимости не знают — их в сумме нет, отчёт
     показывает их число (аудит, Б-14)."""
     qs = losses_qs(d_from, d_to)
+    lost = qs.filter(cost__isnull=False).aggregate(v=SUM("cost"))["v"]
+    found = surplus_qs(d_from, d_to).aggregate(v=SUM("cost"))["v"]
     return (
-        qs.filter(cost__isnull=False).aggregate(v=SUM("cost"))["v"],
+        lost - found,
         qs.filter(cost__isnull=True).count(),
     )
 
@@ -184,19 +205,44 @@ def cash_count(d_from, d_to):
 # --- То, что ложится в прибыль месяцем -------------------------------------------
 
 
+def _tax_rows():
+    return once("tax_rates", lambda: list(
+        TaxRate.objects.order_by("valid_from").values_list("valid_from", "rate", "basis")
+    ))
+
+
 def tax_rate_for(month) -> Decimal:
     """Ставка налога месяца, % (нет записи — 0). Тот же результат, что у
     `TaxRate.rate_for`, но таблица ставок читается один раз на отчёт: годовая
     таблица спрашивала её по три раза на каждый из 12 месяцев."""
-    rows = once("tax_rates", lambda: list(
-        TaxRate.objects.order_by("valid_from").values_list("valid_from", "rate")
-    ))
     first = month_start(month)
     rate = ZERO
-    for valid_from, value in rows:
+    for valid_from, value, _basis in _tax_rows():
         if valid_from <= first:
             rate = value
     return rate
+
+
+def tax_basis_for(month) -> str:
+    """Основа налога месяца (PNL-14): «по начислению» (D-10, по умолчанию) или
+    «по кассе». Берётся из той же записи истории, что и ставка."""
+    first = month_start(month)
+    basis = TaxRate.Basis.ACCRUAL
+    for valid_from, _value, value_basis in _tax_rows():
+        if valid_from <= first:
+            basis = value_basis
+    return basis
+
+
+def cash_received_by_day(d_from, d_to) -> dict:
+    """{день: деньги от клиентов нетто} по кассовой книге: оплаты минус сдача,
+    возвраты и откаты — база налога «по кассе»."""
+    out = defaultdict(lambda: ZERO)
+    for e in _cash(d_from, d_to, article__in=[A.SALE, A.CHANGE, A.REFUND, A.UNPAY]).only(
+        "kind", "amount", "happened_on"
+    ):
+        out[e.happened_on] += e.signed_amount
+    return out
 
 
 def _load_expenses():
@@ -248,7 +294,10 @@ def month_alloc(month) -> dict:
 
     rate = tax_rate_for(month)
     if rate:
-        revenue_by_day, _ = reporting.by_day(month, days[-1])
+        if tax_basis_for(month) == TaxRate.Basis.CASH:
+            revenue_by_day = cash_received_by_day(month, days[-1])
+        else:
+            revenue_by_day, _ = reporting.by_day(month, days[-1])
         exact = [rate * revenue_by_day.get(day, ZERO) / 100 for day in days]
         for day, part in zip(days, cumulative_split(exact)):
             if part:
@@ -257,16 +306,20 @@ def month_alloc(month) -> dict:
 
 
 def _alloc_in(d_from, d_to):
-    """Сумма раскладок месяцев по дням периода: {ключ: сумма} и ставки месяцев."""
+    """Сумма раскладок месяцев по дням периода: {ключ: сумма}, ставки и основы
+    налога месяцев."""
     sums = defaultdict(lambda: ZERO)
+    bases = set()
     rates = set()
     for month in months_in(d_from, d_to):
         rates.add(tax_rate_for(month))
+        if tax_rate_for(month):
+            bases.add(tax_basis_for(month))
         for key, by_day in month_alloc(month).items():
             for day, value in by_day.items():
                 if d_from <= day <= d_to:
                     sums[key] += value
-    return sums, rates
+    return sums, rates, bases
 
 
 # --- ОПиУ за период --------------------------------------------------------------
@@ -292,12 +345,14 @@ def _opex_blocks(sums):
     return blocks
 
 
-def tax_label(rates) -> str:
+def tax_label(rates, bases=None) -> str:
     rates = {r for r in rates if r}
+    cash = bool(bases) and set(bases) == {TaxRate.Basis.CASH}
     if len(rates) == 1:
-        rate = rates.pop()
-        return chart.PNL_LINES[chart.TAX].format(rate=format(rate.normalize(), "f"))
-    return "Налог с выручки"
+        rate = format(rates.pop().normalize(), "f")
+        line = chart.PNL_LINES[chart.TAX_CASH if cash else chart.TAX]
+        return line.format(rate=rate)
+    return "Налог с полученных денег" if cash else "Налог с выручки"
 
 
 @report_scope
@@ -311,13 +366,26 @@ def pnl(d_from=None, d_to=None) -> dict:
         d_from, d_to, type=TransactionItem.Type.SERVICE, service__kind="CUTTING"
     )
     cogs = reporting.cogs(d_from, d_to)
+    # Гарантийные переделки (волна 2, D-88): их себестоимость — своей строкой,
+    # а не внутри материала и расходников. Сумма себестоимости та же: строки
+    # только переложены, двойного счёта нет.
+    _, cogs_warranty = lines_money(d_from, d_to, receipt__is_warranty=True)
+    _, cogs_warranty_material = lines_money(
+        d_from, d_to, type=TransactionItem.Type.MATERIAL, receipt__is_warranty=True
+    )
     loss, loss_unknown = losses(d_from, d_to)
     cogs_total = cogs + loss
     gross = revenue - cogs_total
 
-    sums, rates = _alloc_in(d_from, d_to)
+    sums, rates, bases = _alloc_in(d_from, d_to)
     blocks = _opex_blocks(sums)
     opex = total(b["total"] for b in blocks)
+    # Часть операционных расходов, у которой нет денег (списанные безнадёжные
+    # долги): сверке она нужна отдельной строкой, а не «ждущей оплаты».
+    noncash_ids = once("noncash_kind_ids", lambda: list(
+        ExpenseKind.objects.filter(code__in=ExpenseKind.NO_CASH_CODES).values_list("id", flat=True)
+    ))
+    opex_noncash = total(sums[("opex", kid)] for kid in noncash_ids)
     manual = manual_cash_expenses(d_from, d_to)
     count = cash_count(d_from, d_to)
     ebitda = gross - opex - manual + count
@@ -342,13 +410,15 @@ def pnl(d_from=None, d_to=None) -> dict:
         "revenue_material": revenue_material,
         "revenue_cutting": revenue_cutting,
         "revenue_other": revenue - revenue_material - revenue_cutting,
-        "cogs_material": cogs_material,
-        "cogs_services": cogs - cogs_material,
+        "cogs_material": cogs_material - cogs_warranty_material,
+        "cogs_services": cogs - cogs_material - (cogs_warranty - cogs_warranty_material),
+        "cogs_warranty": cogs_warranty,
         "losses": loss,
         "losses_unknown": loss_unknown,
         "cogs_total": cogs_total,
         "gross_profit": gross,
         "opex": {"total": opex, "blocks": blocks},
+        "opex_noncash": opex_noncash,
         "opex_cash_manual": manual,
         "cash_count": count,
         "ebitda": ebitda,
@@ -357,7 +427,8 @@ def pnl(d_from=None, d_to=None) -> dict:
         "operating_profit": operating,
         "interest": interest,
         "tax": tax,
-        "tax_label": tax_label(rates),
+        "tax_label": tax_label(rates, bases),
+        "tax_basis": bases.pop() if len(bases) == 1 else ("MIXED" if bases else TaxRate.Basis.ACCRUAL),
         "net_profit": net,
         "margins": {
             "gross": pct(gross, revenue),
@@ -380,6 +451,8 @@ def pnl_by_day(d_from, d_to) -> list[dict]:
     loss = defaultdict(lambda: ZERO)
     for log in losses_qs(d_from, d_to).filter(cost__isnull=False).only("happened_at", "cost"):
         loss[local_day(log.happened_at)] += log.cost
+    for log in surplus_qs(d_from, d_to).only("happened_at", "cost"):
+        loss[local_day(log.happened_at)] -= log.cost
     manual = defaultdict(lambda: ZERO)
     count = defaultdict(lambda: ZERO)
     for e in _cash(d_from, d_to, article__in=[A.EXPENSE, A.SALARY, A.COUNT]).only(
@@ -456,6 +529,9 @@ def pnl_year(year: int) -> dict:
     add("cogs", "Себестоимость", neg(lambda p: p["cogs_total"]), kind="subtotal", level=0, hint="cogs")
     add("cogs_material", chart.PNL_LINES[chart.COGS_MATERIAL], neg(lambda p: p["cogs_material"]))
     add("cogs_services", chart.PNL_LINES[chart.COGS_SERVICES], neg(lambda p: p["cogs_services"]))
+    warranty = neg(lambda p: p["cogs_warranty"])
+    if any(warranty):
+        add("cogs_warranty", chart.PNL_LINES[chart.COGS_WARRANTY], warranty, hint="cogs_warranty")
     add("losses", chart.PNL_LINES[chart.LOSSES], neg(lambda p: p["losses"]), hint="losses")
 
     gross = col(lambda p: p["gross_profit"])
@@ -518,7 +594,8 @@ def pnl_year(year: int) -> dict:
     add("interest", chart.PNL_LINES[chart.INTEREST], neg(lambda p: p["interest"]),
         level=0, hint="interest")
     year_rates = {tax_rate_for(first) for first, _ in months}
-    add("tax", tax_label(year_rates), neg(lambda p: p["tax"]), level=0, hint="tax")
+    year_bases = {tax_basis_for(first) for first, _ in months if tax_rate_for(first)}
+    add("tax", tax_label(year_rates, year_bases), neg(lambda p: p["tax"]), level=0, hint="tax")
 
     net = col(lambda p: p["net_profit"])
     add("net", "Чистая прибыль", net, kind="grand", level=0, hint="net")
@@ -533,12 +610,18 @@ def pnl_year(year: int) -> dict:
                       ("operating_pct", "operating"), ("net_pct", "net")):
         next(r for r in rows if r["key"] == key)["total"] = pct(totals[base], totals["revenue"])
 
+    month_info = [
+        {"month": first.month, "from": first, "to": last, "future": first > today}
+        for first, last in months
+    ]
+    add_quarters(rows, percent={
+        "gross_pct": ("gross", "revenue"), "ebitda_pct": ("ebitda", "revenue"),
+        "operating_pct": ("operating", "revenue"), "net_pct": ("net", "revenue"),
+    })
     return {
         "year": year,
-        "months": [
-            {"month": first.month, "from": first, "to": last, "future": first > today}
-            for first, last in months
-        ],
+        "months": month_info,
+        "quarters": quarter_meta(month_info),
         "rows": rows,
         "losses_unknown": sum(p["losses_unknown"] for p in per),
     }

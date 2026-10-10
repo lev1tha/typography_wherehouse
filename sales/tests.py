@@ -132,7 +132,8 @@ class CuttingPricingAPITests(APITestCase):
 
     def _checkout(self, items, amount_paid=None):
         # amount_paid не указан → касса ничего не приняла, заказ уходит в долг.
-        payload = {"payment_method": "CASH", "items": items}
+        # Заказ в долг без клиента принимается только с именем покупателя.
+        payload = {"payment_method": "CASH", "items": items, "buyer_name": "Покупатель"}
         if amount_paid is not None:
             payload["amount_paid"] = amount_paid
         return self.client.post(
@@ -235,6 +236,7 @@ class CuttingPricingAPITests(APITestCase):
             {
                 "payment_method": "CASH",
                 "amount_paid": 1000,
+                "buyer_name": "Покупатель",
                 "items": [{"type": "MATERIAL", "material": self.acrylic.id, "quantity": 1, "mode": "PIECE"}],
             },
             format="json",
@@ -270,6 +272,7 @@ class CuttingPricingAPITests(APITestCase):
             {
                 "payment_method": "CASH",
                 "amount_paid": 0,
+                "buyer_name": "Покупатель",
                 "items": [{"type": "MATERIAL", "material": self.acrylic.id, "quantity": 1, "mode": "PIECE"}],
             },
             format="json",

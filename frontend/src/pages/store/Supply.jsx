@@ -5,6 +5,7 @@ import api from "../../api/api.js";
 import StockJournal from "../../components/StockJournal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import Tabs from "../../components/Tabs.jsx";
+import { parseNumber } from "../../utils/pasteTable.js";
 
 // Module-level so they keep a stable identity across renders — defining these
 // inside the component remounts the inputs on every keystroke (focus loss).
@@ -14,8 +15,32 @@ const Field = ({ label, children }) => (
     {children}
   </div>
 );
+// Текстовое поле с десятичной клавиатурой: «17,8608» с запятой, как в Excel
+// (type=number на запятой отдавал пустую строку).
 const Num = ({ value, onChange }) => (
-  <input type="number" step="any" value={value} onChange={(e) => onChange(e.target.value)} />
+  <input
+    type="text"
+    inputMode="decimal"
+    value={value}
+    aria-invalid={value !== "" && parseNumber(value) == null ? "true" : undefined}
+    onChange={(e) => onChange(e.target.value)}
+  />
+);
+const today = () => new Date().toLocaleDateString("sv-SE");
+// Листовой материал считают листами (XL-03/STK-08): сервер переводит их в кв.м
+// по площади листа без округления до сотых.
+const bySheet = (m) => !!(m && m.is_roll_material && !m.sells_by_metre && Number(m.piece_area) > 0);
+const num = (v) => parseNumber(v);
+const q4 = (n) => (Math.round(n * 10000) / 10000).toString();
+// Переключатель «листы / кв.м» — внизу того же поля.
+const UnitToggle = ({ value, onChange, t }) => (
+  <div className="tabs" style={{ marginBottom: 10 }}>
+    {[[true, t("warehouse.unitSheet")], [false, t("unit.SQM")]].map(([key, label]) => (
+      <button key={String(key)} type="button" className={value === key ? "active" : ""} onClick={() => onChange(key)}>
+        {label}
+      </button>
+    ))}
+  </div>
 );
 const MaterialSelect = ({ value, onChange, materials, t }) => (
   <select value={value} onChange={onChange}>
@@ -44,8 +69,10 @@ export default function Supply({ embedded = false }) {
   const [materials, setMaterials] = useState([]);
   const [busy, setBusy] = useState(false);
 
-  const [inv, setInv] = useState({ material: "", counted_quantity: "", reason: "" });
-  const [writeoff, setWriteoff] = useState({ material: "", roll: "", quantity: "", reason_code: "DAMAGE", note: "" });
+  const INV0 = { material: "", counted_quantity: "", reason: "", inSheets: true, day: today() };
+  const WO0 = { material: "", roll: "", quantity: "", reason_code: "DAMAGE", note: "", inSheets: true, day: today() };
+  const [inv, setInv] = useState(INV0);
+  const [writeoff, setWriteoff] = useState(WO0);
   // Рулоны выбранного рулонного материала: брак списывают с конкретного рулона
   // и в метрах — общее число в кв.м уходило FIFO со старейшего рулона, и
   // «порвали 2 м рулона №8» обнуляло целый №7.
@@ -66,9 +93,17 @@ export default function Supply({ embedded = false }) {
   const materialOf = (id) => materials.find((x) => x.id === Number(id)) || null;
   const writeoffMat = materialOf(writeoff.material);
   const writeoffByRoll = !!writeoffMat?.sells_by_metre;
+  const woSheets = bySheet(writeoffMat) && writeoff.inSheets;
   const writeoffUnit = writeoffMat
-    ? writeoffByRoll ? t("unit.METER") : writeoffMat.is_roll_material ? t("unit.SQM") : t(`unit.${writeoffMat.unit}`)
+    ? writeoffByRoll ? t("unit.METER") : woSheets ? t("warehouse.unitSheet") : writeoffMat.is_roll_material ? t("unit.SQM") : t(`unit.${writeoffMat.unit}`)
     : "";
+  // Сколько уйдёт в единицах хранения (кв.м у листа) — для строки «станет».
+  const woQty = num(writeoff.quantity);
+  const woArea = woQty == null ? null : woSheets ? woQty * Number(writeoffMat.piece_area) : woQty;
+  const invMat = materialOf(inv.material);
+  const invSheets = bySheet(invMat) && inv.inSheets;
+  const invQty = num(inv.counted_quantity);
+  const invArea = invQty == null ? null : invSheets ? invQty * Number(invMat.piece_area) : invQty;
   useEffect(() => {
     if (!writeoffByRoll) {
       setRolls([]);
@@ -107,10 +142,11 @@ export default function Supply({ embedded = false }) {
     run(async () => {
       await api.post("/warehouse/materials/adjust/", {
         material: Number(inv.material),
-        counted_quantity: Number(inv.counted_quantity),
+        ...(invSheets ? { counted_sheets: invQty } : { counted_quantity: invQty }),
         reason: inv.reason,
+        happened_on: inv.day || null,
       });
-      setInv({ material: "", counted_quantity: "", reason: "" });
+      setInv(INV0);
     });
 
   const submitWriteOff = () =>
@@ -118,19 +154,21 @@ export default function Supply({ embedded = false }) {
       if (writeoffByRoll) {
         // С конкретного рулона и в метрах — его шириной и по его цене.
         await api.post(`/warehouse/rolls/${writeoffRoll.id}/write-off/`, {
-          metres: Number(writeoff.quantity),
+          metres: woQty,
           reason_code: writeoff.reason_code,
           note: writeoff.note,
+          happened_on: writeoff.day || null,
         });
       } else {
         await api.post("/warehouse/materials/write-off/", {
           material: Number(writeoff.material),
-          quantity: Number(writeoff.quantity),
+          ...(woSheets ? { sheets: woQty } : { quantity: woQty }),
           reason_code: writeoff.reason_code,
           note: writeoff.note,
+          happened_on: writeoff.day || null,
         });
       }
-      setWriteoff({ material: "", roll: "", quantity: "", reason_code: "DAMAGE", note: "" });
+      setWriteoff(WO0);
     });
 
   const TABS = [
@@ -170,18 +208,24 @@ export default function Supply({ embedded = false }) {
           {materials.some((m) => m.sells_by_metre) && (
             <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("warehouse.rollStockByMeasure")}</p>
           )}
-          <Field label={t("supply.counted")}>
+          {bySheet(invMat) && (
+            <UnitToggle value={inv.inSheets} onChange={(v) => setInv({ ...inv, inSheets: v, counted_quantity: "" })} t={t} />
+          )}
+          <Field label={`${t("supply.counted")}${invSheets ? `, ${t("warehouse.unitSheet")}` : ""}`}>
             <Num value={inv.counted_quantity} onChange={(v) => setInv({ ...inv, counted_quantity: v })} />
           </Field>
-          {inv.material && inv.counted_quantity !== "" && (
+          <Field label={t("stock2.countedOn")}>
+            <input type="date" value={inv.day} max={today()} onChange={(e) => setInv({ ...inv, day: e.target.value })} />
+          </Field>
+          {inv.material && invArea != null && (
             <div className="card" style={{ background: "var(--canvas)", padding: 12, marginBottom: 14 }}>
-              <div className="crow"><span className="k">{t("supply.becomes")}</span><strong>{stockOf(inv.material)} → {Number(inv.counted_quantity)}</strong></div>
+              <div className="crow"><span className="k">{t("supply.becomes")}</span><strong>{stockOf(inv.material)} → {q4(invArea)}</strong></div>
             </div>
           )}
           <Field label={t("supply.reason")}>
             <input value={inv.reason} onChange={(e) => setInv({ ...inv, reason: e.target.value })} />
           </Field>
-          <button style={{ width: "100%", height: 50 }} onClick={submitInventory} disabled={busy || !inv.material || inv.counted_quantity === ""}>
+          <button style={{ width: "100%", height: 50 }} onClick={submitInventory} disabled={busy || !inv.material || invQty == null || invQty < 0}>
             {t("supply.inventory")}
           </button>
         </div>
@@ -192,7 +236,7 @@ export default function Supply({ embedded = false }) {
           <Field label={t("checkout.material")}>
             <MaterialSelect
               value={writeoff.material}
-              onChange={(e) => setWriteoff({ ...writeoff, material: e.target.value, roll: "", quantity: "" })}
+              onChange={(e) => setWriteoff({ ...writeoff, material: e.target.value, roll: "", quantity: "", inSheets: true })}
               materials={materials}
               t={t}
             />
@@ -215,22 +259,28 @@ export default function Supply({ embedded = false }) {
               </Field>
             </>
           )}
+          {bySheet(writeoffMat) && (
+            <UnitToggle value={writeoff.inSheets} onChange={(v) => setWriteoff({ ...writeoff, inSheets: v, quantity: "" })} t={t} />
+          )}
           <Field label={writeoffByRoll ? t("supply.writeoffMetres") : `${t("supply.writeoffQty")}${writeoffUnit ? `, ${writeoffUnit}` : ""}`}>
             <Num value={writeoff.quantity} onChange={(v) => setWriteoff({ ...writeoff, quantity: v })} />
           </Field>
-          {writeoff.material && writeoff.quantity && (
+          <Field label={t("stock2.writtenOn")}>
+            <input type="date" value={writeoff.day} max={today()} onChange={(e) => setWriteoff({ ...writeoff, day: e.target.value })} />
+          </Field>
+          {writeoff.material && woArea != null && (
             <div className="card" style={{ background: "var(--canvas)", padding: 12, marginBottom: 14 }}>
               {writeoffByRoll ? (
                 writeoffRoll && (
                   <div className="crow">
                     <span className="k">{t("supply.becomes")} ({rollLabel(writeoffRoll).split(" · ")[0]})</span>
                     <strong>
-                      {writeoffRoll.metres_remaining} → {(Number(writeoffRoll.metres_remaining) - Number(writeoff.quantity)).toFixed(2)} {t("unit.METER")}
+                      {writeoffRoll.metres_remaining} → {(Number(writeoffRoll.metres_remaining) - woQty).toFixed(2)} {t("unit.METER")}
                     </strong>
                   </div>
                 )
               ) : (
-                <div className="crow"><span className="k">{t("supply.becomes")}</span><strong>{stockOf(writeoff.material)} → {(Number(stockOf(writeoff.material)) - Number(writeoff.quantity)).toFixed(2)} {writeoffUnit}</strong></div>
+                <div className="crow"><span className="k">{t("supply.becomes")}</span><strong>{stockOf(writeoff.material)} → {q4(Math.max(0, Number(stockOf(writeoff.material)) - woArea))} {writeoffMat?.is_roll_material ? t("unit.SQM") : writeoffUnit}</strong></div>
               )}
             </div>
           )}
@@ -249,8 +299,8 @@ export default function Supply({ embedded = false }) {
             style={{ width: "100%", height: 50 }}
             onClick={submitWriteOff}
             disabled={
-              busy || !writeoff.material || !(Number(writeoff.quantity) > 0) ||
-              (writeoffByRoll && (!writeoffRoll || Number(writeoff.quantity) > Number(writeoffRoll.metres_remaining)))
+              busy || !writeoff.material || !(woQty > 0) ||
+              (writeoffByRoll && (!writeoffRoll || woQty > Number(writeoffRoll.metres_remaining)))
             }
           >
             {t("supply.writeoff")}

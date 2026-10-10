@@ -53,8 +53,12 @@ class SupplyCreatePaymentPermissionTests(APITestCase):
 
     def test_storekeeper_still_creates_a_supply_without_payment(self):
         self.client.force_authenticate(self.keeper)
-        for extra in ({}, {"paid_amount": 0}, {"paid_amount": "0", "paid_account": ""}):
-            resp = self.client.post(self.URL, self._payload(**extra), format="json")
+        # Номера разные: одинаковый ввод (поставщик + сумма + дата) система
+        # принимает за двойной и просит подтверждения (F11) — это другой тест.
+        for n, extra in enumerate(({}, {"paid_amount": 0}, {"paid_amount": "0", "paid_account": ""})):
+            resp = self.client.post(
+                self.URL, self._payload(number=f"К-{n}", **extra), format="json"
+            )
             self.assertEqual(resp.status_code, 201, (extra, resp.data))
         self.assertFalse(CashEntry.objects.exists())
 

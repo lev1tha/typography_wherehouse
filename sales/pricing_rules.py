@@ -58,12 +58,10 @@ class Breakdown:
     discount: Decimal  # сколько сняла скидка (положительное число)
 
 
-def target_total(qty: Decimal, base_price: Decimal, rules: LineRules) -> tuple[Decimal, bool]:
-    """Стоимость строки по правилам (целые сомы) и признак «сработал минимум».
-
-    Минимум не трогает строку за 0: нулевая цена — осознанный подарок админа,
-    а не «слишком дешёвая работа».
-    """
+def exact_total(qty: Decimal, base_price: Decimal, rules: LineRules) -> tuple[Decimal, bool]:
+    """Стоимость строки по правилам БЕЗ округления до сома и признак «сработал
+    минимум». Минимум не трогает строку за 0: нулевая цена — осознанный подарок
+    админа, а не «слишком дешёвая работа»."""
     amount = qty * base_price
     applied = False
     if rules.minimum > 0 and ZERO < amount < rules.minimum:
@@ -71,7 +69,28 @@ def target_total(qty: Decimal, base_price: Decimal, rules: LineRules) -> tuple[D
         applied = True
     amount = amount * (HUNDRED + rules.urgency) / HUNDRED
     amount = amount * (HUNDRED - rules.discount) / HUNDRED
+    return amount, applied
+
+
+def target_total(qty: Decimal, base_price: Decimal, rules: LineRules) -> tuple[Decimal, bool]:
+    """Стоимость строки по правилам (целые сомы, вверх) и признак «сработал минимум»."""
+    amount, applied = exact_total(qty, base_price, rules)
     return _ceil_s(amount), applied
+
+
+def price_for_target(qty: Decimal, target: Decimal) -> Decimal:
+    """Наибольшая цена за единицу (до копейки), при которой `количество × цена`,
+    округлённое вверх до сома, равно целевой сумме. При количестве до 100 единиц
+    попадание точное; при большем строка может выйти на несколько сомов дороже
+    цели, но никогда не дешевле."""
+    qty = Decimal(qty)
+    target = Decimal(target)
+    if qty <= 0:
+        return ZERO
+    price = (target / qty).quantize(CENT, rounding=ROUND_FLOOR)
+    if _ceil_s(qty * price) < target:
+        price += CENT
+    return price
 
 
 def price_for(qty: Decimal, base_price: Decimal, rules: LineRules) -> tuple[Decimal, bool]:
@@ -92,10 +111,31 @@ def price_for(qty: Decimal, base_price: Decimal, rules: LineRules) -> tuple[Deci
     target, applied = target_total(qty, base_price, rules)
     if _ceil_s(qty * base_price) == target:
         return base_price, applied
-    price = (target / qty).quantize(CENT, rounding=ROUND_FLOOR)
-    if _ceil_s(qty * price) < target:
-        price += CENT
-    return price, applied
+    return price_for_target(qty, target), applied
+
+
+def allocate_order_total(exacts: list[Decimal]) -> list[Decimal]:
+    """Раскладка итога заказа по строкам (режим «итог одной формулой»).
+
+    Итог — сумма точных стоимостей строк, вверх до целого сома. Каждая строка
+    получает свою стоимость вниз до сома, а разница округления (меньше числа
+    строк плюс один сом) целиком ложится в ПОСЛЕДНЮЮ строку с ненулевой
+    стоимостью. Так строки остаются целыми сомами, их сумма равна итогу, а
+    каждая отличается от точной не больше чем на число строк сомов. Строки за
+    0 (подарок) остаются нулевыми.
+    """
+    if not exacts:
+        return []
+    total = _ceil_s(sum(exacts, ZERO))
+    floors = [max(e, ZERO).quantize(SOM, rounding=ROUND_FLOOR) for e in exacts]
+    rest = total - sum(floors, ZERO)
+    shares = list(floors)
+    if rest > 0:
+        for i in range(len(exacts) - 1, -1, -1):
+            if exacts[i] > 0:
+                shares[i] += rest
+                break
+    return shares
 
 
 def breakdown(item) -> Breakdown | None:

@@ -19,6 +19,8 @@ export default function ProfitLadder({ pnl }) {
   const steps = [
     ["revenue", t("ladder.revenue"), pnl.revenue, true],
     ["cogs", t("ladder.cogs"), -(Number(pnl.cogs_material) + Number(pnl.cogs_services))],
+    // Гарантийные переделки (волна 2) — часть себестоимости своей строкой.
+    ["cogs_warranty", t("ladder.warranty"), -(Number(pnl.cogs_warranty) || 0), false, null, true],
     ["losses", t("ladder.losses"), -pnl.losses, false, null, true],
     ["gross", t("ladder.gross"), pnl.gross_profit, true, pnl.margins?.gross],
     ["opex", t("ladder.opex"), -pnl.opex?.total],

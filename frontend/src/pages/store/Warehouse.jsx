@@ -7,6 +7,7 @@ import Icon from "../../components/Icon.jsx";
 import { formatMoney, formatNumber } from "../../utils/format.js";
 import { apiError } from "../../api/errors.js";
 import LoadError from "../../components/LoadError.jsx";
+import TransferModal from "../../components/TransferModal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { isCanceled, useLatest } from "../../utils/latest.js";
 
@@ -29,6 +30,9 @@ export default function Warehouse() {
   const [typeId, setTypeId] = useState("");
   const [types, setTypes] = useState([]);
   const [gallery, setGallery] = useState(null);
+  // Перемещение между площадками (STK-05): возит складовщик — ему и кнопка.
+  const [transferring, setTransferring] = useState(null);
+  const [sites, setSites] = useState([]);
   const [failed, setFailed] = useState(false);
   const { toast } = useUI();
   // Поиск шлёт запрос на каждое нажатие — побеждает последний.
@@ -55,6 +59,10 @@ export default function Warehouse() {
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, typeId]);
+
+  useEffect(() => {
+    api.get("/warehouse/production-sites/").then((r) => setSites(r.data.results || r.data)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     api.get("/warehouse/material-types/").then((r) => setTypes(r.data.results || r.data));
@@ -160,6 +168,16 @@ export default function Warehouse() {
                   )}
                 </span>
               </div>
+              {/* Где лежит — по площадкам (STK-05). */}
+              {m.by_site?.length > 0 && (
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {m.by_site.map((row, i) => (
+                    <span key={row.site ?? "none"}>
+                      {i > 0 ? " · " : ""}{row.name || t("stock2.noSite")}: {qty(row.area)}
+                    </span>
+                  ))}
+                </div>
+              )}
               <div className="crow">
                 <span className="k">{t("warehouse.retailPrice")}</span>
                 {/* У листового материала цена лежит в цене за кв.м, а
@@ -180,12 +198,30 @@ export default function Warehouse() {
                     : som(m.price_per_unit)}
                 </span>
               </div>
+              {Number(m.quantity) > 0 && sites.length > 0 && (
+                <button
+                  type="button"
+                  className="secondary row-btn"
+                  style={{ marginTop: 8 }}
+                  onClick={() => setTransferring(m)}
+                >
+                  {t("stock2.transfer")}
+                </button>
+              )}
             </div>
           </div>
         ))}
       </div>
 
       {gallery && <GalleryModal material={gallery} onClose={() => setGallery(null)} />}
+      {transferring && (
+        <TransferModal
+          material={transferring}
+          sites={sites}
+          onClose={() => setTransferring(null)}
+          onDone={load}
+        />
+      )}
     </>
   );
 }

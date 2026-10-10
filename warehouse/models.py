@@ -234,6 +234,30 @@ class Material(models.Model):
         default=Decimal("0"),
         help_text=_("Стоимость работы резки за погонный метр для этого материала"),
     )
+    # Наценка от закупа (STK-03, волна 2). Цена продажи по-прежнему вводится
+    # руками — это ПОДСКАЗКА: закуп последней партии × (1 + наценка). Пусто —
+    # подсказки нет, всё как раньше. См. warehouse/pricing.py.
+    markup_percent = models.DecimalField(
+        _("наценка, %"), max_digits=7, decimal_places=2, null=True, blank=True,
+        help_text=_("Цена-подсказка = закуп последней партии × (1 + наценка)"),
+    )
+    # Коэффициент использования материала при раскрое (STK-07/G4-N1, волна 2).
+    # Детали 0.77 кв.м из листа при КИМ 62 % съедают 1.24 кв.м: остальное —
+    # обрезки, которые никуда не продать. Пусто — списываем ровно площадь
+    # деталей, как раньше. См. `warehouse.rolls.kim_factor`.
+    kim_percent = models.DecimalField(
+        _("КИМ раскроя, %"), max_digits=5, decimal_places=2, null=True, blank=True,
+        help_text=_("Списание куска = площадь деталей ÷ КИМ; целые листы — как есть"),
+    )
+    # Минимальный остаток В ЕДИНИЦАХ МАТЕРИАЛА (STK-06, волна 2): листы у листа,
+    # метры у рулона, штуки у штучного. «5 листов» владелец пересчитывал в
+    # 14,88 кв.м сам. Задан — из него считается `critical_balance` (кв.м), на
+    # котором держатся бейдж «на исходе» и оповещение; пусто — порог как был.
+    min_stock = models.DecimalField(
+        _("минимальный остаток, в единицах материала"), max_digits=12, decimal_places=2,
+        null=True, blank=True,
+        help_text=_("Листы, метры или штуки. «К заказу» — до двух минимумов"),
+    )
     # Откуда возят материал — колонка «производство» в складской таблице
     # заказчика (Бишкек, Глобал). Справочник, а не свободный текст: печатать
     # его на каждом материале руками — лишняя работа, а опечатка заводила бы
@@ -261,6 +285,11 @@ class Material(models.Model):
             self.piece_area = (self.sheet_width * self.sheet_height).quantize(
                 Decimal("0.0001")
             )
+        if self.min_stock is not None:
+            # Порог в единицах материала → порог хранения (кв.м у листа и рулона).
+            from .reorder import to_stock_units
+
+            self.critical_balance = to_stock_units(self, self.min_stock)
         if not (self.name or "").strip():
             self.name = self.suggested_name()
         super().save(*args, **kwargs)
@@ -298,14 +327,20 @@ class Material(models.Model):
     def piece_price_for_qty(self, qty) -> Decimal:
         """Per-sheet price for a whole-sheet sale of ``qty`` sheets. Switches to
         the wholesale price once ``qty`` reaches ``wholesale_min_qty`` (only when
-        an admin has set a wholesale price). Otherwise the regular piece price."""
+        an admin has set a wholesale price). Otherwise the regular piece price.
+
+        Ступени опта (CLI-02, волна 2): «от 10 листов — 3 500, от 25 — 3 200».
+        Берётся ступень с самым большим порогом, которого достигло количество;
+        прежняя пара «опт / опт от» — ещё одна ступень наравне с ними. Ступеней
+        нет — всё как раньше.
+        """
         qty = Decimal(str(qty or 0))
-        if (
-            self.wholesale_price
-            and self.wholesale_min_qty
-            and qty >= self.wholesale_min_qty
-        ):
-            return self.wholesale_price
+        steps = [(t.min_qty, t.price) for t in self.price_tiers.all() if t.price and t.min_qty]
+        if self.wholesale_price and self.wholesale_min_qty:
+            steps.append((self.wholesale_min_qty, self.wholesale_price))
+        reached = [s for s in steps if qty >= s[0]]
+        if reached:
+            return max(reached, key=lambda s: s[0])[1]
         return self.piece_price
 
     @property
@@ -333,6 +368,18 @@ class Material(models.Model):
         return bool(
             self.is_roll_material and self.intake_form == self.IntakeForm.ROLL
         )
+
+    @property
+    def sells_roll_by_area(self) -> bool:
+        """Рулон, который можно продать ещё и по площади ИЗДЕЛИЯ (CALC-10, D-140).
+
+        Вторая цена рулона — `price_per_sqm` («баннер 220 сом/кв.м»): клиент
+        платит ширина × длина изделия × цена, а со склада уходит вся ширина
+        рулона × длина. Цена не задана — рулон продаётся только метрами, как
+        раньше. Запасной цены здесь нет (`sqm_price` подставил бы
+        `price_per_unit`): способ продажи включает только явно заданная цена.
+        """
+        return bool(self.sells_by_metre and self.price_per_sqm and self.price_per_sqm > 0)
 
     @property
     def metres_remaining(self):
@@ -389,7 +436,7 @@ class Material(models.Model):
             take = min(roll.remaining_area, left)
             if take <= 0:
                 continue
-            value += take * roll.cost_per_sqm
+            value += roll.cost_of(take)
             left -= take
         value += left * (self.purchase_price or Decimal("0"))
         return value.quantize(Decimal("0.01"))
@@ -437,6 +484,12 @@ def stock_value_total(upto=None) -> Decimal:
             Decimal("0"),
         )
 
+    # Снимок на эту дату (STK-04, волна 2) — замороженная цифра: снят при
+    # закрытии месяца или командой, от поставок задним числом не плывёт.
+    snapshot = StockSnapshot.objects.filter(as_of=upto).values_list("value", flat=True).first()
+    if snapshot is not None:
+        return snapshot
+
     moved = {
         row["material"]: row["v"] or Decimal("0")
         for row in InventoryLog.objects.filter(happened_at__date__lte=upto)
@@ -456,11 +509,30 @@ def stock_value_total(upto=None) -> Decimal:
             if left <= 0:
                 break
             take = min(roll.initial_area, left)
-            total += take * roll.cost_per_sqm
+            total += roll.cost_of(take)
             left -= take
         # Остаток сверх партий — по последней закупочной, как и «сейчас».
         total += left * (material.purchase_price or Decimal("0"))
     return total.quantize(Decimal("0.01"))
+
+
+class MaterialPriceTier(models.Model):
+    """Ступень опта за лист (CLI-02, волна 2): «от N листов — цена»."""
+
+    material = models.ForeignKey(Material, on_delete=models.CASCADE, related_name="price_tiers")
+    min_qty = models.DecimalField(_("от, листов"), max_digits=12, decimal_places=2)
+    price = models.DecimalField(_("цена за лист"), max_digits=12, decimal_places=2)
+
+    class Meta:
+        verbose_name = _("ступень опта")
+        verbose_name_plural = _("ступени опта")
+        ordering = ["material", "min_qty"]
+        constraints = [
+            models.UniqueConstraint(fields=["material", "min_qty"], name="price_tier_material_min_qty"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.material_id}: от {self.min_qty} — {self.price}"
 
 
 class MaterialMonthOpening(models.Model):
@@ -608,6 +680,10 @@ class InventoryLog(models.Model):
         # стало». Движения она не несёт (количество 0, себестоимости нет): ни
         # продажа, ни потеря, ни промер, в ОПиУ не попадает.
         CORRECTION = "CORRECTION", _("Исправление прихода")
+        # Перемещение между площадками (STK-05/G4-N4, волна 2). Остаток
+        # материала не меняется (количество 0), закупа и потерь нет — только
+        # где лежит. Подробности — в `StockTransfer`.
+        TRANSFER = "TRANSFER", _("Перемещение")
 
     type = models.CharField(max_length=20, choices=Type.choices)
     material = models.ForeignKey(
@@ -752,6 +828,13 @@ class Roll(models.Model):
         "ProductionSite", on_delete=models.PROTECT, null=True, blank=True,
         related_name="rolls", verbose_name=_("производство"),
     )
+    # ГДЕ ЛЕЖИТ партия (STK-05, волна 2) — в отличие от `production` («откуда
+    # приехала»). Пусто — площадка не указана (старые партии). Часть партии,
+    # перевезённая на другую площадку, — `LotPlacement`.
+    site = models.ForeignKey(
+        "ProductionSite", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="stored_rolls", verbose_name=_("площадка хранения"),
+    )
     form = models.CharField(max_length=10, choices=Form.choices, default=Form.ROLL)
     # Raw dimensions as entered (for display / audit); area is the source of truth.
     width = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
@@ -801,9 +884,24 @@ class Roll(models.Model):
 
     @property
     def cost_per_sqm(self) -> Decimal:
+        """Цена кв.м (штуки) партии, до копеек — ДЛЯ ПОКАЗА. Считать по ней
+        себестоимость нельзя: см. `cost_of`."""
         if not self.initial_area:
             return Decimal("0")
         return (self.purchase_cost / self.initial_area).quantize(Decimal("0.01"))
+
+    def cost_of(self, area) -> Decimal:
+        """Себестоимость `area` кв.м (штук) этой партии — закуп × взято / принято.
+
+        Без промежуточного округления цены кв.м до копеек (STK-10): 20 листов
+        партии за 92 280 давали 92 280,20, потому что 92 280 / 59.536 = 1 550.0034
+        округлялось до 1 550,00 и умножалось обратно с хвостом. Теперь партия,
+        проданная целиком, стоит ровно свой закуп. Не округляет — округляет тот,
+        кто записывает сумму.
+        """
+        if not self.initial_area:
+            return Decimal("0")
+        return self.purchase_cost * Decimal(area) / self.initial_area
 
     # --- Рулон в погонных метрах: считаем СВОЕЙ шириной ------------------
     #
@@ -867,6 +965,115 @@ class Roll(models.Model):
     def __str__(self) -> str:
         label = self.code or f"Партия #{self.pk}"
         return f"{label} — {self.material.name}: {self.remaining_area}/{self.initial_area} кв.м"
+
+
+class LotPlacement(models.Model):
+    """Часть остатка партии, лежащая НЕ на площадке партии (STK-05, волна 2).
+
+    Партия не делится: её приход, цена, продажи и возвраты остаются как были
+    (на ней держатся накладная, «Исправить приход» и возврат в ту же партию).
+    Перемещение лишь записывает, сколько её кв.м (штук) лежит на другой
+    площадке. Продажа площадку не знает и уходит сперва с площадки партии;
+    перевезённое тает, когда партии на «своей» площадке не осталось
+    (`warehouse.sites.placements`).
+    """
+
+    roll = models.ForeignKey(Roll, on_delete=models.CASCADE, related_name="placements")
+    site = models.ForeignKey(
+        "ProductionSite", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="lot_placements", verbose_name=_("площадка"),
+    )
+    area = models.DecimalField(_("кв.м (шт)"), max_digits=14, decimal_places=4)
+
+    class Meta:
+        verbose_name = _("часть партии на площадке")
+        verbose_name_plural = _("части партий на площадках")
+        constraints = [
+            models.UniqueConstraint(fields=["roll", "site"], name="lot_placement_roll_site"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.roll_id} @ {self.site_id}: {self.area}"
+
+
+class StockTransfer(models.Model):
+    """Документ «Перемещение» между площадками (STK-05/G4-N4, волна 2).
+
+    Раньше перевоз в Глобал изображали списанием и новым приходом: в ОПиУ —
+    потеря, в закупе — покупка, которых не было. Здесь ни закупа, ни потерь:
+    остаток материала тот же, меняется только площадка.
+    """
+
+    material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name="transfers")
+    from_site = models.ForeignKey(
+        "ProductionSite", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="transfers_out", verbose_name=_("откуда"),
+    )
+    to_site = models.ForeignKey(
+        "ProductionSite", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="transfers_in", verbose_name=_("куда"),
+    )
+    area = models.DecimalField(_("перемещено, кв.м (шт)"), max_digits=14, decimal_places=4)
+    cost = models.DecimalField(_("по закупу"), max_digits=14, decimal_places=2, default=Decimal("0"))
+    happened_on = models.DateField(_("дата"), default=timezone.localdate)
+    note = models.CharField(_("примечание"), max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="stock_transfers",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("перемещение")
+        verbose_name_plural = _("перемещения")
+        ordering = ["-happened_on", "-id"]
+
+    def __str__(self) -> str:
+        return f"{self.material} {self.area}: {self.from_site_id} → {self.to_site_id}"
+
+
+class StockSnapshot(models.Model):
+    """Снимок склада на конец дня (STK-04, волна 2): сколько лежало в каждой
+    партии и почём.
+
+    Склад «на прошлую дату» раньше был только реконструкцией по журналу —
+    близкой, но не до копейки, и плывущей от каждой поставки, внесённой задним
+    числом. Снимок замораживает цифру: снимается при закрытии периода (на дату
+    закрытия) и командой `stock_snapshot`; «склад на дату» берёт его, если он
+    есть (`stock_value_total`, `warehouse.snapshots.stock_on_date`).
+    """
+
+    as_of = models.DateField(_("на конец дня"), unique=True)
+    source = models.CharField(_("откуда"), max_length=20, default="command")
+    value = models.DecimalField(_("стоимость склада"), max_digits=16, decimal_places=2, default=Decimal("0"))
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="stock_snapshots",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("снимок склада")
+        verbose_name_plural = _("снимки склада")
+        ordering = ["-as_of"]
+
+    def __str__(self) -> str:
+        return f"Склад на {self.as_of}: {self.value}"
+
+
+class StockSnapshotLine(models.Model):
+    """Строка снимка: партия (или «сверх партий», `roll` пуст) материала."""
+
+    snapshot = models.ForeignKey(StockSnapshot, on_delete=models.CASCADE, related_name="lines")
+    material = models.ForeignKey(Material, on_delete=models.CASCADE, related_name="snapshot_lines")
+    roll = models.ForeignKey(Roll, on_delete=models.SET_NULL, null=True, blank=True,
+                             related_name="snapshot_lines")
+    quantity = models.DecimalField(_("остаток, кв.м (шт)"), max_digits=14, decimal_places=4)
+    value = models.DecimalField(_("по закупу"), max_digits=14, decimal_places=2)
+
+    class Meta:
+        verbose_name = _("строка снимка склада")
+        verbose_name_plural = _("строки снимка склада")
 
 
 class Supplier(models.Model):
@@ -937,6 +1144,17 @@ class Supply(models.Model):
         choices=[("CASH", _("Наличные")), ("BANK", _("Банк"))],
     )
     note = models.CharField(_("примечание"), max_length=255, blank=True)
+    # НАЧАЛЬНЫЕ ОСТАТКИ (2026-10-10, STK-09): склад «на дату переезда». Партии
+    # заводятся по закупочной цене, но это не закуп периода, не долг
+    # поставщику и не касса: материал лежал на полке до системы.
+    is_opening = models.BooleanField(_("начальные остатки"), default=False)
+    # ВАЛЮТА ЗАКУПА (G1-N3). Суммы строк в сомах (`SupplyLine.cost`) считаются по
+    # курсу накладной — так идут партии, закуп и склад; в валюте поставщика
+    # сумма строки хранится рядом (`SupplyLine.cost_fc`). Сом — по умолчанию.
+    currency = models.CharField(_("валюта"), max_length=3, default="KGS")
+    rate = models.DecimalField(
+        _("курс, сом за единицу валюты"), max_digits=14, decimal_places=6, default=Decimal("1"),
+    )
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="supplies",
@@ -952,23 +1170,95 @@ class Supply(models.Model):
         label = f"№{self.number}" if self.number else f"#{self.pk}"
         return f"Накладная {label} от {self.received_on}"
 
+    CURRENCIES = ("KGS", "USD", "EUR", "RUB", "CNY", "KZT")
+
+    @property
+    def is_foreign(self) -> bool:
+        return self.currency != "KGS"
+
     @property
     def total_cost(self) -> Decimal:
-        """Сумма строк — то, что система реально приняла на склад."""
+        """Сумма строк в сомах — то, что система реально приняла на склад."""
         return sum((line.cost for line in self.lines.all()), Decimal("0"))
 
     @property
+    def total_foreign(self):
+        """Сумма строк в валюте накладной; для сомовой накладной — None."""
+        if not self.is_foreign:
+            return None
+        total = Decimal("0")
+        for line in self.lines.all():
+            if line.cost_fc is not None:
+                total += line.cost_fc
+            elif self.rate:
+                total += (line.cost / self.rate).quantize(Decimal("0.01"))
+        return total
+
+    @property
     def discrepancy(self) -> Decimal:
-        """Бумага минус система. Не ноль — где-то опечатка, и её видно сразу."""
+        """Бумага минус система. Не ноль — где-то опечатка, и её видно сразу.
+        У накладной в валюте сумма по бумаге — в валюте накладной."""
         if self.stated_total is None:
             return Decimal("0")
+        if self.is_foreign:
+            return self.stated_total - (self.total_foreign or Decimal("0"))
         return self.stated_total - self.total_cost
+
+    # --- Оплата: старое поле + платежи отдельными строками ---------------------
+    #
+    # `paid_amount` — то, что было записано в самой накладной до 2026-10-10
+    # (оплата при приёмке и правка поля). Новые платежи — строки
+    # `SupplierPayment`. Прошлое не переносилось: оплачено = старое поле + платежи.
+    @property
+    def payments_settled(self) -> Decimal:
+        """Сколько долга по накладной закрыли платежи-строки, сом."""
+        return sum((p.signed_settled for p in self.payments.all()), Decimal("0"))
+
+    @property
+    def paid_total(self) -> Decimal:
+        return (self.paid_amount or Decimal("0")) + self.payments_settled
 
     @property
     def debt(self) -> Decimal:
-        """Сколько мы ещё должны поставщику по этой накладной."""
-        owed = self.total_cost - self.paid_amount
+        """Сколько мы ещё должны поставщику по этой накладной, сом."""
+        if self.is_opening:
+            return Decimal("0")
+        owed = self.total_cost - self.paid_total
         return owed if owed > 0 else Decimal("0")
+
+    @property
+    def overpaid(self) -> Decimal:
+        """Заплачено больше накладной (вернули товар, поправили сумму) — кредит
+        у поставщика, сом."""
+        if self.is_opening:
+            return Decimal("0")
+        extra = self.paid_total - self.total_cost
+        return extra if extra > 0 else Decimal("0")
+
+    @property
+    def paid_foreign(self):
+        if not self.is_foreign:
+            return None
+        paid = Decimal("0")
+        for p in self.payments.all():
+            if p.amount_fc is not None:
+                paid += p.amount_fc if p.kind != SupplierPayment.Kind.REFUND else -p.amount_fc
+            elif self.rate:
+                paid += (p.signed_settled / self.rate).quantize(Decimal("0.01"))
+        if self.rate and self.paid_amount:
+            paid += (self.paid_amount / self.rate).quantize(Decimal("0.01"))
+        return paid
+
+    @property
+    def debt_foreign(self):
+        """Долг в валюте накладной; для сомовой накладной — None."""
+        if not self.is_foreign or self.is_opening:
+            return None
+        left = (self.total_foreign or Decimal("0")) - (self.paid_foreign or Decimal("0"))
+        # Долг в сомах закрыт — в валюте тоже ноль, даже если на копейки не сошлось.
+        if self.debt <= 0:
+            return Decimal("0")
+        return left if left > 0 else Decimal("0")
 
 
 class SupplyLine(models.Model):
@@ -999,8 +1289,13 @@ class SupplyLine(models.Model):
         _("принято"), max_digits=14, decimal_places=4, default=Decimal("0")
     )
     cost = models.DecimalField(_("сумма строки"), max_digits=12, decimal_places=2)
+    # Сумма строки в валюте накладной (если она не сом); `cost` — её пересчёт по
+    # курсу накладной.
+    cost_fc = models.DecimalField(
+        _("сумма строки в валюте"), max_digits=14, decimal_places=2, null=True, blank=True,
+    )
     code = models.CharField(_("маркировка партии"), max_length=120, blank=True)
-    # Созданная партия — у площадных материалов. У штучных партий нет.
+    # Созданная партия — у площадных и штучных материалов (штучные — с STK-01).
     roll = models.OneToOneField(
         Roll, on_delete=models.SET_NULL, null=True, blank=True, related_name="supply_line"
     )
@@ -1020,3 +1315,190 @@ class SupplyLine(models.Model):
         if not self.quantity:
             return Decimal("0")
         return (self.cost / self.quantity).quantize(Decimal("0.01"))
+
+
+class SupplierPayment(models.Model):
+    """Платёж поставщику — отдельная строка (2026-10-10, cash-06, cash-07).
+
+    Раньше оплата жила двумя полями самой накладной («оплачено» и «чем»): оплата
+    с двух счетов сдвигала остатки на сумму, которой в кассе не было, аванс
+    поставщику негде было записать, а сальдо не существовало вовсе. Теперь
+    каждый платёж — строка со своей датой, суммой, счётом и автором. Привязан к
+    накладной либо стоит «авансом без накладной» (`supply` пусто).
+
+    Прошлое не переносилось: «оплачено по накладной» = старое поле
+    `Supply.paid_amount` + сумма платежей-строк.
+
+    Три вида:
+
+    * ``PAYMENT`` — деньги ушли поставщику (кассовая запись «Оплата
+      поставщику»);
+    * ``REFUND`` — поставщик вернул деньги за возвращённый товар (приход в
+      кассу той же статьёй);
+    * ``OFFSET`` — зачёт аванса в накладную: денег не двигает, только
+      переносит часть уже уплаченного аванса на накладную (`source`).
+
+    Валюта (G1-N3): платёж по накладной в валюте задаётся в валюте накладной
+    (`amount_fc`) и курсом на день оплаты (`rate`); `amount` — сколько сом
+    реально ушло, `fx_diff` — разница с тем, сколько долга это закрыло по курсу
+    накладной (плюс — заплатили дороже, расход «Курсовая разница»).
+    """
+
+    class Kind(models.TextChoices):
+        PAYMENT = "PAYMENT", _("Оплата")
+        REFUND = "REFUND", _("Возврат денег от поставщика")
+        OFFSET = "OFFSET", _("Зачёт аванса")
+
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="payments", verbose_name=_("поставщик"),
+    )
+    supply = models.ForeignKey(
+        Supply, on_delete=models.CASCADE, null=True, blank=True,
+        related_name="payments", verbose_name=_("накладная"),
+    )
+    # Зачёт: из какого аванса взято.
+    source = models.ForeignKey(
+        "self", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="offsets", verbose_name=_("аванс"),
+    )
+    kind = models.CharField(max_length=10, choices=Kind.choices, default=Kind.PAYMENT)
+    paid_on = models.DateField(_("дата"), default=timezone.localdate)
+    account = models.CharField(
+        _("счёт"), max_length=10, blank=True,
+        choices=[("CASH", _("Наличные")), ("BANK", _("Банк"))],
+    )
+    amount = models.DecimalField(_("сумма, сом"), max_digits=14, decimal_places=2)
+    fx_diff = models.DecimalField(
+        _("курсовая разница, сом"), max_digits=14, decimal_places=2, default=Decimal("0"),
+    )
+    currency = models.CharField(_("валюта"), max_length=3, default="KGS")
+    amount_fc = models.DecimalField(
+        _("сумма в валюте"), max_digits=14, decimal_places=2, null=True, blank=True,
+    )
+    rate = models.DecimalField(
+        _("курс на дату оплаты"), max_digits=14, decimal_places=6, null=True, blank=True,
+    )
+    note = models.CharField(_("примечание"), max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="supplier_payments",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    # Кассовая запись платежа и трата «Курсовая разница» — чтобы правка одной
+    # строки двигала только её деньги.
+    cash_entry = models.ForeignKey(
+        "finance.CashEntry", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="supplier_payments", verbose_name=_("запись кассы"),
+    )
+    fx_expense = models.ForeignKey(
+        "finance.ExpenseEntry", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="supplier_payments", verbose_name=_("курсовая разница"),
+    )
+
+    class Meta:
+        verbose_name = _("платёж поставщику")
+        verbose_name_plural = _("платежи поставщикам")
+        ordering = ["-paid_on", "-id"]
+
+    def __str__(self) -> str:
+        return f"{self.get_kind_display()} {self.amount} от {self.paid_on}"
+
+    @property
+    def settled(self) -> Decimal:
+        """Сколько долга в сомах эта строка закрывает (без курсовой разницы)."""
+        return self.amount - (self.fx_diff or Decimal("0"))
+
+    @property
+    def signed_settled(self) -> Decimal:
+        """Влияние на оплаченное по накладной: оплата и зачёт — плюс, возврат
+        денег — минус."""
+        return -self.settled if self.kind == self.Kind.REFUND else self.settled
+
+    @property
+    def supplier_effect(self) -> Decimal:
+        """Влияние на сальдо поставщика: зачёт аванса сальдо не двигает —
+        деньги он уже уменьшил, когда был уплачен."""
+        return Decimal("0") if self.kind == self.Kind.OFFSET else self.signed_settled
+
+    @property
+    def is_advance(self) -> bool:
+        return self.kind == self.Kind.PAYMENT and self.supply_id is None
+
+
+class SupplierReturn(models.Model):
+    """Возврат товара поставщику по накладной (G1-N2).
+
+    Склад уменьшается по партии этой накладной, по цене партии, без потерь в
+    ОПиУ; закуп и сумма накладной уменьшаются на стоимость возвращённого. Деньги —
+    либо вернулись на счёт (строка `SupplierPayment` вида REFUND), либо остались
+    кредитом у поставщика (накладная оплачена больше своей суммы — сальдо это
+    показывает).
+    """
+
+    supply = models.ForeignKey(
+        Supply, on_delete=models.CASCADE, related_name="returns", verbose_name=_("накладная"),
+    )
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="returns", verbose_name=_("поставщик"),
+    )
+    returned_on = models.DateField(_("дата возврата"), default=timezone.localdate)
+    amount = models.DecimalField(_("стоимость возвращённого, сом"), max_digits=14, decimal_places=2)
+    refund = models.DecimalField(
+        _("возвращено деньгами, сом"), max_digits=14, decimal_places=2, default=Decimal("0"),
+    )
+    refund_account = models.CharField(max_length=10, blank=True)
+    note = models.CharField(_("примечание"), max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="supplier_returns",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("возврат поставщику")
+        verbose_name_plural = _("возвраты поставщикам")
+        ordering = ["-returned_on", "-id"]
+
+
+class SupplierReturnLine(models.Model):
+    ret = models.ForeignKey(SupplierReturn, on_delete=models.CASCADE, related_name="lines")
+    supply_line = models.ForeignKey(
+        SupplyLine, on_delete=models.SET_NULL, null=True, blank=True, related_name="return_lines",
+    )
+    material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name="supplier_return_lines")
+    label = models.CharField(max_length=160, blank=True)
+    quantity = models.DecimalField(_("возвращено, в единицах строки"), max_digits=14, decimal_places=4)
+    area = models.DecimalField(_("возвращено, кв.м или шт"), max_digits=14, decimal_places=4)
+    cost = models.DecimalField(_("стоимость, сом"), max_digits=14, decimal_places=2)
+
+    class Meta:
+        ordering = ["id"]
+
+
+class SupplierOpeningDebt(models.Model):
+    """Начальный долг поставщику (STK-09, F6, XL-04): сколько были должны на
+    дату переезда, без партий и накладных.
+
+    Входит в сальдо поставщика, но НЕ в закуп периода и не в кассу: деньги
+    ещё не платили, материал давно на полке. Минус — поставщик нам должен (наш
+    аванс на дату переезда).
+    """
+
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.PROTECT, related_name="opening_debts", verbose_name=_("поставщик"),
+    )
+    as_of = models.DateField(_("на дату"), default=timezone.localdate)
+    amount = models.DecimalField(_("сумма, сом"), max_digits=14, decimal_places=2)
+    note = models.CharField(_("примечание"), max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="supplier_opening_debts",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = _("начальный долг поставщику")
+        verbose_name_plural = _("начальные долги поставщикам")
+        ordering = ["as_of", "id"]

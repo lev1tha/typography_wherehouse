@@ -34,7 +34,9 @@ export default function SupplierDebtModal({ debts, readOnly, onClose, onPay }) {
             </div>
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <strong style={{ color: "var(--danger-ink)" }}>{som(r.debt)}</strong>
-              {!readOnly && (
+              {/* Строка «начальный долг и взаимозачёт» — не документ: платят по
+                  накладным, а начальный долг гасится авансом в карточке поставщика. */}
+              {!readOnly && r.kind !== "LEDGER" && (
                 <button className="secondary" onClick={() => onPay(r)}>{t("suppliersDebt.pay")}</button>
               )}
             </div>

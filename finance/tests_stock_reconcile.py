@@ -91,9 +91,12 @@ class StockReconcileTests(APITestCase):
         )
         self.assertEqual(r.status_code, 200, r.data)
         rec = self._stock()["reconcile"]
-        # 800 штук по 4 сома появились на складе, закупа под них нет.
-        self.assertEqual(Decimal(str(rec["gap"])), Decimal("-3200.00"))
-        # И разрыв не просто показан, а назван: вот эти самые 3 200.
+        # 800 штук по 4 сома появились на складе, закупа под них нет. С волны 2
+        # (F5/PNL-04, D-123) это ИЗЛИШЕК со стоимостью: потери периода нетто
+        # уходят в −3 200, и цепочка сходится без разрыва.
+        self.assertEqual(Decimal(str(rec["losses"])), Decimal("-3200.00"))
+        self.assertEqual(Decimal(str(rec["gap"])), Decimal("0.00"))
+        # Остаток без прихода по-прежнему назван: вот эти самые 3 200.
         self.assertEqual(Decimal(str(rec["stock_without_lots"])), Decimal("3200.00"))
 
     def test_stock_backed_by_lots_is_not_counted_as_unexplained(self):

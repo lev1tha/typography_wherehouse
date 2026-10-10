@@ -17,6 +17,8 @@ import ExpenseListSection from "../../components/ExpenseListSection.jsx";
 import Icon from "../../components/Icon.jsx";
 import MonthPicker from "../../components/MonthPicker.jsx";
 import PaySupplierModal from "../../components/PaySupplierModal.jsx";
+import RecurringExpenses from "../../components/RecurringExpenses.jsx";
+import { MachineTable, ServiceMargin } from "../../components/WorkReports.jsx";
 import SupplierDebtModal from "../../components/SupplierDebtModal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { formatDate, formatMoney, formatNumber } from "../../utils/format.js";
@@ -158,6 +160,23 @@ export default function Finance() {
   }, []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(loadReport, [period.year, period.month]);
+
+  // Повторяющиеся траты (аренда «каждого 10-го» и т.п.): при открытии «Финансов»
+  // недостающие месяцы дописываются. Безопасно повторять — внесённое не
+  // задваивается; бухгалтер ничего не пишет.
+  useEffect(() => {
+    if (readOnly) return;
+    api
+      .post("/finance/recurring/run/", {})
+      .then((r) => {
+        if (r.data.created > 0) {
+          toast(t("recurring.created", { n: r.data.created }));
+          reloadAll();
+        }
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function loadMaterialReport() {
     api
@@ -764,6 +783,8 @@ export default function Finance() {
         onChanged={loadReport}
       />
 
+      <RecurringExpenses kinds={kinds} readOnly={readOnly} onChanged={reloadAll} />
+
       {/* Карточки «Реквизиты для документов» здесь больше нет: заказчик просил
           убрать реквизиты совсем, и печатные формы их больше не печатают.
           Данные в базе остались — если понадобятся, блок возвращается назад. */}
@@ -845,6 +866,9 @@ export default function Finance() {
           ))}
         </div>
 
+        {/* Станки целиком: резка и прочие работы, возвраты колонкой, ряд по дням. */}
+        <MachineTable cutting={report.cutting} />
+
         {/* Расчётная ЗП мастера — доля от стоимости работы резки по ставке из
             «Цен и услуг». Настройка была, а цифры нигде не было. Справочно: в
             прибыль не входит, зарплаты вносятся записями. */}
@@ -854,13 +878,15 @@ export default function Finance() {
               pct: q2(report.cutting.master_commission_percent),
               sum: som(report.cutting.master_share),
             })}{" "}
-            <span style={{ fontSize: 12 }}>{t("finance.masterShareHint")}</span>
+            <span style={{ fontSize: 12 }}>{t("finance.masterShareHint")}</span>{" "}
+            <Link to={readOnly ? "/acc/payroll" : "/admin/payroll"} className="btn-link" style={{ padding: "2px 10px", marginLeft: 4 }}>
+              {t("finance.toPayroll")}
+            </Link>
           </p>
         )}
 
-        {/* Кто сколько отрезал. Считается по тому, кто ОФОРМИЛ заказ — поля
-            «мастер за станком» в системе нет, и выдавать одно за другое
-            нельзя, поэтому так и подписано. */}
+        {/* Кто сколько отрезал: по исполнителю строки резки (волна 2), у строк
+            без исполнителя — по тому, кто оформил заказ. Так и подписано. */}
         {(report.cutting?.by_user || []).length > 0 && (
           <>
             <h4 style={{ margin: "18px 0 2px" }}>{t("finance.cuttingByUser")}</h4>
@@ -887,6 +913,9 @@ export default function Finance() {
             </div>
           </>
         )}
+
+        {/* Выручка и маржа по видам услуг (PNL-06). */}
+        <ServiceMargin services={report.services} />
       </div>
 
       {/* Складской лист заказчика («остаток в начале месяца · поступление ·

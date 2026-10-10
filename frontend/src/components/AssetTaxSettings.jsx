@@ -28,7 +28,7 @@ export default function AssetTaxSettings({ settings, readOnly, onSettings, onCha
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
   const [rates, setRates] = useState([]);
-  const [draft, setDraft] = useState({ valid_from: "", rate: "" });
+  const [draft, setDraft] = useState({ valid_from: "", rate: "", basis: "ACCRUAL" });
 
   function loadRates() {
     api.get("/finance/tax-rates/")
@@ -49,12 +49,24 @@ export default function AssetTaxSettings({ settings, readOnly, onSettings, onCha
 
   function addRate() {
     if (!draft.valid_from || draft.rate === "") return toast(t("taxRates.needBoth"), "error");
-    api.post("/finance/tax-rates/", { valid_from: draft.valid_from, rate: draft.rate })
+    api.post("/finance/tax-rates/", { valid_from: draft.valid_from, rate: draft.rate, basis: draft.basis })
       .then(() => {
-        setDraft({ valid_from: "", rate: "" });
+        setDraft({ valid_from: "", rate: "", basis: draft.basis });
         loadRates();
         onChanged?.();
         toast(t("taxRates.added"));
+      })
+      .catch((e) => toast(apiError(e, t("common.error")), "error"));
+  }
+
+  // Основа налога — часть истории ставки: меняется с её месяца и подчиняется
+  // замку периода (прошлое не переписывается).
+  function changeBasis(rate, basis) {
+    api.patch(`/finance/tax-rates/${rate.id}/`, { basis })
+      .then(() => {
+        loadRates();
+        onChanged?.();
+        toast(t("common.saved"));
       })
       .catch((e) => toast(apiError(e, t("common.error")), "error"));
   }
@@ -123,6 +135,19 @@ export default function AssetTaxSettings({ settings, readOnly, onSettings, onCha
             </span>
             <span className="row" style={{ gap: 4, margin: 0, alignItems: "center" }}>
               <strong>{formatNumber(rate.rate)} %</strong>
+              {readOnly ? (
+                <span className="chip">{t(`taxRates.basis_${rate.basis || "ACCRUAL"}`)}</span>
+              ) : (
+                <select
+                  aria-label={t("taxRates.basis")}
+                  value={rate.basis || "ACCRUAL"}
+                  onChange={(e) => changeBasis(rate, e.target.value)}
+                  style={{ minWidth: 0, width: 260, height: 34 }}
+                >
+                  <option value="ACCRUAL">{t("taxRates.basis_ACCRUAL")}</option>
+                  <option value="CASH">{t("taxRates.basis_CASH")}</option>
+                </select>
+              )}
               {!readOnly && (
                 <button className="ghost" onClick={() => removeRate(rate)} aria-label={t("common.delete")}>
                   <Icon name="trash" size={16} />
@@ -151,9 +176,51 @@ export default function AssetTaxSettings({ settings, readOnly, onSettings, onCha
               onChange={(e) => setDraft({ ...draft, rate: e.target.value })}
             />
           </Field>
+          <Field style={{ margin: 0, width: 230 }} label={t("taxRates.basis")}>
+            <select value={draft.basis} onChange={(e) => setDraft({ ...draft, basis: e.target.value })}>
+              <option value="ACCRUAL">{t("taxRates.basis_ACCRUAL")}</option>
+              <option value="CASH">{t("taxRates.basis_CASH")}</option>
+            </select>
+          </Field>
           <button onClick={addRate}>{t("taxRates.add")}</button>
         </div>
       )}
+      <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>{t("taxRates.basisHint")}</p>
+
+      <h4 style={{ margin: "18px 0 2px" }}>{t("payrollSettings.title")}</h4>
+      <div className="crow">
+        <span className="k">
+          {t("payrollSettings.prevDay")}
+          <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{t("payrollSettings.prevDayHint")}</div>
+        </span>
+        {readOnly ? (
+          <strong>{settings.payroll_prev_month_until_day ?? 31}</strong>
+        ) : (
+          <input
+            type="number" min="0" max="31"
+            value={settings.payroll_prev_month_until_day ?? ""}
+            onChange={(e) => onSettings?.({ ...settings, payroll_prev_month_until_day: e.target.value })}
+            onBlur={(e) => save("payroll_prev_month_until_day", e.target.value === "" ? 0 : Number(e.target.value))}
+            style={{ width: 90, height: 34, textAlign: "right" }}
+          />
+        )}
+      </div>
+      <div className="crow">
+        <span className="k">
+          {t("payrollSettings.shareInMargin")}
+          <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{t("payrollSettings.shareInMarginHint")}</div>
+        </span>
+        {readOnly ? (
+          <strong>{settings.master_share_in_margin ? t("payrollSettings.yes") : t("payrollSettings.no")}</strong>
+        ) : (
+          <input
+            type="checkbox" style={{ width: 22, height: 22, minHeight: 0 }}
+            checked={!!settings.master_share_in_margin}
+            onChange={(e) => save("master_share_in_margin", e.target.checked)}
+            aria-label={t("payrollSettings.shareInMargin")}
+          />
+        )}
+      </div>
     </div>
   );
 }

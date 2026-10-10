@@ -28,6 +28,7 @@ from .. import chart
 from ..models import CashEntry, ExpenseKind
 from ..periods import month_end
 from .money import ZERO, total
+from .quarters import add_quarters, quarter_meta
 from .scope import once, report_scope
 
 ACCOUNTS = CashEntry.Account.values
@@ -37,7 +38,7 @@ ACCOUNTS = CashEntry.Account.values
 LINE_ORDER = {
     "clients": 10, "unpay": 15, "refunds": 20, "suppliers": 30,
     "interest_paid": 70, "tax_paid": 75, "cash_count": 80,
-    "expense_manual": 90, "salary_manual": 91, "other": 95,
+    "payroll": 46, "expense_manual": 90, "salary_manual": 91, "other": 95,
     "owner_in": 10, "owner_out": 20, "loan_in": 30, "loan_out": 40,
     "transfer": 10, "opening": 20,
 }
@@ -222,12 +223,15 @@ def cash_flow_year(year: int) -> dict:
         values = [cf["by_account"][acc]["closing"] for cf in per]
         add(f"closing:{acc}", f"в т.ч. {str(labels[acc]).lower()}", values, total_=values[-1])
 
+    month_info = [
+        {"month": first.month, "from": first, "to": last, "future": first > today}
+        for first, last in months
+    ]
+    add_quarters(rows, first=("opening",), last=("closing",))
     return {
         "year": year,
-        "months": [
-            {"month": first.month, "from": first, "to": last, "future": first > today}
-            for first, last in months
-        ],
+        "months": month_info,
+        "quarters": quarter_meta(month_info),
         "rows": rows,
         "balanced": all(cf["balanced"] for cf in per),
     }

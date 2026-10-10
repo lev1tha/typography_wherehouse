@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from django.db.models import Count
 from rest_framework import viewsets
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -10,6 +11,7 @@ from accounts.permissions import IsAdminOrAccountantRead
 from sales import reporting
 from sales.models import Receipt, TransactionItem
 
+from .filters import AuditLogFilter
 from .models import AuditLog
 from .serializers import AuditLogSerializer
 
@@ -25,14 +27,39 @@ def _parse_day(value):
 
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
-    """Admin-only hidden trail of staff actions."""
+    """Журнал действий. Админ и бухгалтер (только чтение).
+
+    Фильтры: ?date_from= ?date_to= (по дню записи), ?user=, ?kind= (тип:
+    login, order, cash, expense, payroll, tax, settings, stock, price, client,
+    staff, other), ?search= (по тексту). Страницы: ?page=, ?page_size=."""
 
     queryset = AuditLog.objects.select_related("user").all()
     serializer_class = AuditLogSerializer
     permission_classes = [IsAdminOrAccountantRead]
-    filterset_fields = ["user"]
-    search_fields = ["action"]
-    ordering = ["-created_at"]
+    filterset_class = AuditLogFilter
+    ordering = ["-created_at", "-id"]
+
+    @action(detail=False, methods=["get"])
+    def export(self, request):
+        """GET /audit/logs/export/ — CSV журнала с теми же фильтрами (даты,
+        пользователь, тип, поиск), все страницы сразу (волна 2): «;», BOM,
+        дата и время по местному времени, ячейки-формулы экранированы."""
+        from django.utils import timezone
+
+        from clients.export import safe
+        from finance.exports import csv_response
+
+        from .kinds import classify
+
+        rows = [["Дата и время", "Пользователь", "Тип", "Действие"]]
+        for log in self.filter_queryset(self.get_queryset()).order_by("-created_at", "-id"):
+            rows.append([
+                timezone.localtime(log.created_at),
+                safe(log.user.username if log.user_id else ""),
+                log.kind or classify(log.action),
+                safe(log.action),
+            ])
+        return csv_response(rows, f"zhurnal-{timezone.localdate():%Y-%m-%d}.csv")
 
 
 class DashboardView(APIView):
@@ -50,6 +77,22 @@ class DashboardView(APIView):
         d_from = _parse_day(request.query_params.get("date_from"))
         d_to = _parse_day(request.query_params.get("date_to"))
         return Response({**dashboard(d_from, d_to), "headline": headline(d_from, d_to)})
+
+
+# Единицы количества в «Покупках по клиентам» (как в чеке) и порядок вывода.
+UNIT_LABELS = {"PIECE": "шт", "SQM": "кв.м", "METER": "пог.м", "KG": "кг", "LITER": "л"}
+UNIT_ORDER = {"PIECE": 0, "SQM": 1, "METER": 2, "KG": 3, "LITER": 4}
+
+
+def _unit_code(sale_mode, is_roll, material_unit):
+    """Единица материальной строки — по тем же правилам, что в чеке."""
+    if sale_mode == TransactionItem.SaleMode.PIECE:
+        return "PIECE"
+    if sale_mode == TransactionItem.SaleMode.METER:
+        return "METER"
+    if is_roll:
+        return "SQM"
+    return material_unit or "PIECE"
 
 
 class ClientPurchasesView(APIView):
@@ -106,12 +149,19 @@ class ClientPurchasesView(APIView):
             (-1, reporting.returned_lines(d_from, d_to).filter(type=material)),
         ]
         for sign, lines in signed:
-            for client_id, qty, price in lines.values_list(
-                "receipt__client", "quantity", "price_per_item"
+            for client_id, qty, price, mode, roll, unit in lines.values_list(
+                "receipt__client", "quantity", "price_per_item", "sale_mode",
+                "material__is_roll_material", "material__unit",
             ):
-                acc = by_client.setdefault(client_id, {"spend": Decimal("0"), "qty": Decimal("0")})
+                acc = by_client.setdefault(
+                    client_id, {"spend": Decimal("0"), "qty": {}}
+                )
                 acc["spend"] += sign * TransactionItem(quantity=qty, price_per_item=price).sold_total
-                acc["qty"] += sign * qty
+                # Количество — по ЕДИНИЦАМ: 20 листов и 0,96 кв.м куска не
+                # складываются в «20,96» (CLI-10). Единица строки — та же, что
+                # в чеке (`TransactionItemSerializer.get_unit_code`).
+                code = _unit_code(mode, roll, unit)
+                acc["qty"][code] = acc["qty"].get(code, Decimal("0")) + sign * qty
 
         # Attach client display data + order count, then sort in Python (small set).
         from clients.models import Client
@@ -135,11 +185,27 @@ class ClientPurchasesView(APIView):
                 "client_name": client.display_name if client else "Без клиента",
                 "phone": client.phone if client else "",
                 "material_spend": acc["spend"],
-                "material_qty": acc["qty"],
+                # Старое поле осталось для сортировки: число есть, только когда
+                # все строки клиента в одной единице; иначе — пусто, и смотреть
+                # надо `qty_by_unit` / `material_qty_label`.
+                "material_qty": next(iter(acc["qty"].values())) if len(acc["qty"]) == 1 else None,
+                "qty_by_unit": [
+                    {"unit": code, "label": UNIT_LABELS.get(code, code), "qty": value}
+                    for code, value in sorted(acc["qty"].items(), key=lambda kv: UNIT_ORDER.get(kv[0], 9))
+                    if value
+                ],
+                "material_qty_label": " + ".join(
+                    f"{value.normalize():f} {UNIT_LABELS.get(code, code)}"
+                    for code, value in sorted(acc["qty"].items(), key=lambda kv: UNIT_ORDER.get(kv[0], 9))
+                    if value
+                ),
                 "orders": orders,
             })
 
         reverse = ordering.startswith("-")
         key = ordering.lstrip("-")
-        result.sort(key=lambda x: x[key] if key != "client_name" else x[key].lower(), reverse=reverse)
+        result.sort(
+            key=lambda x: x[key].lower() if key == "client_name" else (x[key] if x[key] is not None else Decimal("0")),
+            reverse=reverse,
+        )
         return Response(result)

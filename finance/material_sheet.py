@@ -142,6 +142,9 @@ def collect_flows(materials):
             pass
         elif item.sale_mode == TransactionItem.SaleMode.METER:
             pass
+        elif item.roll_area and item.length:
+            # Рулон по кв.м изделия (CALC-10): со склада ушла длина изделия.
+            qty = item.length
         elif material.sells_by_metre:
             qty = to_units(material, qty, width=item.roll_width)
         else:
@@ -180,7 +183,9 @@ def purchases_from_stock_by_day(d_from=None, d_to=None) -> dict:
     −14 265 сверху и +3 735 в графике. Один источник — одна цифра.
     """
     out = defaultdict(lambda: ZERO)
-    lines = SupplyLine.objects.all()
+    # Накладная «Начальные остатки» (склад на дату переезда) — не закуп периода:
+    # материал лежал на полке до системы (STK-09, 2026-10-10).
+    lines = SupplyLine.objects.exclude(supply__is_opening=True)
     if d_from:
         lines = lines.filter(supply__received_on__gte=d_from)
     if d_to:

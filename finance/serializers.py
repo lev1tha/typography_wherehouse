@@ -13,6 +13,7 @@ from .models import (
     PeriodLock,
     TaxRate,
 )
+from .auditing import fmt
 from .periods import month_start, parse_month
 
 
@@ -40,10 +41,13 @@ class ExpenseKindSerializer(serializers.ModelSerializer):
     block_display = serializers.CharField(source="get_block_display", read_only=True)
     role_display = serializers.CharField(source="get_role_display", read_only=True)
     entries_count = serializers.SerializerMethodField()
+    # Двигает ли трата этого вида кассу (списание безнадёжного долга — нет).
+    moves_cash = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = ExpenseKind
         fields = [
+            "moves_cash",
             "id",
             "code",
             "name",
@@ -107,6 +111,14 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
     period = MonthField(required=False, allow_null=True)
     depreciate_until = MonthField(required=False, allow_null=True)
     is_capitalized = serializers.BooleanField(read_only=True)
+    # Начисление зарплаты по ведомости — запись системы, руками не правится.
+    is_payroll = serializers.SerializerMethodField()
+    # Платежи по активу в рассрочку: сколько уже заплачено по карточке.
+    installments_paid = serializers.SerializerMethodField()
+    asset_name = serializers.CharField(source="asset.name", read_only=True, default=None)
+    # «Да, это не дубль»: подтверждение того, что такая же трата (вид, сумма,
+    # дата) уже есть, но эта — другая. Не поле модели.
+    confirm_duplicate = serializers.BooleanField(required=False, write_only=True, default=False)
 
     class Meta:
         model = ExpenseEntry
@@ -117,6 +129,13 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
             "kind_block",
             "name",
             "amount",
+            "is_cashless",
+            "asset",
+            "asset_name",
+            "recurring",
+            "is_payroll",
+            "installments_paid",
+            "confirm_duplicate",
             # Чем заплатили: из ящика или со счёта. Кассовая книга разносит
             # трату по этому полю — иначе остаток наличных считал бы и переводы.
             "account",
@@ -131,7 +150,18 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
             "note",
             "created_at",
         ]
-        read_only_fields = ["created_at"]
+        read_only_fields = ["created_at", "recurring"]
+
+    def get_is_payroll(self, obj) -> bool:
+        return hasattr(obj, "payroll_accrual")
+
+    def get_installments_paid(self, obj):
+        if not obj.is_cashless:
+            return None
+        annotated = getattr(obj, "installments_total", None)
+        if annotated is not None:
+            return annotated
+        return sum((i.amount for i in obj.installments.all()), Decimal("0"))
 
     def validate_kind(self, kind):
         # В скрытый вид новые траты не пишем: его специально убрали из отчёта.
@@ -173,6 +203,38 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
         spent_at = attrs.get("spent_at", inst.spent_at if inst else timezone.localdate())
         amount = attrs.get("amount", inst.amount if inst else Decimal("0"))
 
+        # Актив в рассрочку (PNL-03): карточка — полная цена без денег;
+        # платежи по ней — деньги без расхода в ОПиУ.
+        cashless = attrs.get("is_cashless", inst.is_cashless if inst else False)
+        if inst is not None and "is_cashless" in attrs and attrs["is_cashless"] != inst.is_cashless:
+            raise serializers.ValidationError({"is_cashless": "Признак «без денег» после создания не меняется."})
+        asset = attrs.get("asset", inst.asset if inst else None)
+        confirmed = attrs.pop("confirm_duplicate", False)
+        if inst is None and not confirmed and not cashless and asset is None and kind is not None:
+            # Дубль (F11/G3-N2): та же трата дважды — «20 листов при 10
+            # физических». Не запрет — просьба подтвердить: бывают две одинаковые
+            # оплаты за день.
+            twin = ExpenseEntry.objects.filter(
+                kind=kind, amount=amount, spent_at=spent_at, is_cashless=False, asset__isnull=True,
+            ).first()
+            if twin is not None:
+                raise serializers.ValidationError({
+                    "confirm_duplicate": (
+                        f"Такая трата уже есть: «{kind.name}» {fmt(amount)} сом от {spent_at:%d.%m.%Y}"
+                        f"{' — ' + twin.name if twin.name else ''}. Если это вторая такая же — "
+                        f"подтвердите."
+                    ),
+                    "duplicate_id": twin.pk,
+                })
+        if cashless and asset is not None:
+            raise serializers.ValidationError({"asset": "Карточка актива сама не может быть платежом по активу."})
+        if cashless and (kind is None or kind.role != ExpenseKind.Role.CAPEX):
+            raise serializers.ValidationError({
+                "is_cashless": "Без денег записывается только карточка актива (вид из «Инвестиций»)."
+            })
+        if inst is not None and inst.is_cashless and hasattr(inst, "payroll_accrual"):
+            raise serializers.ValidationError("Это начисление зарплаты — оно правится в ведомости.")
+
         # «За какой месяц». Явно передан — берём. Новая трата без него — месяц
         # оплаты. При переносе даты оплаты месяц едет следом, только если стоял
         # по умолчанию (= месяцу старой даты): явно выбранный «за август» не
@@ -184,6 +246,9 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
         elif "spent_at" in attrs and inst.period == month_start(inst.spent_at):
             attrs["period"] = month_start(spent_at)
 
+        if asset is not None:
+            return self._validate_installment(attrs, inst, kind, asset, amount, spent_at)
+
         if kind is None or kind.role != ExpenseKind.Role.CAPEX:
             attrs["useful_life_months"] = None
             attrs["depreciate_until"] = None
@@ -191,9 +256,12 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
 
         # Актив или сразу расход — решается по порогу в момент ввода и при
         # смене суммы или вида (D-22). Иначе — как решили тогда: смена порога
-        # в настройках прошлое не переписывает.
+        # в настройках прошлое не переписывает. Карточка актива в рассрочку —
+        # всегда актив: владелец сказал «это станок», порог не спрашиваем.
         reclassify = inst is None or amount != inst.amount or kind != inst.kind
-        if reclassify:
+        if cashless:
+            capitalized = True
+        elif reclassify:
             capitalized = amount >= FinanceSettings.load().capitalization_threshold
         else:
             capitalized = inst.is_capitalized
@@ -227,6 +295,26 @@ class ExpenseEntrySerializer(serializers.ModelSerializer):
         return attrs
 
 
+    def _validate_installment(self, attrs, inst, kind, asset, amount, spent_at):
+        """Платёж по активу: вид и срок — от карточки, сумма — в пределах цены."""
+        if not asset.is_asset_card:
+            raise serializers.ValidationError({"asset": "Платёж можно привязать только к карточке актива в рассрочку."})
+        if kind is not None and kind.id != asset.kind_id:
+            raise serializers.ValidationError({"kind": "Вид платежа должен совпадать с видом актива."})
+        attrs["kind"] = asset.kind
+        attrs["useful_life_months"] = None
+        attrs["depreciate_until"] = None
+        paid = sum(
+            (i.amount for i in asset.installments.exclude(pk=inst.pk if inst else None)), Decimal("0")
+        )
+        if paid + amount > asset.amount:
+            raise serializers.ValidationError({
+                "amount": f"Платежи по активу не могут превышать его цену: уже оплачено {paid}, "
+                          f"цена {asset.amount}, остаток {asset.amount - paid}."
+            })
+        return attrs
+
+
 class CompanyProfileSerializer(serializers.ModelSerializer):
     # Подсказка интерфейсу: пускать ли на счёт на оплату. Считается на сервере,
     # чтобы условие «есть банк и счёт» жило в одном месте.
@@ -255,9 +343,18 @@ class FinanceSettingsSerializer(serializers.ModelSerializer):
             # свободно — у уже внесённых покупок решение и срок записаны в них.
             "capitalization_threshold",
             "lease_until",
+            # Ведомость: за какой месяц по умолчанию платят расчёт; доля мастера
+            # в марже строки (только отчёты маржи, ОПиУ не меняется).
+            "payroll_prev_month_until_day",
+            "master_share_in_margin",
             "updated_at",
         ]
         read_only_fields = ["updated_at"]
+
+    def validate_payroll_prev_month_until_day(self, value):
+        if value is None or value < 0 or value > 31:
+            raise serializers.ValidationError("Число месяца — от 0 до 31 (0 — всегда за текущий).")
+        return value
 
     def validate_capitalization_threshold(self, value):
         if value is None or value < 0:
@@ -273,7 +370,9 @@ class TaxRateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = TaxRate
-        fields = ["id", "valid_from", "rate", "note", "created_by", "created_by_name", "created_at"]
+        fields = [
+            "id", "valid_from", "rate", "basis", "note", "created_by", "created_by_name", "created_at",
+        ]
         read_only_fields = ["created_by", "created_at"]
 
     def validate_rate(self, value):
@@ -296,17 +395,34 @@ class CashEntrySerializer(serializers.ModelSerializer):
     account_display = serializers.CharField(source="get_account_display", read_only=True)
     created_by_name = serializers.CharField(source="created_by.username", read_only=True)
     order_number = serializers.IntegerField(source="receipt.order_number", read_only=True)
+    client_name = serializers.SerializerMethodField()
+    # Остаток счёта сразу после этой операции (cash-05). Для одной записи вне
+    # списка (создание, правка) контекст его не несёт — тогда считается заново.
+    balance_after = serializers.SerializerMethodField()
 
     class Meta:
         model = CashEntry
         fields = [
             "id", "account", "account_display", "kind", "kind_display",
             "article", "article_display", "amount", "happened_on", "note",
-            "receipt", "order_number", "supply", "expense", "is_auto",
+            "receipt", "order_number", "client_name", "supply", "expense", "is_auto",
             "created_by", "created_by_name", "created_at",
+            "reconciled", "reconciled_at", "balance_after",
             "confirm_negative",
         ]
-        read_only_fields = ["is_auto", "created_by", "created_at"]
+        read_only_fields = ["is_auto", "created_by", "created_at", "reconciled", "reconciled_at"]
+
+    def get_client_name(self, obj):
+        client = obj.receipt.client if obj.receipt_id else None
+        return client.display_name if client else None
+
+    def get_balance_after(self, obj):
+        balances = self.context.get("balances_after")
+        if balances is None:
+            from . import cash
+
+            balances = cash.balances_after()
+        return balances.get(obj.id)
 
     def validate_amount(self, value):
         if value <= 0:

@@ -39,7 +39,7 @@ class EdgeCuttingTests(APITestCase):
     def _checkout(self, items):
         return self.client.post(
             "/api/sales/receipts/checkout/",
-            {"payment_method": "CASH", "items": items},
+            {"payment_method": "CASH", "items": items, "buyer_name": "Покупатель"},
             format="json",
         )
 
@@ -314,6 +314,7 @@ class NoPrepaymentMeansDebtTests(APITestCase):
     def _checkout(self, **extra):
         payload = {
             "payment_method": "CASH",
+            "buyer_name": "Покупатель",
             "items": [{"type": "MATERIAL", "material": self.material.id,
                        "quantity": 2, "mode": "SQM"}],
             **extra,

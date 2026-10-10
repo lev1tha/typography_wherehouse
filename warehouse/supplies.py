@@ -59,9 +59,20 @@ def post_supply(supply: Supply, lines_data: list[dict], *, user=None) -> Supply:
     """Провести накладную: создать строки и поднять по ним склад."""
     if not lines_data:
         raise SupplyError("В накладной нет ни одной строки.")
+    # Оплата без счёта раньше молча не попадала в кассу (аудит F1: в книге
+    # 100 000 при реальных 68 000). Сервер не пропускает её, кто бы ни звал.
+    if supply.is_opening and (supply.paid_amount or supply.paid_account):
+        raise SupplyError(
+            "Начальные остатки — это склад на дату переезда: оплаты по ним нет. "
+            "Долг поставщику вносится отдельно, в его карточке."
+        )
+    if supply.paid_amount > 0 and supply.paid_account not in ("CASH", "BANK"):
+        raise SupplyError("Укажите, чем платили: наличными или с банка.")
 
     happened_at = _moment(supply.received_on)
     reason_head = f"Накладная {supply.number}" if supply.number else "Приходная накладная"
+    if supply.is_opening:
+        reason_head = f"Начальные остатки {supply.number}".strip()
     if supply.supplier_id:
         reason_head += f" · {supply.supplier.name}"
 
@@ -99,7 +110,8 @@ def post_supply(supply: Supply, lines_data: list[dict], *, user=None) -> Supply:
             supply=supply, material=material, form=form,
             width=data.get("width"), height=data.get("height"),
             length=data.get("length"), sheet_count=data.get("sheet_count"),
-            quantity=qty, cost=cost, code=data.get("code", "") or "",
+            quantity=qty, cost=cost, cost_fc=data.get("cost_fc"),
+            code=data.get("code", "") or "",
         )
 
         if material.is_roll_material and form != SupplyLine.Form.QTY:
@@ -113,9 +125,22 @@ def post_supply(supply: Supply, lines_data: list[dict], *, user=None) -> Supply:
                 purchase_cost=cost, code=line.code, user=user,
                 received_at=happened_at, supply=supply,
             )
+        elif not material.is_roll_material:
+            # ШТУЧНЫЙ материал тоже приходит ПАРТИЕЙ (STK-01, как «Поступление»
+            # одной кнопкой с 27.08): иначе накладная поднимала только общий
+            # остаток, у проданного не было партии, а себестоимость брала
+            # «последнюю закупочную» — склад показывал фантомную стоимость, а
+            # прибыль расходилась с накладной. Остаток, лежавший до партий,
+            # не трогаем: продажа берёт сначала партии (FIFO), потом остаток
+            # без партии по закупочной цене из карточки — как и раньше.
+            line.roll = receive_lot(
+                material, form=Roll.Form.PIECE, sheet_count=qty,
+                purchase_cost=cost, code=line.code, user=user,
+                received_at=happened_at, supply=supply,
+            )
         else:
-            # Штучный материал партий не заводит — обычное движение склада с
-            # ценой за единицу, чтобы закуп месяца посчитался как раньше.
+            # Площадной материал, принятый «по количеству» (кв.м одним числом):
+            # размеров нет, партии не из чего собрать — обычное движение склада.
             apply_stock_change(
                 material, qty,
                 log_type=InventoryLog.Type.SUPPLY,
@@ -131,7 +156,7 @@ def post_supply(supply: Supply, lines_data: list[dict], *, user=None) -> Supply:
     # читаться так же. Оплата бывает частичной — берём ровно `paid_amount`,
     # остаток честно висит в `Supply.debt`. Счёт не выбран (взяли в долг) —
     # записи нет.
-    if supply.paid_account and supply.paid_amount > 0:
+    if supply.paid_account and supply.paid_amount > 0 and not supply.is_opening:
         from finance import cash
 
         cash.supplier_paid(
@@ -163,33 +188,23 @@ def move_supply_date(supply: Supply, day) -> None:
 
 
 @transaction.atomic
-def pay_supply(supply: Supply, amount, account, *, paid_on=None, user=None) -> Decimal:
+def pay_supply(supply: Supply, amount, account, *, paid_on=None, user=None,
+               rate=None, note="") -> Decimal:
     """Заплатить поставщику по накладной (часть долга или весь).
 
-    Раньше оплатить накладную можно было только правкой поля «оплачено», и
-    касса этого не видела: долг становился нулём, а 48 000 уходили из ящика
-    без единой строки в книге. Теперь каждая оплата — расход в кассу датой
-    оплаты.
+    Каждая оплата — ОТДЕЛЬНАЯ СТРОКА (`SupplierPayment`: дата, сумма, счёт,
+    автор) и расход в кассу датой оплаты. Старые поля накладной («оплачено»,
+    «чем») не трогаются — оплачено = старое поле + платежи. Накладная в валюте:
+    сумма — в валюте, обязателен курс на день оплаты (`rate`).
+    Возвращает остаток долга в сомах.
     """
-    from finance import cash
+    from .supplier_ledger import record_payment
 
-    locked = Supply.objects.select_for_update().get(pk=supply.pk)
-    amount = Decimal(str(amount))
-    if amount <= 0:
-        raise SupplyError("Сумма должна быть больше нуля.")
-    if account not in ("CASH", "BANK"):
-        raise SupplyError("Укажите, чем платили: наличными или с банка.")
-    if amount > locked.debt:
-        raise SupplyError(f"По накладной долг {locked.debt} — больше заплатить нельзя.")
-    locked.paid_amount += amount
-    locked.paid_account = account
-    locked.save(update_fields=["paid_amount", "paid_account"])
-    label = locked.number or f"#{locked.pk}"
-    cash.supplier_paid(
-        amount, account, supply=locked, happened_on=paid_on,
-        note=f"Оплата накладной {label}", user=user,
+    record_payment(
+        supply=supply, amount=amount, account=account, paid_on=paid_on,
+        rate=rate, note=note, user=user,
     )
-    return locked.debt
+    return Supply.objects.get(pk=supply.pk).debt
 
 
 def sync_supply_payment(supply: Supply, *, old_amount, old_account, user=None) -> None:
@@ -239,11 +254,15 @@ def supply_summary(supply: Supply) -> str:
         f"{line.material.name} × {line.quantity.normalize():f} на {line.cost.normalize():f} сом"
         for line in supply.lines.select_related("material")
     )
-    return f"{head}, {supply.total_cost.normalize():f} сом" + (f" ({lines})" if lines else "")
+    tail = f"{head}, {supply.total_cost.normalize():f} сом" + (f" ({lines})" if lines else "")
+    paid = supply.paid_total
+    if paid:
+        tail += f"; оплачено {paid.normalize():f}"
+    return tail
 
 
 @transaction.atomic
-def unpost_supply(supply: Supply) -> None:
+def unpost_supply(supply: Supply, *, user=None) -> None:
     """Отменить накладную: такой поставки не было — убрать её след целиком.
 
     Отменяем ТОЛЬКО нетронутую поставку: если из партии уже резали, откат
@@ -267,7 +286,8 @@ def unpost_supply(supply: Supply) -> None:
         if roll and roll.remaining_area != roll.initial_area:
             raise SupplyError(
                 f"«{line.material.name}» из этой накладной уже резали — "
-                "отменить её нельзя. Поправьте остаток инвентаризацией."
+                "отменить её нельзя. Опечатку в цене или количестве поправит "
+                "«Исправить приход», а часть товара можно вернуть поставщику."
             )
         material = line.material
         if not material.is_roll_material and material.quantity < line.quantity:
@@ -295,5 +315,63 @@ def unpost_supply(supply: Supply) -> None:
     # остаётся в книге, рядом — встречная сегодняшним днём. Раньше записи
     # системы удалялись, и деньги, отданные в прошлом месяце, исчезали из ОДДС
     # уже принятого месяца. Ручную запись не трогаем: её сделал человек.
-    cash.reverse_supplier_payments(supply=supply, note=f"Отмена накладной {label}")
+    cash.reverse_supplier_payments(supply=supply, note=f"Отмена накладной {label}", user=user)
+    # Платежи-строки уйдут вместе с накладной (их деньги вернула строка выше), а
+    # курсовая разница — отдельной тратой — отменяется встречной.
+    from .supplier_ledger import reverse_fx
+
+    for payment in supply.payments.exclude(fx_diff=0):
+        reverse_fx(payment, f"Отмена накладной {label}", user)
     supply.delete()
+
+
+def find_duplicate(*, supplier_id, number, received_on, total, exclude_id=None):
+    """Накладная, которая выглядит как повторный ввод этой же (F11, G3-N2).
+
+    Совпадение — «поставщик + номер + дата»; номера нет — «поставщик + сумма +
+    дата». Двойной ввод (бумажную накладную внесли дважды) удваивает склад и
+    закуп и молча остаётся: 20 листов на складе при десяти физических.
+    """
+    qs = Supply.objects.filter(received_on=received_on)
+    qs = qs.filter(supplier_id=supplier_id) if supplier_id else qs.filter(supplier__isnull=True)
+    if exclude_id:
+        qs = qs.exclude(pk=exclude_id)
+    number = (number or "").strip()
+    if number:
+        for other in qs.select_related("supplier"):
+            if (other.number or "").strip().casefold() == number.casefold():
+                return other
+        return None
+    total = Decimal(str(total or 0))
+    if total <= 0:
+        return None
+    for other in qs.filter(number="").select_related("supplier").prefetch_related("lines"):
+        if other.total_cost == total:
+            return other
+    return None
+
+
+def duplicate_map() -> dict:
+    """{id накладной: id похожей на неё} для подсветки возможных дублей в списке."""
+    from django.db.models import Sum
+
+    groups: dict = {}
+    for row in Supply.objects.annotate(total=Sum("lines__cost")).values(
+        "id", "supplier_id", "number", "received_on", "total"
+    ):
+        number = (row["number"] or "").strip().casefold()
+        key = (
+            ("n", row["supplier_id"], number, row["received_on"]) if number
+            else ("s", row["supplier_id"], row["total"] or Decimal("0"), row["received_on"])
+        )
+        if key[0] == "s" and not key[2]:
+            continue
+        groups.setdefault(key, []).append(row["id"])
+    out = {}
+    for ids in groups.values():
+        if len(ids) < 2:
+            continue
+        ids.sort()
+        for i in ids:
+            out[i] = next(j for j in ids if j != i)
+    return out

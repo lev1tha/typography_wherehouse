@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
+import { formatMoney } from "../utils/format.js";
 import { isCanceled, useLatest } from "../utils/latest.js";
 
 // Выбор клиента с поиском на сервере.
@@ -197,6 +198,15 @@ export default function ClientPicker({
                 <>
                   <span className="picker-name">{o.c.display_name}</span>
                   {o.c.phone && <span className="muted picker-phone">{o.c.phone}</span>}
+                  {/* Долг (и аванс) видны кассиру до оформления — раньше долг
+                      клиента показывался только админу, и складовщик отгружал
+                      вслепую (CLI-03). */}
+                  {Number(o.c.balance) > 0 && (
+                    <span className="picker-mark debt">{t("picker.debtMark", { sum: formatMoney(o.c.balance) })}</span>
+                  )}
+                  {Number(o.c.balance) < 0 && (
+                    <span className="picker-mark credit">{t("picker.creditMark", { sum: formatMoney(-o.c.balance) })}</span>
+                  )}
                 </>
               )}
             </li>

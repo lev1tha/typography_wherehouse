@@ -83,7 +83,9 @@ class TelegramWebhookSecretTests(APITestCase):
         return self.client.post(self.URL, {
             "message": {
                 "chat": {"id": 777},
-                "contact": {"phone_number": "996555111222"},
+                "from": {"id": 777},
+                # СВОЙ контакт: user_id совпадает с отправителем (CLI-09)
+                "contact": {"phone_number": "996555111222", "user_id": 777},
             }
         }, format="json", **extra)
 

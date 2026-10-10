@@ -86,6 +86,14 @@ class PrintingService(models.Model):
         null=True, blank=True,
         help_text=_("Пусто — общий минимум из настроек; 0 — без минимума"),
     )
+    # «Цена по договорённости» (2026-10-10, CALC-07): цену за единицу этой
+    # услуги вписывают в кассе. Админ вписывает её у любой услуги, складовщик —
+    # только у тех, где стоит этот флаг (монтаж, буквы, «Прочее»). Без флага
+    # вписанная складовщиком цена — отказ 403, а не молча каталожная.
+    negotiable_price = models.BooleanField(
+        _("цена по договорённости"), default=False,
+        help_text=_("Цену за единицу вписывают в кассе; складовщик — тоже"),
+    )
     # Legacy markups (kept for migration safety; unused by the new flow).
     paper_markup = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("5.00"))
     cardboard_markup = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("15.00"))
@@ -132,7 +140,7 @@ class PrintingService(models.Model):
         них всегда договорная, каталожная тут лишь подсказка. Резка МАТЕРИАЛА
         КЛИЕНТА открыта так же, но это свойство строки (`own_material`), а не
         услуги."""
-        return self.kind in (self.Kind.ENGRAVING, self.Kind.WASTE)
+        return self.kind in (self.Kind.ENGRAVING, self.Kind.WASTE) or self.negotiable_price
 
     @property
     def uses_running_meter(self) -> bool:
@@ -162,6 +170,10 @@ class ServiceRecipe(models.Model):
     class Mode(models.TextChoices):
         PER_SQM = "PER_SQM", _("На кв.м")
         FIXED = "FIXED", _("Фикс. на заказ")
+        # Износ расходника от ДЛИНЫ реза (2026-10-10, PNL-05): фреза и трубка
+        # лазера стареют от пог.м, а не от площади куска. У строк без длины
+        # реза (не резка) расход по такой норме — ноль.
+        PER_PM = "PER_PM", _("На пог.м реза")
 
     service = models.ForeignKey(
         PrintingService, on_delete=models.CASCADE, related_name="recipes"
@@ -210,6 +222,55 @@ class PricingSettings(models.Model):
         default=Decimal("0"),
         help_text=_("Переключатель «Срочно» в кассе. 0 — выключено"),
     )
+    # Режим минимума (2026-10-10, CALC-01 / G4-N2): к чему применяется «минимум
+    # строки». «Деталь» — к работе + материалу ОДНОЙ детали (шильдик 508 вместо
+    # 500 пропадает: как `=МАКС(500; рез+материал)` в Excel); «работа» — только
+    # к строке работы (как было до 10.10); «заказ» — к сумме всего заказа.
+    # При минимуме 0 режим ничего не меняет.
+    class MinMode(models.TextChoices):
+        WORK = "WORK", _("Работа")
+        PART = "PART", _("Деталь (работа + материал)")
+        ORDER = "ORDER", _("Заказ")
+
+    min_mode = models.CharField(
+        _("к чему применять минимум"), max_length=10, choices=MinMode.choices,
+        default=MinMode.PART,
+    )
+
+    class Rounding(models.TextChoices):
+        LINE = "LINE", _("По строкам")
+        ORDER = "ORDER", _("Итог заказа одной формулой")
+
+    # Режим округления: «по строкам» — каждая строка вверх до сома (как было);
+    # «итог заказа» — вверх до сома округляется сумма заказа, а разница
+    # раскладывается по строкам так, чтобы итог оставался суммой строк.
+    rounding_mode = models.CharField(
+        _("округление"), max_length=10, choices=Rounding.choices, default=Rounding.LINE,
+    )
+    # Границы здравого смысла (2026-10-10, CALC-06 / XL-08). Строка дороже
+    # порога — касса спрашивает подтверждение (сантиметры вместо метров дают
+    # чек на миллиард). Потолок складовщика — жёсткий отказ; 0 — потолка нет.
+    confirm_line_total = models.DecimalField(
+        _("порог подтверждения суммы строки"), max_digits=14, decimal_places=2,
+        default=Decimal("100000"),
+        help_text=_("Строка дороже — касса просит подтвердить. 0 — не спрашивать"),
+    )
+    staff_line_cap = models.DecimalField(
+        _("потолок суммы строки для складовщика"), max_digits=14, decimal_places=2,
+        default=Decimal("0"),
+        help_text=_("Складовщик не оформит строку дороже. 0 — без потолка"),
+    )
+    # Нижняя граница ручной цены работы складовщика, % от каталога (CALC-08).
+    staff_min_price_percent = models.DecimalField(
+        _("нижняя граница ручной цены работы, %"), max_digits=5, decimal_places=2,
+        default=Decimal("0"),
+        help_text=_("Складовщик не впишет цену работы ниже этой доли каталога. 0 — без границы"),
+    )
+    # Предупреждение о старом долге в кассе (CLI-03). 0 — не предупреждать.
+    debt_warn_days = models.PositiveSmallIntegerField(
+        _("предупреждать о долге старше, дней"), default=0,
+        help_text=_("0 — не предупреждать"),
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -225,5 +286,90 @@ class PricingSettings(models.Model):
         obj, _created = cls.objects.get_or_create(pk=1)
         return obj
 
+    def clean(self):
+        # STAFF-05 (волна 2): доля мастера — процент от работы, 0–100 (django-admin).
+        from django.core.exceptions import ValidationError
+
+        super().clean()
+        pct = self.master_commission_percent
+        if pct is not None and not (Decimal("0") <= pct <= Decimal("100")):
+            raise ValidationError({"master_commission_percent": "Процент от 0 до 100."})
+
     def __str__(self) -> str:
         return f"ЗП мастера {self.master_commission_percent}%"
+
+
+class ThicknessCoefficient(models.Model):
+    """Коэффициент работы по толщине материала (2026-10-10, CALC-02).
+
+    «Вид услуги × толщина → коэффициент», как таблица ВПР с приближённым
+    совпадением в Excel владельца: строка действует для толщин от
+    `thickness_from` мм и выше, пока её не перебьёт строка с большей границей.
+    Ставка работы умножается на коэффициент. Нет строки — коэффициент 1.
+    """
+
+    kind = models.CharField(_("вид услуги"), max_length=20, choices=PrintingService.Kind.choices)
+    thickness_from = models.DecimalField(_("толщина от, мм"), max_digits=6, decimal_places=2)
+    coefficient = models.DecimalField(_("коэффициент"), max_digits=6, decimal_places=3)
+
+    class Meta:
+        verbose_name = _("коэффициент по толщине")
+        verbose_name_plural = _("коэффициенты по толщине")
+        ordering = ["kind", "thickness_from"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["kind", "thickness_from"], name="thickness_coef_unique",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.get_kind_display()} от {self.thickness_from} мм × {self.coefficient}"
+
+
+class RateMatrixEntry(models.Model):
+    """Ставка услуги для материала или толщины (2026-10-10, CALC-05 / F8).
+
+    Матрица «услуга (она же станок) × материал или толщина → ставка». Приоритет
+    при продаже: матрица по материалу → матрица по толщине → прежняя цепочка
+    (ставка станка, затем ставка материала). Ставка — за пог.м реза у резки и
+    за кв.м у прочих площадных услуг. Ровно одно из полей `material` и
+    `thickness_from` заполнено.
+    """
+
+    service = models.ForeignKey(
+        PrintingService, on_delete=models.CASCADE, related_name="rate_matrix",
+    )
+    material = models.ForeignKey(
+        "warehouse.Material", on_delete=models.CASCADE, null=True, blank=True,
+        related_name="rate_matrix",
+    )
+    thickness_from = models.DecimalField(
+        _("толщина от, мм"), max_digits=6, decimal_places=2, null=True, blank=True,
+    )
+    rate = models.DecimalField(_("ставка"), max_digits=12, decimal_places=2)
+
+    class Meta:
+        verbose_name = _("ставка матрицы")
+        verbose_name_plural = _("матрица ставок")
+        ordering = ["service", "thickness_from", "material"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["service", "material"], condition=models.Q(material__isnull=False),
+                name="rate_matrix_unique_material",
+            ),
+            models.UniqueConstraint(
+                fields=["service", "thickness_from"], condition=models.Q(thickness_from__isnull=False),
+                name="rate_matrix_unique_thickness",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(material__isnull=False, thickness_from__isnull=True)
+                    | models.Q(material__isnull=True, thickness_from__isnull=False)
+                ),
+                name="rate_matrix_one_key",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        key = self.material.name if self.material_id else f"от {self.thickness_from} мм"
+        return f"{self.service.name} / {key} = {self.rate}"

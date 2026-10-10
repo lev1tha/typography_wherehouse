@@ -22,7 +22,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .models import InventoryLog, Material, Roll
-from .rolls import InsufficientStock, compute_area, take_out, write_off_roll
+from .rolls import InsufficientStock, compute_area, snap_tail, take_out, write_off_roll
 
 
 class WasteError(Exception):
@@ -155,6 +155,10 @@ def write_off_waste(lines: list[dict], *, user=None, happened_on=None, note: str
                 sheet_count=data.get("sheet_count"), area=data.get("area"),
                 length=data.get("length"), quantity=data.get("quantity"),
             )
+            # Хвост округления ≤ 0.01 кв.м при отходе последнего листа — в ноль
+            # (STK-08). Остаток — свежий: в одном отходе бывает несколько строк
+            # одного материала.
+            qty = snap_tail(Material.objects.get(pk=material.pk), qty)
             # Лист и штучное с партиями — FIFO по партиям (выбранная первой),
             # штучный без партий — по закупочной из карточки.
             take_out(
