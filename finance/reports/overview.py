@@ -90,12 +90,21 @@ def headline(d_from=None, d_to=None) -> dict:
     )[:3]
     # «Долг поставщикам» в сверке — ИЗМЕНЕНИЕ за период, а читался как остаток
     # (RU-N6, D-166): рядом с ним — сам остаток долга на сегодня, тем же
-    # расчётом, что карточка «Долг поставщикам» в «Финансах».
-    reasons = [
-        {**line, "balance": supplier_debts()["total"], "balance_on": timezone.localdate()}
-        if line["key"] == "payables" else line
-        for line in reasons
-    ]
+    # расчётом, что карточка «Долг поставщикам» в «Финансах». И остаток на обоих
+    # концах периода (D-195): изменение = конец − начало − начальный долг,
+    # внесённый в периоде; остаток — долги минус авансы поставщикам.
+    levels = br["levels"]
+
+    def payables(line):
+        return {
+            **line, "balance": supplier_debts()["total"], "balance_on": timezone.localdate(),
+            "balance_start": levels["payables_start"], "balance_end": levels["payables_end"],
+            "start_on": levels["payables_start_on"],
+            "end_on": min(levels["payables_end_on"], timezone.localdate()),
+            "opening": levels["payables_opening"],
+        }
+
+    reasons = [payables(line) if line["key"] == "payables" else line for line in reasons]
     return {
         "period": {"from": p["period"]["from"], "to": p["period"]["to"], "all_time": d_from is None},
         "previous": {"from": prev[0], "to": prev[1]} if prev else None,

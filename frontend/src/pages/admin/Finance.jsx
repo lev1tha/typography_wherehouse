@@ -708,7 +708,9 @@ export default function Finance() {
               <span className="muted" style={{ fontSize: 12 }}> · {t("suppliersDebt.asOfToday")}</span>
               <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>
                 {(report.supplier_advances?.rows || []).length
-                  ? report.supplier_advances.rows.map((r) => `${r.supplier} ${som(r.amount)}`).join(" · ")
+                  ? report.supplier_advances.rows
+                      .map((r) => `${r.kind === "UNLINKED" ? t("suppliersDebt.unlinked") : r.supplier} ${som(r.amount)}`)
+                      .join(" · ")
                   : t("suppliersDebt.advancesNone")}
               </div>
             </span>

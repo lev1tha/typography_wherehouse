@@ -848,6 +848,11 @@ class Roll(models.Model):
     # провести было некуда. Ноль — заплатили сразу или способ оплаты не
     # назвали (старые приходы). У партии из накладной долг живёт в самой
     # накладной (`Supply.debt`), здесь ноль.
+    #
+    # С 11.10 (D-195) это ОТМЕТКА, а долг считается расчётом: сумма закупки −
+    # заплачено по кассе (`warehouse.supplier_debts.lot_debt`). Приход без
+    # указанной оплаты — долг: новый получает отметку при приёмке, старый
+    # (ноль без единой оплаты) карточка считает долгом на всю сумму.
     supplier_debt = models.DecimalField(
         _("долг поставщику"), max_digits=12, decimal_places=2, default=Decimal("0"),
     )
@@ -1586,3 +1591,106 @@ class SupplierOpeningDebt(models.Model):
         verbose_name = _("начальный долг поставщику")
         verbose_name_plural = _("начальные долги поставщикам")
         ordering = ["as_of", "id"]
+
+
+class Leftover(models.Model):
+    """ПОЛКА ОСТАТКОВ (2026-10-11, D-200): куски и детали, оставшиеся после
+    заказа, — брак, лишние детали, обрезки, — которые лежат на полке и
+    продаются немного дешевле.
+
+    По учёту они уже «проданы»: материал ушёл в себестоимость заказа (в том
+    числе с КИМ раскроя, D-127). Поэтому себестоимость остатка — НОЛЬ, и ни
+    стоимость склада, ни остаток материала, ни партии, ни ОПиУ со сверкой его
+    не видят: здесь только учёт того, что лежит, откуда и куда ушло. Продают
+    остаток услугой «Отходы» (строка чека со ссылкой `TransactionItem.leftover`),
+    цену вписывают руками.
+
+    Количество — штуками (куски одинакового размера). `pieces_left` —
+    производное: положено − продано (невозвращённые строки чеков) − списано;
+    его пересчитывает `warehouse.leftovers.resync` под замком строки, и он же
+    ставит статус. Хранится, а не считается на лету, — чтобы фильтр «что на
+    полке» и сводка были одним запросом.
+    """
+
+    class Measure(models.TextChoices):
+        # Значения — как у мерки отходов (`TransactionItem.SaleMode`).
+        SQM = "SQM", _("кв.м (ширина × длина)")
+        METER = "METER", _("пог.м")
+        PIECE = "PIECE", _("штуки")
+
+    class Status(models.TextChoices):
+        ON_SHELF = "ON_SHELF", _("На полке")
+        PARTIAL = "PARTIAL", _("Продан частично")
+        SOLD = "SOLD", _("Продан")
+        WRITTEN_OFF = "WRITTEN_OFF", _("Списан")
+
+    material = models.ForeignKey(
+        Material, on_delete=models.PROTECT, related_name="leftovers", verbose_name=_("материал"),
+    )
+    # Где лежит — как у партии (D-128/STK-05). Пусто — не указано.
+    site = models.ForeignKey(
+        "ProductionSite", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="leftovers", verbose_name=_("площадка хранения"),
+    )
+    measure = models.CharField(_("мерка"), max_length=10, choices=Measure.choices)
+    # Размер ОДНОГО куска, м: у кв.м — ширина и длина, у пог.м — длина, у штук —
+    # по желанию (размер детали, чтобы найти её поиском по размеру).
+    width = models.DecimalField(_("ширина куска, м"), max_digits=8, decimal_places=3, null=True, blank=True)
+    length = models.DecimalField(_("длина куска, м"), max_digits=8, decimal_places=3, null=True, blank=True)
+    pieces = models.PositiveIntegerField(_("положено кусков"))
+    pieces_left = models.PositiveIntegerField(_("на полке кусков"))
+    written_off_pieces = models.PositiveIntegerField(_("списано кусков"), default=0)
+    status = models.CharField(
+        _("статус"), max_length=12, choices=Status.choices, default=Status.ON_SHELF, db_index=True,
+    )
+    # Заказ, после которого кусок остался. SET_NULL: удалённый заказ (опечатка)
+    # куски с полки не забирает.
+    source_receipt = models.ForeignKey(
+        "sales.Receipt", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="leftovers", verbose_name=_("заказ-источник"),
+    )
+    note = models.CharField(_("примечание"), max_length=255, blank=True)
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="leftovers_put", verbose_name=_("положил"),
+    )
+    created_at = models.DateTimeField(_("положили"), default=timezone.now, db_index=True)
+    written_off_at = models.DateTimeField(_("списан"), null=True, blank=True)
+    written_off_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="leftovers_written_off", verbose_name=_("списал"),
+    )
+    write_off_reason = models.CharField(_("причина списания"), max_length=255, blank=True)
+
+    class Meta:
+        verbose_name = _("остаток на полке")
+        verbose_name_plural = _("полка остатков")
+        # Самые старые — сверху: их и надо продать первыми.
+        ordering = ["created_at", "id"]
+
+    def __str__(self) -> str:
+        return self.label
+
+    @property
+    def piece_area(self) -> Decimal:
+        """Площадь одного куска, кв.м (у кв.м; у остальных мерок — 0)."""
+        if self.measure != self.Measure.SQM or not (self.width and self.length):
+            return Decimal("0")
+        return self.width * self.length
+
+    @property
+    def size_text(self) -> str:
+        def n(v):
+            return format(Decimal(v).normalize(), "f").replace(".", ",")
+
+        if self.measure == self.Measure.METER and self.length:
+            return f"{n(self.length)} пог.м"
+        if self.width and self.length:
+            return f"{n(self.width)}×{n(self.length)} м"
+        return ""
+
+    @property
+    def label(self) -> str:
+        """«Акрил 3 мм» 0,3×0,4 м — как кусок называют в чеке и журнале."""
+        size = self.size_text
+        return f"«{self.material.name}»" + (f" {size}" if size else "")

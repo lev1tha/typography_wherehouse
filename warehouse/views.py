@@ -137,7 +137,8 @@ def _paid_account(data):
     «В долг» и вовсе не указанный способ — одно и то же для кассы: движения
     денег не было. Разводить их отдельными значениями не нужно, а вот молча
     подставлять «наличные» нельзя — так в кассе появился бы расход, которого
-    никто не делал.
+    никто не делал. И для долга это одно и то же (D-195): счёта нет — приход
+    встаёт долгом поставщику.
     """
     value = data.get("payment") or ""
     return value if value in ("CASH", "BANK") else None
@@ -614,7 +615,8 @@ class MaterialViewSet(viewsets.ModelViewSet):
             user=request.user,
             received_at=_as_moment(data.get("happened_on")),
             paid_account=_paid_account(data),
-            on_credit=data.get("payment") == "DEBT",
+            # Приход без указанной оплаты — долг (D-195): «в долг» и пусто — одно.
+            on_credit=_paid_account(data) is None,
         )
         return Response(
             MaterialSerializer(roll.material, context={"request": request}).data
@@ -782,7 +784,8 @@ class MaterialViewSet(viewsets.ModelViewSet):
             user=request.user,
             declared_length=data.get("declared_length"),
             paid_account=_paid_account(data),
-            on_credit=data.get("payment") == "DEBT",
+            # Приход без указанной оплаты — долг (D-195): «в долг» и пусто — одно.
+            on_credit=_paid_account(data) is None,
         )
         note = (
             f"Поступление «{roll.material.name}»: {roll.dimensions_label} = "
@@ -1022,7 +1025,11 @@ class RollViewSet(viewsets.ReadOnlyModelViewSet):
         ensure_open(paid_on or timezone.localdate(), "Провести оплату этой датой")
         raw = request.data.get("amount")
         try:
-            amount = roll.supplier_debt if raw in (None, "") else Decimal(str(raw))
+            # Пустая сумма — весь долг партии; долг расчётом (D-195), в том числе
+            # у старого прихода без оплаты и без отметки «в долг».
+            from .supplier_debts import lot_debt
+
+            amount = max(lot_debt(roll), Decimal("0")) if raw in (None, "") else Decimal(str(raw))
             left = pay_lot_supplier(
                 roll, amount, request.data.get("account"), paid_on=paid_on, user=request.user,
             )

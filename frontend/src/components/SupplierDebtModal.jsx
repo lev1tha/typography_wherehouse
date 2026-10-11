@@ -35,8 +35,10 @@ export default function SupplierDebtModal({ debts, readOnly, onClose, onPay }) {
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <strong style={{ color: "var(--danger-ink)" }}>{som(r.debt)}</strong>
               {/* Строка «начальный долг и взаимозачёт» — не документ: платят по
-                  накладным, а начальный долг гасится авансом в карточке поставщика. */}
-              {!readOnly && r.kind !== "LEDGER" && (
+                  накладным, а начальный долг гасится авансом в карточке поставщика.
+                  Приход без партии (`payable: false`) оплатить нечем, кроме траты
+                  «Закуп материала» (D-195). */}
+              {!readOnly && r.kind !== "LEDGER" && r.payable !== false && (
                 <button className="secondary" onClick={() => onPay(r)}>{t("suppliersDebt.pay")}</button>
               )}
             </div>
@@ -57,6 +59,15 @@ export default function SupplierDebtModal({ debts, readOnly, onClose, onPay }) {
             {t("suppliersDebt.docMoney", { total: som(r.total), paid: som(r.paid) })}
             {r.note ? ` · ${r.note}` : ""}
           </div>
+          {/* Приход без указанной оплаты — долг (D-195): старый приход без
+              отметки «в долг» и приход без партии подписаны, чтобы владелец
+              видел, откуда долг, и оплатил то, что платил мимо кассы. */}
+          {r.unmarked && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("suppliersDebt.unmarked")}</div>
+          )}
+          {r.kind === "LOG" && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("suppliersDebt.looseHint")}</div>
+          )}
         </div>
       ))}
       <div className="crow" style={{ marginTop: 6 }}>

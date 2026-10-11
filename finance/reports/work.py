@@ -56,7 +56,7 @@ def service_lines(d_from, d_to):
     back = reporting.added_back(d_from, d_to).filter(**flt)
     out = reporting.returned_lines(d_from, d_to).filter(**flt)
     for sign, qs in ((1, base), (1, back), (-1, out)):
-        for line in qs.select_related("service", "receipt"):
+        for line in qs.select_related("service", "receipt", "leftover__material"):
             if sign > 0:
                 day = local_day(line.receipt.revenue_recognized_at)
             else:
@@ -135,6 +135,10 @@ def by_service(d_from, d_to, p) -> dict:
     groups = {key: {"revenue": ZERO, "cost": ZERO, "share": ZERO, "lines": 0} for key, _ in SERVICE_GROUPS}
     services = defaultdict(lambda: {"revenue": ZERO, "cost": ZERO, "share": ZERO})
     warranty_services = ZERO
+    # «Отходы» с полки остатков (D-204): выручка по материалу куска. Строки
+    # «Отходов» без остатка — отдельной суммой (`unlinked`).
+    shelf = defaultdict(lambda: {"revenue": ZERO, "pieces": 0})
+    shelf_unlinked = ZERO
     for sign, line, _day in service_lines(d_from, d_to):
         # Гарантийная переделка (волна 2) — не продажа вида услуг: её
         # себестоимость своей строкой, как в ОПиУ (`cogs_warranty`).
@@ -150,6 +154,13 @@ def by_service(d_from, d_to, p) -> dict:
             slot["cost"] += cost
             slot["share"] += share
         groups[key]["lines"] += sign
+        if key == "waste":
+            if line.leftover_id:
+                slot = shelf[(line.leftover.material_id, line.leftover.material.name)]
+                slot["revenue"] += revenue
+                slot["pieces"] += sign * int(line.quantity)
+            else:
+                shelf_unlinked += revenue
     names = dict(PrintingService.objects.filter(id__in=services).values_list("id", "name"))
     kinds = dict(PrintingService.objects.filter(id__in=services).values_list("id", "kind"))
 
@@ -170,6 +181,14 @@ def by_service(d_from, d_to, p) -> dict:
                 for sid, s in sorted(services.items(), key=lambda kv: -kv[1]["revenue"])
                 if GROUP_OF_KIND.get(kinds.get(sid), "other") == key and (s["revenue"] or s["cost"])
             ],
+            **({"shelf": {
+                "materials": [
+                    {"id": mid, "name": name, "revenue": slot["revenue"], "pieces": slot["pieces"]}
+                    for (mid, name), slot in sorted(shelf.items(), key=lambda kv: -kv[1]["revenue"])
+                    if slot["revenue"] or slot["pieces"]
+                ],
+                "unlinked": shelf_unlinked,
+            }} if key == "waste" else {}),
         })
     services_revenue = sum((r["revenue"] for r in rows), ZERO)
     materials_margin = p["revenue_material"] - p["cogs_material"]

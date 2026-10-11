@@ -3251,6 +3251,12 @@ button.ghost.kind-row > span:last-child {
   box-shadow: var(--shadow-2);
 }
 
+/* Кнопка «…» у левого края окна — меню открывается вправо, а не за край. */
+.rc-more-menu.to-right {
+  right: auto;
+  left: 0;
+}
+
 .rc-more-menu button {
   width: 100%;
   justify-content: flex-start;
@@ -3277,5 +3283,94 @@ button.ghost.kind-row > span:last-child {
   }
   .filters-more:not(.open) {
     display: none;
+  }
+}
+
+/* Полка остатков (D-200): поиск по размеру «ширина × длина», выбор куска в
+   кассе, итоги «Продано» и строки «Положить на полку». На телефоне всё
+   в столбик — без прокрутки вбок. */
+.shelf-size {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.shelf-size input {
+  width: 90px;
+  min-width: 0;
+}
+
+.shelf-toolbar .shelf-size {
+  margin-bottom: 0;
+}
+
+.shelf-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.shelf-pick-item {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 44px;
+  padding: 8px 12px;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+}
+
+.shelf-pick-item.active {
+  border-color: var(--accent-strong);
+  background: var(--primary-soft);
+}
+
+.shelf-pick-item:disabled {
+  opacity: 0.55;
+}
+
+.shelf-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.shelf-totals .card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+}
+
+.shelf-put-row {
+  border-bottom: 1px solid var(--hairline);
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+@media (max-width: 600px) {
+  .shelf-toolbar select,
+  .shelf-toolbar .search {
+    flex: 1 1 100%;
+    max-width: none;
+    min-width: 0;
+  }
+  .shelf-size > .muted {
+    flex: 1 1 100%;
+  }
+  .shelf-size input {
+    flex: 1 1 70px;
+    width: auto;
   }
 }

@@ -10,7 +10,7 @@ from accounts.models import Employee
 from clients.models import Client
 from services.models import PrintingService
 from services.pricing import resolve_rate
-from warehouse.models import Material, Roll
+from warehouse.models import Leftover, Material, Roll
 
 from .models import Receipt, TransactionItem
 # Площадь считаем ТОЙ ЖЕ функцией, что и сборщик строки: иначе «0.01 × 0.01»
@@ -75,6 +75,8 @@ class TransactionItemSerializer(serializers.ModelSerializer):
     catalog_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     sold_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     executor_name = serializers.CharField(source="executor.full_name", read_only=True, default=None)
+    # Остаток с полки (D-201): какой кусок продали — «Акрил 3 мм» 0,3×0,4 м.
+    leftover_label = serializers.CharField(source="leftover.label", read_only=True, default=None)
 
     class Meta:
         model = TransactionItem
@@ -124,6 +126,9 @@ class TransactionItemSerializer(serializers.ModelSerializer):
             # Исполнитель работы (волна 2): id сотрудника и его ФИО.
             "executor",
             "executor_name",
+            # Остаток с полки остатков (D-201): id и подпись куска.
+            "leftover",
+            "leftover_label",
             "is_returned",
             # Правила прайса (2026-10-10): цена до правил, минимум, проценты.
             "catalog_price",
@@ -388,6 +393,11 @@ class SaleItemInputSerializer(serializers.Serializer):
     executor = serializers.PrimaryKeyRelatedField(
         queryset=Employee.objects.all(), required=False, allow_null=True
     )
+    # Остаток с ПОЛКИ ОСТАТКОВ (D-201): строка «Отходов» продаёт куски этого
+    # остатка — `quantity` штук по цене `cut_rate`, вписанной руками.
+    leftover = serializers.PrimaryKeyRelatedField(
+        queryset=Leftover.objects.all(), required=False, allow_null=True
+    )
 
     def validate_executor(self, value):
         if value is not None and not value.is_active:
@@ -470,6 +480,42 @@ class SaleItemInputSerializer(serializers.Serializer):
         if errors:
             raise serializers.ValidationError(errors)
 
+    def _validate_leftover(self, attrs, service):
+        """Строка с полки остатков (D-201, D-202): только услуга «Отходы»,
+        целые куски, без размеров (размер — у остатка) и с ценой БОЛЬШЕ НУЛЯ,
+        вписанной руками, — у кого угодно, админ тоже: каталога у остатка
+        нет, а ноль — это не продажа, а списание (на полке есть своё).
+        Хватит ли кусков, решает продажа под замком (`lock_for_sale`)."""
+        leftover = attrs["leftover"]
+        if attrs["type"] != TransactionItem.Type.SERVICE or service is None or not service.uses_free_measure:
+            raise serializers.ValidationError(
+                {"leftover": "Остаток с полки продаётся строкой «Отходы» — не материалом и не другой услугой."}
+            )
+        if attrs.get("mode") not in (None, "", TransactionItem.SaleMode.PIECE):
+            raise serializers.ValidationError(
+                {"mode": "С полки продают кусками (PIECE): размер куска записан у остатка."}
+            )
+        attrs["mode"] = TransactionItem.SaleMode.PIECE
+        for key in ("width", "length"):
+            if attrs.get(key) not in (None, ""):
+                raise serializers.ValidationError(
+                    {key: "Размер куска с полки не вписывают — он записан у остатка."}
+                )
+        qty = Decimal(str(attrs.get("quantity") or 0))
+        if qty < 1 or qty != qty.to_integral_value():
+            raise serializers.ValidationError(
+                {"quantity": "Сколько кусков с полки продаёте — целое число, хотя бы один."}
+            )
+        rate = attrs.get("cut_rate")
+        if rate is None or Decimal(str(rate)) <= 0:
+            raise serializers.ValidationError(
+                {"cut_rate": "Впишите цену за кусок больше нуля — каталожной цены у остатков нет."}
+            )
+        if leftover.pieces_left < 1:
+            raise serializers.ValidationError(
+                {"leftover": f"{leftover.label}: на полке его уже нет ({leftover.get_status_display().lower()})."}
+            )
+
     def validate(self, attrs):
         if attrs["type"] == TransactionItem.Type.MATERIAL and not attrs.get("material"):
             raise serializers.ValidationError("Для позиции материала укажите material.")
@@ -480,6 +526,9 @@ class SaleItemInputSerializer(serializers.Serializer):
         mode = attrs.get("mode")
         service = attrs.get("service")
         self._reject_unused(attrs, service, material)
+        if attrs.get("leftover") is not None:
+            self._validate_leftover(attrs, service)
+            mode = attrs["mode"]
 
         # Материал клиента — только у площадной услуги (резка, гравировка) и
         # БЕЗ материала со склада: две правды об одном куске («чужой» и «наш»)

@@ -18,6 +18,7 @@ from .models import SupplyLine
 
 MONEY = Decimal("0.01")
 QTY = Decimal("0.0001")
+ZERO_DEBT = Decimal("0")
 
 
 def num(value, places=MONEY) -> str:
@@ -122,6 +123,10 @@ def lots_csv(rolls, *, money: bool):
     yield ["Партия", "Материал", "Форма", "Размеры", "Принято", "Остаток", "Ед.",
            "Закуп партии", "Цена за ед.", "Остаток по закупу", "Поступила", "Производство",
            "Накладная", "Долг поставщику"]
+    # Долг одиночной партии — расчётом, как в карточке «Долг поставщикам» (D-195).
+    from .supplier_debts import lot_debts, standalone_lots
+
+    debts = {pk: debt for pk, (debt, _m) in lot_debts(standalone_lots()).items()} if money else {}
     for r in rolls:
         unit = r.material.get_unit_display() if r.form == "PIECE" else "кв.м"
         try:
@@ -135,7 +140,7 @@ def lots_csv(rolls, *, money: bool):
             num(r.cost_of(r.remaining_area)) if money else "", cell(r.received_at),
             r.production.name if r.production_id else "",
             (supply.number or f"#{supply.pk}") if supply else "",
-            num(r.supplier_debt) if money else "",
+            num(max(debts.get(r.pk, ZERO_DEBT), ZERO_DEBT)) if money else "",
         ]
 
 

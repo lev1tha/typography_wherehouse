@@ -599,13 +599,14 @@ def _plan(*, roll: Roll | None, line: SupplyLine | None, data) -> dict:
             "discrepancy_after": (supply.stated_total - total_after) if supply.stated_total is not None else None,
         }
     elif roll is not None:
+        # Долг одиночной партии — расчётом (D-195): сумма − заплаченное по
+        # кассе, и у старого прихода без оплаты и без отметки «в долг» тоже.
         paid = _lot_paid(roll)
-        tracked = roll.supplier_debt > 0 or paid != 0
         plan["lot_debt"] = {
-            "tracked": tracked, "paid": paid,
-            "debt_before": roll.supplier_debt,
-            "debt_after": max(cost1 - paid, Decimal("0")) if tracked else roll.supplier_debt,
-            "overpaid_after": max(paid - cost1, Decimal("0")) if tracked else Decimal("0"),
+            "tracked": True, "paid": paid,
+            "debt_before": max(roll.purchase_cost - paid, Decimal("0")),
+            "debt_after": max(cost1 - paid, Decimal("0")),
+            "overpaid_after": max(paid - cost1, Decimal("0")),
         }
     return plan
 

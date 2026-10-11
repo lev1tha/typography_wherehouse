@@ -192,6 +192,30 @@ function ServiceGroup({ g, showShare, t, marginColor }) {
             <td>{som(s.margin)}</td>
           </tr>
         ))}
+      {/* «Отходы» с полки остатков по материалам (D-204): себестоимости у
+          кусков нет — она осталась в заказе, после которого они легли. */}
+      {g.shelf?.materials?.length > 0 && (
+        <>
+          {g.shelf.materials.map((m) => (
+            <tr key={`shelf-${m.id}`} className="muted">
+              <td style={{ paddingLeft: 28 }}>{t("workReport.shelfFrom", { name: m.name, n: m.pieces })}</td>
+              <td>{som(m.revenue)}</td>
+              <td>{dash}</td>
+              {showShare && <td>{dash}</td>}
+              <td>{som(m.revenue)}</td>
+            </tr>
+          ))}
+          {num(g.shelf.unlinked) !== 0 && (
+            <tr className="muted">
+              <td style={{ paddingLeft: 28 }}>{t("workReport.shelfUnlinked")}</td>
+              <td>{som(g.shelf.unlinked)}</td>
+              <td>{dash}</td>
+              {showShare && <td>{dash}</td>}
+              <td>{som(g.shelf.unlinked)}</td>
+            </tr>
+          )}
+        </>
+      )}
     </>
   );
 }

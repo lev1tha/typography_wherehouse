@@ -84,6 +84,12 @@ class QuoteCreateSerializer(serializers.Serializer):
     def validate_items(self, value):
         if not value:
             raise serializers.ValidationError("Добавьте хотя бы одну позицию.")
+        # Кусок с полки (D-201) продаётся только чеком: КП его не держит, а через
+        # неделю на полке его может уже не быть.
+        if any(item.get("leftover") is not None for item in value):
+            raise serializers.ValidationError(
+                "Остатки с полки в КП не добавляются — продайте их чеком в кассе."
+            )
         return value
 
 

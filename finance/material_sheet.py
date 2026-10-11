@@ -213,18 +213,29 @@ def purchases_from_stock_by_day(d_from=None, d_to=None) -> dict:
     for row in back.values("ret__returned_on").annotate(v=Sum("cost")):
         out[row["ret__returned_on"]] -= row["v"] or ZERO
 
-    # Всё остальное — одиночные приходы: там суммы нет, есть цена за единицу.
+    # Всё остальное — одиночные приходы. Приход ПАРТИЕЙ — суммой партии (D-195):
+    # в журнале только цена кв.м до тыйына, и «площадь × цена» давала хвост
+    # (12 000 за 14,884 кв.м — 12 000,08; 20 174 за 229 250 штук — 20 632,50),
+    # а поставщику должны ровно сумму партии — её показывает карточка «Долг
+    # поставщикам». Приход без партии — как раньше, цена за единицу.
+    from warehouse.supplier_debts import lot_purchase_logs
+
+    from .reports.scope import once
+
+    lot_logs = once("lot_purchase_logs", lot_purchase_logs)
     qs = InventoryLog.objects.filter(
-        type=InventoryLog.Type.SUPPLY, quantity_changed__gt=0,
-        actual_price__isnull=False, supply__isnull=True,
+        type=InventoryLog.Type.SUPPLY, quantity_changed__gt=0, supply__isnull=True,
     )
     if d_from:
         qs = qs.filter(happened_at__date__gte=d_from)
     if d_to:
         qs = qs.filter(happened_at__date__lte=d_to)
-    for row in qs.values("happened_at", "quantity_changed", "actual_price"):
+    for row in qs.values("id", "happened_at", "quantity_changed", "actual_price"):
         day = timezone.localtime(row["happened_at"]).date()
-        out[day] += row["quantity_changed"] * row["actual_price"]
+        if row["id"] in lot_logs:
+            out[day] += lot_logs[row["id"]][1]
+        elif row["actual_price"] is not None:
+            out[day] += row["quantity_changed"] * row["actual_price"]
     return dict(out)
 
 

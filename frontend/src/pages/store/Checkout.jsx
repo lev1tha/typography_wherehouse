@@ -14,6 +14,7 @@ import Modal from "../../components/Modal.jsx";
 import PrintDocs from "../../components/PrintDocs.jsx";
 import PrintQuote from "../../components/PrintQuote.jsx";
 import QuotesModal from "../../components/QuotesModal.jsx";
+import ShelfPicker, { shelfAvailable } from "../../components/ShelfPicker.jsx";
 import { PaymentBadge } from "../../components/StatusBadge.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { clearCheckoutDraft, loadCheckoutDraft, saveCheckoutDraft } from "../../utils/draft.js";
@@ -99,7 +100,9 @@ function lineTotal(line) {
 // → ×(1+срочность) → ×(1−скидка) → вверх до сома, построчно. Итог считает
 // сервер; здесь — честный предпросмотр для кассира.
 function ruledTotal(line, rules) {
-  if (!rules) return lineTotal(line);
+  // Кусок с полки (D-202): цену назвали за кусок — правила прайса к ней не
+  // применяются (так же считает сервер).
+  if (!rules || line.leftoverId) return lineTotal(line);
   return lineParts(line).reduce(
     (sum, p) =>
       sum +
@@ -209,6 +212,8 @@ function cartFromReceipt(items, materials, services, t) {
       // Отходы: мерку берём с прошлой строки (`sale_mode`) — «Отходы × 2»
       // без неё не отличить: 2 кв.м обрезка листа или 2 метра рулона.
       if (s.kind === "WASTE") {
+        // Кусок с полки уже продан — повторять нечего (D-201).
+        if (it.leftover) return void skipped++;
         const mode = it.sale_mode || "SQM";
         const catalogue =
           mode === "METER" ? s.rate_per_pm : mode === "PIECE" ? s.rate_per_piece : s.rate_flat;
@@ -445,6 +450,12 @@ function lineToItem(l, isAdmin) {
     return {
       type: "SERVICE", service: l.serviceId, own_material: true,
       running_meters: l.runM, cut_rate: l.rate, note: l.note || "",
+    };
+  if (l.kind === "waste" && l.leftoverId)
+    // Кусок с полки остатков (D-201): сколько кусков и цена за кусок — своя.
+    return {
+      type: "SERVICE", service: l.serviceId, leftover: l.leftoverId,
+      quantity: l.amount, cut_rate: l.rate, note: l.note || "",
     };
   if (l.kind === "waste")
     // Отходы: мерка — ЯВНО (сервер её не угадывает), цена — всегда своя.
@@ -1239,6 +1250,20 @@ export default function Checkout() {
       return;
     }
     // --- Отходы: цена × количество в выбранной мерке ---
+    if (cut.waste && cut.mode === "SHELF") {
+      const lo = cut.leftover;
+      const pieces = Number(cut.pieces) || 0;
+      const rate = Number(cut.rate) || 0;
+      if (!lo || addBlock) return;
+      setCart((prev) => [...prev, {
+        key: `WL${lo.id}-${prev.length}`, kind: "waste",
+        serviceId: cut.service.id, name: cut.service.name, mode: "PIECE",
+        leftoverId: lo.id, leftoverLabel: lo.label,
+        width: 0, length: 0, amount: pieces, rate, note: (cut.note || "").trim(), qty: 1,
+      }]);
+      setCut(null);
+      return;
+    }
     if (cut.waste) {
       const amount = wasteAmount;
       const rate = Number(cut.rate) || 0;
@@ -1744,13 +1769,20 @@ export default function Checkout() {
   const wasteRate = cut?.waste ? Number(cut.rate) || 0 : 0;
   const wasteAmount = !cut?.waste
     ? 0
+    : cut.mode === "SHELF"
+    ? Number(cut.pieces) || 0
     : cut.mode === "SQM"
     ? (Number(cut.width) && Number(cut.length) ? areaOf(cut.width, cut.length) : Number(cut.amount) || 0)
     : Number(cut.amount) || 0;
   // Единица подписи — та же, что уйдёт в чек.
   const wasteUnit = !cut?.waste
     ? ""
-    : cut.mode === "METER" ? t("unit.METER") : cut.mode === "PIECE" ? t("unit.PIECE") : t("unit.SQM");
+    : cut.mode === "METER" ? t("unit.METER") : ["PIECE", "SHELF"].includes(cut.mode) ? t("unit.PIECE") : t("unit.SQM");
+  // Сколько кусков с каждого остатка полки уже в корзине (D-201).
+  const shelfInCart = cart.reduce(
+    (acc, l) => (l.leftoverId ? { ...acc, [l.leftoverId]: (acc[l.leftoverId] || 0) + Number(l.amount || 0) } : acc),
+    {}
+  );
   // Каталожная цена для мерки: подставляется при переключении. Своя у каждой,
   // потому что «300 за квадрат» и «300 за штуку» — разные деньги.
   const wasteCatalogue = (mode) => {
@@ -1937,6 +1969,11 @@ export default function Checkout() {
       if (!(ownCutRunM > 0)) addBlock = "needRunM";
       else if (!(ownCutRate > 0)) addBlock = "needRate";
       else if (!svcById(cut.cutServiceId)) addBlock = "needMachine";
+    } else if (cut.waste && cut.mode === "SHELF") {
+      if (!cut.leftover) addBlock = "needLeftover";
+      else if (!(wasteAmount >= 1) || !Number.isInteger(wasteAmount)) addBlock = "needAmount";
+      else if (wasteAmount > shelfAvailable(cut, shelfInCart)) addBlock = "shelfShort";
+      else if (!(wasteRate > 0)) addBlock = "needRate";
     } else if (cut.waste) {
       if (!(wasteAmount > 0)) addBlock = "needAmount";
       else if (!(wasteRate > 0)) addBlock = "needRate";
@@ -2127,6 +2164,7 @@ export default function Checkout() {
                     </div>
                   ) : l.kind === "waste" ? (
                     <div className="cl-sub">
+                      {l.leftoverLabel ? `${t("shelf.specFrom", { label: l.leftoverLabel })} · ` : ""}
                       {l.mode === "SQM" && l.width && l.length ? `${l.width}×${l.length} = ` : ""}
                       {trimQty(l.amount)} {l.mode === "METER" ? t("unit.METER") : l.mode === "PIECE" ? t("unit.PIECE") : t("unit.SQM")}
                       {" · "}{l.rate}{" "}
@@ -3029,14 +3067,19 @@ export default function Checkout() {
               <div className="field">
                 <label>{t("checkout.wasteMeasure")}</label>
                 <div className="tabs" style={{ marginTop: 0 }} role="group" aria-label={t("checkout.wasteMeasure")}>
-                  {["SQM", "METER", "PIECE"].map((m) => (
+                  {["SQM", "METER", "PIECE", "SHELF"].map((m) => (
                     <button
                       key={m}
                       className={cut.mode === m ? "active" : ""}
                       aria-pressed={cut.mode === m}
                       onClick={() =>
-                        setCut({
-                          ...cut, mode: m,
+                        setCut(m === "SHELF" ? {
+                          // С полки (D-202): каталожной цены нет — цену
+                          // вписывают за кусок, поле пустое.
+                          ...cut, mode: m, rate: "", leftover: null, pieces: "1",
+                          width: "", length: "", amount: "",
+                        } : {
+                          ...cut, mode: m, leftover: null,
                           // Цена ВСЕГДА пересобирается по каталогу мерки:
                           // «300 за квадрат» и «300 за штуку» — разные деньги,
                           // и оставить прежнее число значило бы посчитать
@@ -3051,7 +3094,9 @@ export default function Checkout() {
                   ))}
                 </div>
               </div>
-              {cut.mode === "SQM" ? (
+              {cut.mode === "SHELF" ? (
+                <ShelfPicker cut={cut} setCut={setCut} inCart={shelfInCart} />
+              ) : cut.mode === "SQM" ? (
                 <>
                   <div className="row">
                     <Field className="grow" label={t("supply.width")}>
@@ -3085,6 +3130,7 @@ export default function Checkout() {
                 </Field>
               )}
               {/* Цена на отходы всегда договорная — её вписывает и складовщик. */}
+              {cut.mode !== "SHELF" && (<>
               <div className="field">
                 <label>{t("checkout.wasteRate", { unit: wasteUnit })} *</label>
                 <input
@@ -3120,6 +3166,7 @@ export default function Checkout() {
                   </div>
                 </div>
               )}
+              </>)}
             </>
           ) : cut.engraving ? (
             <>

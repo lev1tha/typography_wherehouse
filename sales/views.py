@@ -226,6 +226,8 @@ def _staff_rate_floor(item, percent):
 
     if not percent or percent <= 0:
         return None
+    if item.get("leftover") is not None:
+        return None       # у куска с полки каталога нет — сравнивать не с чем (D-202)
     # Ставка за один проход: вписанную складовщиком сравниваем до проходов.
     reference = catalogue_work_rate(
         item.get("service"), mode=item.get("mode"), material=item.get("material"),

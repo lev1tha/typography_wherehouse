@@ -443,11 +443,14 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
             })
 
         # Одиночные приходы — те, что вводят кнопкой на строке материала, мимо
-        # накладной. В отчёте они считаются так же, значит и в ленте должны быть.
+        # накладной. В отчёте они считаются так же, значит и в ленте должны быть:
+        # приход партией — суммой партии (D-195), без партии — цена × количество.
+        from warehouse.supplier_debts import lot_purchase_logs
+
+        lot_logs = lot_purchase_logs()
         logs = InventoryLog.objects.filter(
             type=InventoryLog.Type.SUPPLY,
             quantity_changed__gt=0,
-            actual_price__isnull=False,
             supply__isnull=True,
         ).select_related("material")
         if d_from:
@@ -455,6 +458,12 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
         if d_to:
             logs = logs.filter(happened_at__date__lte=d_to)
         for log in logs:
+            if log.id in lot_logs:
+                amount = lot_logs[log.id][1]
+            elif log.actual_price is not None:
+                amount = log.quantity_changed * log.actual_price
+            else:
+                continue
             rows.append({
                 "key": f"log-{log.id}",
                 "source": "SUPPLY",
@@ -462,7 +471,7 @@ class ExpenseEntryViewSet(viewsets.ModelViewSet):
                 "kind": purchase_kind.id if purchase_kind else None,
                 "kind_name": purchase_name,
                 "name": log.material.name,
-                "amount": log.quantity_changed * log.actual_price,
+                "amount": amount,
                 "spent_at": timezone.localtime(log.happened_at).date(),
                 "note": log.reason,
             })

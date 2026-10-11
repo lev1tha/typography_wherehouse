@@ -152,9 +152,19 @@ export default function HeadlineTiles({ headline }) {
                   ? t("overview.payablesChange")
                   : t(`stmtRows.bridge.${r.key}`, { defaultValue: r.label })}
                 <Hint text={t(`terms.bridge_${r.key}`, { defaultValue: "" })} />
-                {r.key === "payables" && r.balance !== undefined && (
+                {/* Остаток на обоих концах периода (D-195): изменение = конец −
+                    начало − начальный долг, внесённый в периоде. Остаток — долги
+                    минус авансы поставщикам; на сегодня — карточка «Долг
+                    поставщикам» минус «Авансы». */}
+                {r.key === "payables" && r.balance_end !== undefined && (
                   <span className="muted" style={{ display: "block", fontSize: 12 }}>
-                    {t("overview.payablesNow", { date: ru(r.balance_on), value: som(r.balance) })}
+                    {t("overview.payablesRange", {
+                      from: ru(r.start_on), start: som(r.balance_start),
+                      to: ru(r.end_on), end: som(r.balance_end),
+                    })}
+                    {Number(r.opening) !== 0 && (
+                      <> · {t("overview.payablesOpening", { value: som(r.opening) })}</>
+                    )}
                   </span>
                 )}
               </span>

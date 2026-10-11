@@ -398,6 +398,10 @@ def _move_stock_for_item(item: TransactionItem, user, *, restore=False, happened
     Каждое движение попадает в складской журнал со ссылкой на чек — и продажа
     материала, и расход по техкарте услуги (клей, крепёж).
     """
+    # Остаток с полки (D-201) уже списан заказом, после которого остался:
+    # ни материала, ни расходников техкарты по такой строке не уходит.
+    if item.leftover_id:
+        return []
     fn = _restore if restore else _deduct
     receipt = item.receipt
     warnings = []
@@ -612,7 +616,12 @@ def _create_line(receipt: Receipt, *, part_material=Decimal("0"), **fields) -> T
     обычно, а выручки нет (себестоимость переделки видна отдельно).
     """
     rules = _line_rules(receipt, fields.get("type"), fields.get("service"), part_material)
-    if fields.get("client_price") or fields.get("price_is_manual"):
+    if fields.get("leftover") is not None:
+        # Кусок с полки (D-202): цену назвали за этот кусок — она и стоит в
+        # чеке. Минимум строки, срочность и скидка её не трогают: остаток —
+        # вещь, а не работа, как материал минимумом не облагается.
+        rules = LineRules(minimum=Decimal("0"), urgency=Decimal("0"), discount=Decimal("0"))
+    elif fields.get("client_price") or fields.get("price_is_manual"):
         # Договорная цена уже учитывает договорённость с клиентом: его скидка
         # к ней не применяется, минимум и срочность заказа — как у всех строк.
         # Вписанная руками цена — тоже окончательная (RP-N6, D-181): кассир
@@ -675,7 +684,7 @@ def apply_order_minimum(receipt: Receipt, items) -> None:
     if total <= 0 or total >= settings.min_line_amount:
         return
     for item, amount in reversed(list(zip(items, amounts))):
-        if item.type == TransactionItem.Type.SERVICE and item.catalog_price > 0:
+        if item.type == TransactionItem.Type.SERVICE and item.catalog_price > 0 and not item.leftover_id:
             item.min_amount = (amount + (settings.min_line_amount - total)).quantize(
                 Decimal("0.01"), rounding=ROUND_CEILING
             )
@@ -968,6 +977,8 @@ def low_manual_price_warnings(items, user=None) -> list:
     for item in items:
         if item.is_returned or not item.price_is_manual or item.type != TransactionItem.Type.SERVICE:
             continue
+        if item.leftover_id:
+            continue      # у остатка с полки каталога нет (D-202)
         reference = catalogue_work_rate(
             item.service, mode=item.sale_mode, material=item.work_material,
             own_material=item.own_material, passes=item.passes,
@@ -1259,6 +1270,10 @@ def _effective_prices(entry, prices: dict) -> dict:
     service = entry.get("service")
     if service is None:
         return out
+    if entry.get("leftover") is not None:
+        # С полки (D-202): цена остатка всегда своя, каталога нет — даже
+        # совпав с каталогом отходов, она остаётся вписанной.
+        return out
     if service.uses_free_measure:
         out["cut_rate"] = {
             TransactionItem.SaleMode.METER: service.rate_per_pm,
@@ -1426,6 +1441,31 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         )]
 
     service = entry["service"]
+
+    # С ПОЛКИ ОСТАТКОВ (D-201, D-202): строка «Отходов» на N кусков остатка по
+    # цене за кусок, вписанной руками. Остаток блокируется до создания строки
+    # (двое продавцов одного куска — в очередь), после — полка пересчитывается
+    # по строкам чеков: не хватило — `LeftoverShort`, и чек не создаётся.
+    if entry.get("leftover") is not None and service.uses_free_measure:
+        from warehouse.leftovers import LeftoverRejected, lock_for_sale
+
+        if receipt.is_warranty:
+            raise LeftoverShort("Гарантийная переделка остатки с полки не продаёт.")
+        try:
+            leftover = lock_for_sale(entry["leftover"].pk, entry.get("quantity"))
+        except LeftoverRejected as e:
+            raise LeftoverShort(str(e)) from e
+        line = _create_line(
+            receipt, type=item_type, service=service, leftover=leftover,
+            quantity=_qty(entry.get("quantity")), price_per_item=Decimal(str(entry["cut_rate"])),
+            price_is_manual=True, sale_mode=TransactionItem.SaleMode.PIECE,
+            note=(entry.get("note") or "")[:255], executor=entry.get("executor"),
+        )
+        _sync_shelf(
+            {leftover.pk}, user=getattr(receipt, "_shelf_user", None) or receipt.cashier,
+            event=f"продали по чеку {_order_label(receipt)}",
+        )
+        return [line]
 
     # ОТХОДЫ: мерку выбрали в кассе и прислали в `mode` — одна услуга продаёт
     # и квадраты листа, и метры рулона, и штуки. Мерку запоминаем на строке
@@ -2057,6 +2097,7 @@ def add_items_to_receipt(receipt: Receipt, items_data, *, user=None, confirmed=(
     surcharge = Decimal("0")
     receipt.cost_warnings = []
     receipt.order_warnings = []
+    receipt._shelf_user = user      # кто продал кусок с полки — в журнал (D-205)
     built = []
     for entry in items_data:
         built += _build_item(receipt, entry)
@@ -2469,6 +2510,34 @@ class ItemEditRejected(Exception):
     """Строку чека править нельзя (возвращена, чужой чек, кривые данные)."""
 
 
+class LeftoverShort(OrderRejected, ItemEditRejected):
+    """Полка остатков не сходится (D-202): кусков меньше, чем продают, или
+    кусок уже продан. Наследует оба отказа — 400 и в кассе, и в дозаказе,
+    правке состава и отмене возврата."""
+
+
+def _shelf_ids(items) -> set:
+    """Остатки с полки, к которым относятся строки (D-201)."""
+    return {item.leftover_id for item in items if getattr(item, "leftover_id", None)}
+
+
+def _sync_shelf(ids, *, user=None, event: str = "") -> None:
+    """Пересчитать полку по строкам чеков (`warehouse.leftovers.resync`) в
+    той же транзакции; кусок продан дважды — `LeftoverShort`, откат всего."""
+    if not ids:
+        return
+    from warehouse.leftovers import LeftoverRejected, resync
+
+    try:
+        resync(ids, user=user, event=event)
+    except LeftoverRejected as e:
+        raise LeftoverShort(str(e)) from e
+
+
+def _order_label(receipt: Receipt) -> str:
+    return f"№{receipt.order_number or receipt.pk}"
+
+
 def _money_held(receipt: Receipt) -> Decimal:
     """Сколько денег по чеку РЕАЛЬНО лежит у цеха.
 
@@ -2834,6 +2903,8 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
     changes, pair_sizes = _pair_changes(receipt, changes)
     # Материалы затронутых строк: минимум «деталь» их работ — заново.
     touched_materials = set()
+    # Остатки с полки затронутых строк (D-203) — пересчёт в конце.
+    shelf = set()
 
     for change in changes:
         try:
@@ -2866,6 +2937,7 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
                 continue
         touched = True
         touched_materials.add(item.work_material_id or item.material_id)
+        shelf |= _shelf_ids([item])
         remove = bool(change.get("remove"))
         qty = price = None
         dims = {}
@@ -2914,6 +2986,10 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
                 )
                 if price < 0:
                     raise ItemEditRejected("Цена не может быть отрицательной.")
+                if item.leftover_id and price <= 0:
+                    raise ItemEditRejected(
+                        f"«{_line_name(item)}»: у куска с полки цена больше нуля — каталожной у него нет."
+                    )
 
         if receipt.stock_deducted:
             # Журнал: записи ЭТОЙ строки (старая продажа) и только что созданный
@@ -2965,6 +3041,8 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
                 _deduct_stock_for_item(item, user, restore=False)
             ) + below_cost_warnings([item], user)
 
+    # Полка — по новому составу: кусков не хватает — отказ, правка откатывается.
+    _sync_shelf(shelf, user=user, event=f"правка чека {_order_label(receipt)}")
     if touched:
         # Минимум «деталь» затронутых работ, минимум «заказ» и округление
         # «итог одной формулой» — заново по новому составу (D-151).
@@ -3331,7 +3409,11 @@ def delete_receipt(receipt: Receipt, *, user=None) -> None:
     # Логи (и продажи, и возвраты, и только что сделанное восстановление) — все
     # ссылаются на этот чек, поэтому уходят одним запросом.
     receipt.inventory_logs.all().delete()
+    shelf = _shelf_ids(receipt.items.all())
+    label = _order_label(receipt)
     receipt.delete()
+    # Заказа не было — куски с полки снова лежат (D-203).
+    _sync_shelf(shelf, user=user, event=f"удалён чек {label}")
 
 
 def _price_for_total(qty: Decimal, total: Decimal) -> Decimal | None:
@@ -3469,6 +3551,11 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None, method=None, q
             except (TransactionItem.DoesNotExist, ValueError, TypeError):
                 raise ItemEditRejected("Строка не найдена в этом чеке или уже возвращена.")
             value = _edit_number(raw_qty, places=3, digits=12, what="Количество возврата")
+            if line.leftover_id and value != value.to_integral_value():
+                # Кусок с полки (D-203) возвращается целым — половины куска нет.
+                raise ItemEditRejected(
+                    f"«{_line_name(line)}»: с полки возвращают целыми кусками — {_qty_text(value)} не получится."
+                )
             if value > line.quantity:
                 # RM-N10: «вернуть 15 из 10» раньше молча возвращало всю строку —
                 # кассир думал, что вернул 15. Больше остатка строки — отказ.
@@ -3526,6 +3613,9 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None, method=None, q
         item.is_returned = True
         item.returned_at = now
         item.save(update_fields=["is_returned", "returned_at"])
+
+    # Куски с полки — обратно на полку (D-203): пересчёт по строкам чеков.
+    _sync_shelf(_shelf_ids(items), user=user, event=f"вернулось с возвратом по чеку {_order_label(receipt)}")
 
     receipt.refunded_amount += refunded_total
     remaining = receipt.items.filter(is_returned=False).exists()
@@ -3852,6 +3942,9 @@ def undo_refund(receipt: Receipt, *, item_ids=None, user=None) -> Receipt:
             # месяц заказа получил бы второе списание, а склад по месяцам
             # перестал бы сходиться с проданным.
             _deduct_stock_for_item(item, user, happened_at=timezone.now())
+    # Куски с полки снова проданы — если их за это время не продали другому
+    # (D-203): иначе `LeftoverShort`, и отмена не проходит.
+    _sync_shelf(_shelf_ids(lines), user=user, event=f"отмена возврата по чеку {_order_label(receipt)}")
     receipt.refunded_amount = max(receipt.refunded_amount - restored, Decimal("0"))
     if receipt.items.filter(is_returned=True).exists():
         receipt.payment_status = Receipt.PaymentStatus.PARTIALLY_REFUNDED

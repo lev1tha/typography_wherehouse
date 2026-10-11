@@ -1,6 +1,7 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
+from .leftover_views import LeftoverViewSet
 from .views import (
     FifoRecalcView,
     LotCorrectionView,
@@ -34,6 +35,8 @@ router.register("supplies", SupplyViewSet, basename="supply")
 router.register("supplier-payments", SupplierPaymentViewSet, basename="supplier-payment")
 router.register("supplier-opening-debts", SupplierOpeningDebtViewSet, basename="supplier-opening-debt")
 router.register("transfers", StockTransferViewSet, basename="stock-transfer")
+# Полка остатков (2026-10-11, D-200): куски после заказов, уже списанные.
+router.register("leftovers", LeftoverViewSet, basename="leftover")
 
 urlpatterns = [
     path("waste/", WasteView.as_view(), name="waste"),

@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 
 import Catalog from "./Catalog.jsx";
+import Shelf from "../../components/Shelf.jsx";
 import MaterialStock from "./MaterialStock.jsx";
 import Supplies from "./Supplies.jsx";
 import Supply from "../store/Supply.jsx";
@@ -9,7 +10,9 @@ import Tabs from "../../components/Tabs.jsx";
 
 // «Приходы» стоят вторыми: приёмка — самая частая работа на складе после
 // самого справочника, и прятать её вглубь нельзя.
-const TABS = ["materials", "supplies", "movement", "sheet"];
+// «Полка остатков» (D-200) — куски после заказов, уже списанные: в склад и его
+// стоимость не входят, поэтому своей вкладкой, последней.
+const TABS = ["materials", "supplies", "movement", "sheet", "shelf"];
 
 // Единый раздел «Склад»: «Материалы» (справочник = Catalog), «Движение»
 // (приход / инвентаризация / списание = Supply) и «Остатки по месяцам» —
@@ -27,6 +30,7 @@ export default function Stock() {
     supplies: "tabSupplies",
     movement: "tabMovement",
     sheet: "tabSheet",
+    shelf: "tabShelf",
   };
 
   return (
@@ -44,6 +48,7 @@ export default function Stock() {
       {tab === "supplies" && <Supplies embedded />}
       {tab === "movement" && <Supply embedded />}
       {tab === "sheet" && <MaterialStock embedded />}
+      {tab === "shelf" && <Shelf embedded />}
     </>
   );
 }

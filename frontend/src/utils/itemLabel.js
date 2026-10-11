@@ -43,6 +43,8 @@ export function itemSpecParts(it, t) {
   if (Number(it.passes) > 1) out.push(t("receiptsV2.spec.passes", { n: it.passes }));
   if (it.machine) out.push(t(`machine.${it.machine}`, { defaultValue: it.machine_display || it.machine }));
   if (it.work_material_name) out.push(t("receiptsV2.spec.material", { name: it.work_material_name }));
+  // Кусок с полки остатков (D-201): какой именно продали.
+  if (it.leftover_label) out.push(t("shelf.specFrom", { label: it.leftover_label }));
   return out;
 }
 

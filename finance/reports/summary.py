@@ -24,7 +24,7 @@ from accounts.models import Employee, User
 from sales import reporting
 from sales.models import Receipt, TransactionItem
 from services.models import PrintingService
-from warehouse.models import Material, Roll, Supplier, Supply, stock_value_total
+from warehouse.models import Material, Supplier, Supply, stock_value_total
 from warehouse.supplier_ledger import supplier_balance
 
 from ..material_sheet import purchases_from_stock, q2
@@ -48,11 +48,20 @@ def _supply_line_label(line) -> str:
 
 
 def supplier_debts():
-    """Кому и сколько должен цех за материал — накладные и партии «в долг».
+    """Кому и сколько должен цех за материал — накладные, одиночные приходы и
+    начальные долги.
 
     С ДОКУМЕНТОМ на каждой строке: номер, поставщик, дата, сумма, сколько
     заплачено и что именно пришло. Одной цифрой «должны 22 550» долг не
-    доказать — владелец спрашивал «за что?», а накладной видно не было."""
+    доказать — владелец спрашивал «за что?», а накладной видно не было.
+
+    ПРИХОД БЕЗ УКАЗАННОЙ ОПЛАТЫ — ДОЛГ (D-195): у одиночной партии долг =
+    сумма закупки − заплачено по кассе (`warehouse.supplier_debts`), в том
+    числе у старых приходов без отметки «в долг» (`unmarked`). Карточка минус
+    авансы (`supplier_advances`) — то же сальдо, из которого сверка «Обзора»
+    берёт изменение долга (`bridge.supplier_position`)."""
+    from warehouse.supplier_debts import lot_debts, standalone_lots, undocumented
+
     rows = []
     supplies = Supply.objects.select_related("supplier", "created_by").prefetch_related(
         "lines__material", "lines__roll", "payments", "returns"
@@ -74,12 +83,18 @@ def supplier_debts():
                 "debt_foreign": supply.debt_foreign,
                 "note": supply.note,
                 "created_by": supply.created_by.username if supply.created_by_id else "",
+                "payable": True,
                 "lines": [
                     {"material": line.material.name, "what": _supply_line_label(line), "cost": line.cost}
                     for line in supply.lines.all()
                 ],
             })
-    for lot in Roll.objects.filter(supplier_debt__gt=0).select_related("material", "created_by"):
+    lots = list(standalone_lots().select_related("material", "created_by"))
+    debts = lot_debts(lots)
+    for lot in lots:
+        debt, unmarked = debts[lot.id]
+        if debt <= 0:
+            continue
         rows.append({
             "kind": "LOT",
             "id": lot.id,
@@ -87,13 +102,42 @@ def supplier_debts():
             "supplier": lot.code,
             "date": timezone.localtime(lot.received_at).date(),
             "total": lot.purchase_cost,
-            "paid": lot.purchase_cost - lot.supplier_debt,
-            "debt": lot.supplier_debt,
+            "paid": lot.purchase_cost - debt,
+            "debt": debt,
+            # Старый приход: оплату при приёмке не указали, «в долг» не
+            # отметили — долг расчётом (D-195). Интерфейс подписывает строку.
+            "unmarked": unmarked,
             "note": "",
             "created_by": lot.created_by.username if lot.created_by_id else "",
+            "payable": True,
             "lines": [
                 {"material": lot.material.name, "what": lot.dimensions_label, "cost": lot.purchase_cost}
             ],
+        })
+    # Приход без партии (быстрый приход штучного до 27.08): закуп есть, документа
+    # для оплаты нет. Гасится оплатами без документа (трата «Закуп материала»).
+    loose, rest = undocumented()
+    for row in loose:
+        if row["debt"] <= 0:
+            continue
+        rows.append({
+            "kind": "LOG", "id": row["id"],
+            "label": f"Приход «{row['material']}» без партии",
+            "supplier": "", "date": row["day"],
+            "total": row["amount"], "paid": row["paid"], "debt": row["debt"],
+            "note": row["reason"], "created_by": row["created_by"], "payable": False,
+            "lines": [{
+                "material": row["material"],
+                "what": f"{format(row['quantity'].normalize(), 'f')} {row['unit']} × {row['price']}",
+                "cost": row["amount"],
+            }],
+        })
+    # Вернули денег без документа больше, чем ушло, — это долг перед поставщиками.
+    if rest < 0:
+        rows.append({
+            "kind": "UNLINKED", "id": 0, "label": "Деньги от поставщиков без документа",
+            "supplier": "", "date": timezone.localdate(), "total": -rest, "paid": Decimal("0"),
+            "debt": -rest, "note": "", "created_by": "", "payable": False, "lines": [],
         })
     # Начальные долги, авансы и переплаты поставщикам — той же формулой, что
     # карточка поставщика: сальдо = начальный долг + накладные − платежи.
@@ -117,7 +161,7 @@ def supplier_debts():
                     + [p.paid_on for p in supplier.payments.all()] + [timezone.localdate()]
                 ),
                 "total": balance["opening"], "paid": balance["paid"], "debt": adjust,
-                "note": "", "created_by": "", "lines": [],
+                "note": "", "created_by": "", "payable": False, "lines": [],
             })
     rows.sort(key=lambda r: (r["date"], r["kind"], r["id"]))
     return {"total": sum((r["debt"] for r in rows), Decimal("0")), "rows": rows}
@@ -130,7 +174,15 @@ def supplier_advances():
     По поставщику — его сальдо в нашу пользу (`supplier_balance()["credit"]`):
     аванс, уже закрывший долг по другой накладной того же поставщика, входит
     в «Долг поставщикам» минусом и здесь второй раз не считается. `advances` —
-    сколько из этого — незачтённые авансы (остальное — переплата накладных)."""
+    сколько из этого — незачтённые авансы (остальное — переплата накладных).
+
+    Здесь же (D-195) переплаты без поставщика — накладная без поставщика и
+    одиночная партия, у которых заплачено больше суммы (вернули товар,
+    исправили приход), — и оплаты без документа сверх приходов без партии
+    (`kind = "UNLINKED"`). Карточка «Долг поставщикам» минус эта сумма — сальдо
+    расчётов с поставщиками, то же, что у сверки."""
+    from warehouse.supplier_debts import lot_debts, standalone_lots, undocumented
+
     rows = []
     for supplier in Supplier.objects.prefetch_related(
         "supplies__lines", "supplies__payments", "supplies__returns", "payments__offsets",
@@ -139,9 +191,32 @@ def supplier_advances():
         balance = supplier_balance(supplier)
         if balance["credit"] > 0:
             rows.append({
-                "id": supplier.id, "supplier": supplier.name,
+                "kind": "SUPPLIER", "id": supplier.id, "supplier": supplier.name,
                 "amount": balance["credit"], "advances": min(balance["advances"], balance["credit"]),
             })
+    for supply in Supply.objects.filter(supplier__isnull=True, is_opening=False).prefetch_related(
+        "lines", "payments", "returns",
+    ):
+        if supply.overpaid > 0:
+            rows.append({
+                "kind": "SUPPLY", "id": supply.id, "supplier": f"Накладная {supply.number or f'#{supply.id}'}",
+                "amount": supply.overpaid, "advances": Decimal("0"),
+            })
+    lots = list(standalone_lots().select_related("material"))
+    debts = lot_debts(lots)
+    for lot in lots:
+        debt = debts[lot.id][0]
+        if debt < 0:
+            rows.append({
+                "kind": "LOT", "id": lot.id, "supplier": f"Приход «{lot.material.name}» №{lot.id}",
+                "amount": -debt, "advances": Decimal("0"),
+            })
+    _loose, rest = undocumented()
+    if rest > 0:
+        rows.append({
+            "kind": "UNLINKED", "id": 0, "supplier": "Оплачено без документа",
+            "amount": rest, "advances": rest,
+        })
     rows.sort(key=lambda r: (-r["amount"], r["supplier"]))
     return {"total": sum((r["amount"] for r in rows), Decimal("0")), "rows": rows}
 
@@ -473,6 +548,12 @@ def finance_summary(d_from=None, d_to=None) -> dict:
     pm_by_user = defaultdict(lambda: Decimal("0"))
     rev_by_user = defaultdict(lambda: Decimal("0"))
     cutting_total = Decimal("0")
+    # База доли мастера — работа резки БЕЗ наценки за срочность (D-197):
+    # срочность — деньги цеха, процент мастера идёт от работы.
+    from .. import payroll
+
+    work_by_user = defaultdict(lambda: Decimal("0"))
+    cutting_work = Decimal("0")
     # ОБРЕЗКИ: сколько материала списали, но клиенту не отдали. Полосу 0.5 м
     # от рулона 0.9 отрезают на всю ширину, и 0.4 остаётся в цехе — обычно в
     # мусор. Деньги за полную ширину взяты, и это правильно: материал
@@ -586,6 +667,8 @@ def finance_summary(d_from=None, d_to=None) -> dict:
             cut_by_machine[machine] += rev
             pm_by_machine[machine] += line.quantity
             cutting_total += rev
+            work = payroll.work_amount(line)
+            cutting_work += work
             cutting_pm += line.quantity
             # Площадь у чека одна на всех, а станков в нём может быть два.
             # Делим её пропорционально длине реза: у чека с одним станком
@@ -614,6 +697,7 @@ def finance_summary(d_from=None, d_to=None) -> dict:
                 area_by_user[who] += area * share
             pm_by_user[who] += line.quantity
             rev_by_user[who] += rev
+            work_by_user[who] += work
         cutting_area += area
 
     # Возвраты работы, оформленные в периоде, по заказам ПРОШЛЫХ периодов:
@@ -626,6 +710,8 @@ def finance_summary(d_from=None, d_to=None) -> dict:
         cut_by_machine[machine] -= line.sold_total
         cutting_total -= line.sold_total
         rev_by_user[worker(line, line.receipt)] -= line.sold_total
+        cutting_work -= payroll.work_amount(line)
+        work_by_user[worker(line, line.receipt)] -= payroll.work_amount(line)
 
     # Строки — станки, по которым в периоде что-то резали. «Без станка» —
     # старые чеки, оформленные до разделения, если у их услуги станок не
@@ -671,9 +757,10 @@ def finance_summary(d_from=None, d_to=None) -> dict:
         "total": cutting_total,
         "area": q2(cutting_area),
         "running_meters": q2(cutting_pm),
-        # Расчётная ЗП мастера от всей работы резки за период — справочно.
+        # Расчётная ЗП мастера от всей работы резки за период — справочно;
+        # от работы без наценки за срочность (D-197).
         "master_commission_percent": master_pct,
-        "master_share": master_share(cutting_total),
+        "master_share": master_share(cutting_work),
         "rows": [
             {
                 "id": machine or None,
@@ -714,7 +801,7 @@ def finance_summary(d_from=None, d_to=None) -> dict:
                 "running_meters": q2(pm_by_user.get(uid, Decimal("0"))),
                 # Стоимость работы реза этого сотрудника и его расчётная доля.
                 "amount": rev_by_user.get(uid, Decimal("0")),
-                "master_share": master_share(rev_by_user.get(uid, Decimal("0"))),
+                "master_share": master_share(work_by_user.get(uid, Decimal("0"))),
             }
             for uid, area in sorted(area_by_user.items(), key=lambda kv: -kv[1])
         ],

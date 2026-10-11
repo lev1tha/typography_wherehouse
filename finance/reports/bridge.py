@@ -45,7 +45,7 @@ from django.utils import timezone
 from sales.models import Receipt, TransactionItem
 
 from .. import chart
-from ..material_sheet import purchases_from_stock
+from ..material_sheet import purchases_from_stock_by_day
 from ..models import CashEntry, ExpenseKind
 from ..periods import local_day, month_end
 from .cashflow import cash_flow, entries
@@ -168,6 +168,102 @@ def _client_ledger():
     return sold, returned, cash
 
 
+# --- Долг поставщикам: сальдо на дату (D-195) -----------------------------------------
+#
+# Строка «Долг поставщикам» — изменение сальдо расчётов с поставщиками за
+# период. Сальдо на конец дня — из тех же записей, что сама строка:
+#
+#     начальные долги (по дату) + закуп (по дату) − оплаты поставщикам (по дату)
+#     + курсовой доход по оплатам (закрыл долг без денег)
+#
+# и на сегодня оно равно карточке «Долг поставщикам» минус «Авансы
+# поставщикам» (`summary.supplier_debts` / `supplier_advances`): приход без
+# указанной оплаты — долг и там, и здесь. Поэтому
+#
+#     строка за период = сальдо на конец − сальдо на начало
+#                        − начальные долги, внесённые в периоде
+#
+# Начальный долг — не движение денег и не закуп, в строку он не входит.
+
+
+def _is_supplier_payment(entry, mapping) -> bool:
+    """Запись кассы гасит долг поставщикам: «Оплата поставщику» или трата вида
+    «Закуп в склад» — в денежном потоке."""
+    if mapping.cash_section not in chart.FLOW_SECTIONS:
+        return False
+    return entry.article == A.SUPPLY or bool(
+        entry.expense_id and entry.expense.kind.role == ExpenseKind.Role.INVENTORY
+    )
+
+
+def _purchases_by_day():
+    return once("purchases_by_day", purchases_from_stock_by_day)
+
+
+def _purchases_upto(day):
+    """Закуп по день включительно — до тыйына."""
+    return q2(sum((v for d, v in _purchases_by_day().items() if d <= day), ZERO))
+
+
+def _supplier_cash():
+    """[(день, сколько ушло поставщикам)] по всей книге — один раз на отчёт."""
+    def load():
+        from django.db.models import Q
+
+        out = []
+        for e in CashEntry.objects.filter(
+            Q(article=A.SUPPLY) | Q(expense__kind__role=ExpenseKind.Role.INVENTORY)
+        ).select_related("expense__kind"):
+            if _is_supplier_payment(e, chart.for_cash_entry(e)):
+                out.append((e.happened_on, -e.signed_amount))
+        return out
+
+    return once("supplier_cash", load)
+
+
+def _fx_settled():
+    """[(день, сумма)] курсовой разницы БЕЗ денег — доход по оплате в валюте
+    (заплатили меньше, чем закрыли долга) и его отмена. Карточка закрывает
+    долг на всю закрытую сумму, касса — только на деньги: разницу сверка
+    переносит из «Расходы начислены, но не оплачены» в «Долг поставщикам»."""
+    def load():
+        # Траты — из той же загрузки, что ОПиУ (таблица трат читается один раз
+        # на отчёт); у каких есть деньги — одним запросом к книге.
+        from .pnl import _load_expenses
+
+        fx = [e for e in once("expense_entries", _load_expenses) if e.kind.code == "FX_DIFF"]
+        if not fx:
+            return []
+        with_cash = set(
+            CashEntry.objects.filter(expense_id__in=[e.id for e in fx]).values_list("expense_id", flat=True)
+        )
+        return [(e.spent_at, e.amount) for e in fx if e.id not in with_cash]
+
+    return once("fx_settled", load)
+
+
+def _openings():
+    def load():
+        from warehouse.models import SupplierOpeningDebt
+
+        return list(SupplierOpeningDebt.objects.values_list("as_of", "amount"))
+
+    return once("supplier_openings", load)
+
+
+def _sum_between(rows, d_from, d_to):
+    return total(v for d, v in rows if (d_from is None or d >= d_from) and d <= d_to)
+
+
+def supplier_position(day):
+    """Сальдо расчётов с поставщиками на конец дня `day`: долги минус авансы.
+    На сегодня — карточка «Долг поставщикам» минус «Авансы поставщикам»."""
+    return (
+        _sum_between(_openings(), None, day) + _purchases_upto(day)
+        - _sum_between(_supplier_cash(), None, day) + _sum_between(_fx_settled(), None, day)
+    )
+
+
 def opening_flows(d_from, d_to):
     """Строка «Входящие остатки» за период: деньги, принесённые за входящий долг
     (приходы минус откаты по их записям кассы), минус траты входящего аванса."""
@@ -198,8 +294,10 @@ def bridge(d_from=None, d_to=None) -> dict:
 
     # Закуп по цене за единицу даёт хвосты мельче тыйына — до тыйына, как
     # все деньги отчёта (`money.q2`); строки запасов и долга поставщикам он
-    # двигает одинаково, и их сумма от округления не меняется.
-    purchases = q2(purchases_from_stock(d_from, d_to))
+    # двигает одинаково, и их сумма от округления не меняется. Закуп периода —
+    # разница закупа «по день» на концах периода: тем же числом двигается
+    # сальдо поставщиков (`supplier_position`), без расхождения в тыйын.
+    purchases = _purchases_upto(d_to) - _purchases_upto(start)
     supplier_paid = ZERO
     expenses_paid = ZERO
     tax_paid = ZERO
@@ -208,7 +306,7 @@ def bridge(d_from=None, d_to=None) -> dict:
         mapping = chart.for_cash_entry(e)
         if mapping.cash_section not in chart.FLOW_SECTIONS:
             continue
-        if e.article == A.SUPPLY or (e.expense_id and e.expense.kind.role == ExpenseKind.Role.INVENTORY):
+        if _is_supplier_payment(e, mapping):
             supplier_paid -= e.signed_amount
         elif e.article == A.PAYROLL and not e.expense_id:
             expenses_paid -= e.signed_amount        # выплата по ведомости гасит начисление
@@ -218,6 +316,10 @@ def bridge(d_from=None, d_to=None) -> dict:
             tax_paid -= e.signed_amount
         elif not e.expense_id and e.article == A.OTHER:
             other += e.signed_amount
+    # Курсовой доход по оплате в валюте закрыл долг без денег (D-195): в долг
+    # поставщикам, а не в «начислено, но не оплачено» — как в карточке.
+    fx_settled = _sum_between(_fx_settled(), d_from, d_to)
+    opening_debts = _sum_between(_openings(), d_from, d_to)
 
     lines = [
         ("net_profit", p["net_profit"]),
@@ -225,10 +327,10 @@ def bridge(d_from=None, d_to=None) -> dict:
         ("receivables", -(ar1 - ar0)),
         ("client_money", held1 - held0),
         ("inventory", -(purchases - p["cogs_total"])),
-        ("payables", purchases - supplier_paid),
+        ("payables", purchases - supplier_paid + fx_settled),
         # Списание безнадёжного долга — расход, у которого денег не было и не
         # будет: он не «ждёт оплаты», а гасит долг клиента (отдельной строкой).
-        ("accrued", p["opex"]["total"] + p["interest"] - expenses_paid - p["opex_noncash"]),
+        ("accrued", p["opex"]["total"] + p["interest"] - expenses_paid - p["opex_noncash"] - fx_settled),
         ("written_off", p["opex_noncash"]),
         ("opening_balances", opening_flows(d_from, d_to)),
         ("tax_payable", p["tax"] - tax_paid),
@@ -248,6 +350,12 @@ def bridge(d_from=None, d_to=None) -> dict:
         "levels": {
             "receivables": ar1, "client_money": held1,
             "receivables_start": ar0, "client_money_start": held0,
+            # Сальдо с поставщиками на концах периода и начальные долги,
+            # внесённые в периоде (D-195): строка «Долг поставщикам» =
+            # конец − начало − начальные долги.
+            "payables_start": supplier_position(start), "payables_end": supplier_position(d_to),
+            "payables_opening": opening_debts,
+            "payables_start_on": start, "payables_end_on": d_to,
         },
     }
 

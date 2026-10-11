@@ -584,7 +584,8 @@ class QuickIntakeSerializer(serializers.Serializer):
     # Чем заплатили за поставку: «наличные» / «банк» пишут расход в кассу,
     # «в долг» — не пишут. Поля нет — тоже не пишем: система не должна
     # выдумывать движение денег за того, кто про него ничего не сказал (так
-    # ведут себя старые вызовы API и импорт каталога).
+    # ведут себя старые вызовы API и импорт каталога). Приход без указанной
+    # оплаты — долг поставщику (D-195), как «в долг».
     payment = serializers.ChoiceField(
         choices=["CASH", "BANK", "DEBT"], required=False, allow_blank=True
     )
@@ -783,7 +784,18 @@ class RollSerializer(serializers.ModelSerializer):
         return obj.purchase_cost if _sees_money(self.context) else None
 
     def get_supplier_debt(self, obj):
-        return obj.supplier_debt if _sees_money(self.context) else None
+        """Долг поставщику за одиночную партию — расчётом, как в карточке «Долг
+        поставщикам» (D-195): сумма − заплачено по кассе, в том числе у старого
+        прихода без отметки «в долг». У партии из накладной — 0 (долг в ней)."""
+        if not _sees_money(self.context):
+            return None
+        debts = self.context.get("_lot_debts")
+        if debts is None:
+            from .supplier_debts import lot_debts, standalone_lots
+
+            debts = {pk: debt for pk, (debt, _m) in lot_debts(standalone_lots()).items()}
+            self.context["_lot_debts"] = debts
+        return max(debts.get(obj.pk, Decimal("0")), Decimal("0"))
 
     class Meta:
         model = Roll
@@ -845,7 +857,8 @@ class RollIntakeSerializer(serializers.Serializer):
     # Чем заплатили за поставку: «наличные» / «банк» пишут расход в кассу,
     # «в долг» — не пишут. Поля нет — тоже не пишем: система не должна
     # выдумывать движение денег за того, кто про него ничего не сказал (так
-    # ведут себя старые вызовы API и импорт каталога).
+    # ведут себя старые вызовы API и импорт каталога). Приход без указанной
+    # оплаты — долг поставщику (D-195), как «в долг».
     payment = serializers.ChoiceField(
         choices=["CASH", "BANK", "DEBT"], required=False, allow_blank=True
     )

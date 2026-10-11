@@ -52,7 +52,8 @@ def master_pay(d_from, d_to, directory=None) -> tuple[Decimal, Decimal, Decimal]
         work = payroll.work_of(line)
         if work is None or line.receipt.is_warranty:
             continue
-        amount = sign * line.sold_total
+        # Процент мастера — от работы без срочности (D-197), как в ведомости.
+        amount = sign * payroll.work_amount(line)
         executor = directory.executor_of(line)
         rates = directory.rates(executor, d_from) if executor else None
         if rates is None:

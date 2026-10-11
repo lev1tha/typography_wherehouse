@@ -63,7 +63,8 @@
     "main": "Main menu",
     "staff": "Staff",
     "payroll": "Payroll",
-    "openingBalances": "Opening balances"
+    "openingBalances": "Opening balances",
+    "shelf": "Leftover shelf"
   },
   "roles": {
     "admin": "Administrator",
@@ -229,7 +230,8 @@
     "rollsBreakdown": "{{n}} rolls",
     "allForms": "All forms",
     "purchasePerPm": "Purchase, som/running m",
-    "unitSheetShort": "sheets"
+    "unitSheetShort": "sheets",
+    "tabShelf": "Leftover shelf"
   },
   "unit": {
     "SQM": "sqm",
@@ -713,7 +715,9 @@
       "rollTooWide": "The item is wider than the roll.",
       "needPiecePrice": "The material has no price per piece.",
       "needMaterial": "To add, choose a material.",
-      "needMatPrice": "The material has no price per sq m."
+      "needMatPrice": "The material has no price per sq m.",
+      "needLeftover": "To add, pick a piece from the shelf.",
+      "shelfShort": "There are fewer pieces on the shelf than entered."
     },
     "urgent": "Rush",
     "urgentOff": "No rush surcharge is set — an admin sets it in “Prices & services”.",
@@ -726,7 +730,8 @@
     "rulesDiscount": "Discount {{n}} %",
     "rulesMinimum": "Line minimum",
     "warnBelowCost": "“{{name}}”: the line sold for {{sum}} — below cost.",
-    "addRulesNote": "Catalogue amount; the order's rules will apply: {{rules}}."
+    "addRulesNote": "Catalogue amount; the order's rules will apply: {{rules}}.",
+    "wasteMeasureSHELF": "From shelf"
   },
   "receipts": {
     "title": "Receipts",
@@ -1661,7 +1666,10 @@
     "acceptedBy": "received by {{name}}",
     "docMoney": "Document total {{total}}, paid {{paid}}",
     "advancesTitle": "Advances to suppliers",
-    "advancesNone": "No advances or overpayments"
+    "advancesNone": "No advances or overpayments",
+    "unmarked": "No payment was given at intake, so it counts as a debt. If it was paid outside the cash book, record the payment with the date the money was paid.",
+    "looseHint": "Intake without a lot (old quick intake): it cannot be paid from here — a “Material purchase” expense settles it.",
+    "unlinked": "Paid without a document"
   },
   "statements": {
     "tabSummary": "Monthly summary",
@@ -1759,7 +1767,7 @@
     "bridge_receivables": "Orders on credit: revenue without cash yet. When clients pay old debts it works the other way.",
     "bridge_client_money": "Change not handed out and prepayments: client money is with us but is not revenue yet.",
     "bridge_inventory": "Material bought — cash left, but it becomes an expense only when sold. Stock growth absorbs cash.",
-    "bridge_payables": "Material arrived but the supplier is not paid yet — the cash is still with us. Purchases before 19.09.2026 were paid outside the cash book and show here.",
+    "bridge_payables": "Material arrived but the supplier is not paid yet — the cash is still with us. Paying an old debt works the other way. An intake with no payment given is a debt: the “Owed to suppliers” card counts it the same way, and the change here is the difference of its balance (less advances) between the ends of the period.",
     "bridge_accrued": "An expense belongs to this month but was paid later (or a previous month's expense was paid now).",
     "bridge_tax_payable": "Tax accrued but not paid yet — the cash is still with us.",
     "bridge_capex": "Machines and workshop improvements: cash left in full, the price reaches profit in parts.",
@@ -1890,7 +1898,9 @@
     "whyMore": "Details — “Finance” → “Reconciliation”",
     "unexplained": "Unexplained: {{value}} — the data contradicts itself, please check.",
     "payablesChange": "Supplier debt: change over the period",
-    "payablesNow": "debt outstanding on {{date}}: {{value}}"
+    "payablesNow": "debt outstanding on {{date}}: {{value}}",
+    "payablesRange": "debt less advances: {{start}} on {{from}}, {{end}} on {{to}}",
+    "payablesOpening": "including opening debt entered in the period: {{value}}"
   },
   "pager": {
     "label": "Pagination",
@@ -2270,7 +2280,9 @@
     "group_other": "Other",
     "unallocated": "Not allocated to lines: {{sum}} (manual adjustments or rounding).",
     "shareOn": "The master's share is subtracted from the margin (setting in Finance → Payroll and margin).",
-    "shareOff": "The master's share is not in the margin — pay is a separate expense (payroll)."
+    "shareOff": "The master's share is not in the margin — pay is a separate expense (payroll).",
+    "shelfFrom": "from shelf: {{name}} ({{n}} pcs)",
+    "shelfUnlinked": "not from shelf"
   },
   "whatIf": {
     "title": "What if: service prices and purchases",
@@ -2670,5 +2682,105 @@
     "stockOut": "From stock: {{width}} × {{len}} = {{area}} sq.m",
     "catalogField": "Price per product sq.m, som",
     "catalogHint": "Optional. When set, the till offers a second way to sell the roll: product sq.m (width × length × price); the full width × length leaves stock. Empty — running metres only."
+  },
+  "shelf": {
+    "title": "Leftover shelf",
+    "hint": "Pieces and parts left after orders — defects, extra parts, offcuts. The material is already written off by the order: the shelf is not part of stock, its value or the reconciliation. Sell them at checkout: «Waste» → «From shelf».",
+    "tab_list": "On shelf",
+    "tab_summary": "By material",
+    "tab_sold": "Sold",
+    "status": {
+      "ON_SHELF": "On shelf",
+      "PARTIAL": "Partly sold",
+      "SOLD": "Sold",
+      "WRITTEN_OFF": "Written off"
+    },
+    "statusAvailable": "On shelf and partly sold",
+    "statusAll": "All",
+    "searchPh": "Material, note, order №",
+    "allMaterials": "All materials",
+    "measure": "Measure",
+    "allMeasures": "All measures",
+    "measureSQM": "Sq.m",
+    "measureMETER": "Running m",
+    "measurePIECE": "Pieces",
+    "ageAll": "Any age",
+    "ageOver": "Over {{n}} days",
+    "sizeSearch": "Piece at least, m:",
+    "sizeW": "width",
+    "sizeL": "length",
+    "put": "Put on shelf",
+    "putFromOrder": "Leftovers to shelf",
+    "putTitle": "Put on shelf",
+    "putTitleOrder": "Leftovers to shelf — order №{{n}}",
+    "putHint": "The material is already written off by the order — stock and its value won't change. Enter the size of one piece and how many.",
+    "putDone": "Put on shelf: {{n}}",
+    "alreadyPut": "Already on shelf from this order:",
+    "chooseMaterial": "— choose material —",
+    "orderMaterials": "Order materials",
+    "otherMaterials": "Other materials",
+    "width": "Piece width, m",
+    "length": "Piece length, m",
+    "pieces": "Pieces",
+    "note": "Note",
+    "notePh": "defect, extra parts, offcut…",
+    "addRow": "+ another piece size",
+    "removeRow": "Remove",
+    "site": "Stored at",
+    "noSite": "Not specified",
+    "block": {
+      "needMaterial": "Choose a material.",
+      "needPieces": "How many pieces — a whole number, at least one.",
+      "needSize": "Enter the width and length of one piece.",
+      "needLength": "Enter the length of one piece."
+    },
+    "colPiece": "Piece",
+    "colLeft": "On shelf",
+    "colStatus": "Status",
+    "colSoldSum": "Sold for",
+    "colOrder": "Order",
+    "colNote": "Note",
+    "colAge": "Age",
+    "colMaterial": "Material",
+    "colPositions": "Items",
+    "colPieces": "Pieces",
+    "colAreaSqm": "Area, sq.m",
+    "colMetres": "Running m",
+    "colOldest": "Oldest",
+    "colSoldAt": "When",
+    "colReceipt": "Receipt",
+    "colPrice": "Price per piece",
+    "colSum": "Amount",
+    "leftOf": "{{left}} of {{total}} pcs",
+    "days": "{{n}} d",
+    "piecesN": "{{n}} pcs",
+    "open": "Open",
+    "empty": "The shelf is empty",
+    "emptySold": "Nothing sold from the shelf in this period",
+    "summaryHint": "Longest-lying first — sell these first.",
+    "total": "Total",
+    "totalLine": "{{pieces}} pcs · {{area}} sq.m · {{metres}} running m",
+    "soldTotal": "Sold in period",
+    "returnedTotal": "Returns",
+    "netTotal": "Shelf brought in",
+    "returnedOn": "returned {{date}}",
+    "writeOff": "Write off",
+    "writeOffTitle": "Write off from shelf: {{label}}",
+    "writeOffHint": "Thrown away — everything on the shelf is written off ({{n}} pcs). Stock and money are not affected: the material was written off by the order. Logged in the journal.",
+    "writeOffDone": "Written off from shelf",
+    "reason": "Reason",
+    "reasonPh": "cracked, thrown away…",
+    "putBy": "Put by",
+    "history": "Sales history",
+    "noSales": "Not sold yet",
+    "specFrom": "from shelf: {{label}}",
+    "pickHint": "A piece from the leftover shelf: already written off by its order, stock doesn't move. Type the price per piece — leftovers have no catalogue price.",
+    "pickSearch": "Find on shelf",
+    "pickNone": "No matching leftovers on the shelf",
+    "pickLeft": "{{n}} pcs on shelf",
+    "pickInCart": "{{n}} in cart",
+    "pickPieces": "How many pieces",
+    "pickRate": "Price per piece, som",
+    "pickNeedRate": "Enter a price per piece above zero"
   }
 }

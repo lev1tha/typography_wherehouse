@@ -12,6 +12,7 @@ import Modal from "./Modal.jsx";
 import PayDebtModal from "./PayDebtModal.jsx";
 import PrintDocs from "./PrintDocs.jsx";
 import RefundModal from "./RefundModal.jsx";
+import ShelfPutModal from "./ShelfPutModal.jsx";
 import { FulfillmentBadge, PaymentBadge, WarrantyBadge } from "./StatusBadge.jsx";
 import { useUI } from "./UIProvider.jsx";
 import WriteOffModal from "./WriteOffModal.jsx";
@@ -49,6 +50,7 @@ export default function ReceiptCard({ receipt, onClose, onChange }) {
   const [cancelling, setCancelling] = useState(null); // запись оплаты, которую отменяем
   const [printKind, setPrintKind] = useState(null); // "CHECK" | "WORKORDER"
   const [repriced, setRepriced] = useState(null); // ответ reprice: было/стало
+  const [shelving, setShelving] = useState(false); // «Остатки на полку» (D-200)
 
   const items = receipt.items || [];
   const live = receipt.status !== "CANCELLED";
@@ -100,6 +102,8 @@ export default function ReceiptCard({ receipt, onClose, onChange }) {
   const moreActions = [
     ...primary.slice(3),
     canAdd && { key: "add", className: "secondary", label: `+ ${t("receipts.addBtn")}`, onClick: () => setAdding(true) },
+    // Куски после заказа — на полку остатков (D-200): кладут склад и админ.
+    !readOnly && { key: "shelf", className: "secondary", label: t("shelf.putFromOrder"), onClick: () => setShelving(true) },
     { key: "workorder", className: "secondary", label: t("workOrder.btn"), onClick: () => setPrintKind("WORKORDER") },
     // Откат прямо в окне чека: промах по «Готово» замечают чаще всего здесь.
     fulfil && receipt.fulfillment_status !== "PROCESSING" && {
@@ -109,6 +113,9 @@ export default function ReceiptCard({ receipt, onClose, onChange }) {
     canRefund && { key: "refund", className: "danger", label: t("receipts.refund"), onClick: () => setRefunding(true) },
   ].filter(Boolean);
   const [moreOpen, setMoreOpen] = useState(false);
+  // Меню «…» прижато к правому краю кнопки; когда кнопка переносится к левому
+  // краю окна, оно уходило за край и обрезалось — открываем его вправо.
+  const [moreLeft, setMoreLeft] = useState(false);
   const moreRef = useRef(null);
   useEffect(() => {
     if (!moreOpen) return undefined;
@@ -210,7 +217,12 @@ export default function ReceiptCard({ receipt, onClose, onChange }) {
                   aria-expanded={moreOpen}
                   aria-label={t("receipts.moreActions")}
                   title={t("receipts.moreActions")}
-                  onClick={() => setMoreOpen((v) => !v)}
+                  onClick={() => {
+                    const box = moreRef.current?.getBoundingClientRect();
+                    const frame = moreRef.current?.closest(".modal")?.getBoundingClientRect();
+                    setMoreLeft(!!box && box.right - 220 < (frame?.left ?? 0));
+                    setMoreOpen((v) => !v);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === "Escape" && moreOpen) {
                       e.stopPropagation();
@@ -221,7 +233,7 @@ export default function ReceiptCard({ receipt, onClose, onChange }) {
                   …
                 </button>
                 {moreOpen && (
-                  <div className="rc-more-menu" role="menu">
+                  <div className={`rc-more-menu${moreLeft ? " to-right" : ""}`} role="menu">
                     {moreActions.map((a) => (
                       <button
                         key={a.key}
@@ -560,6 +572,9 @@ export default function ReceiptCard({ receipt, onClose, onChange }) {
       {printKind && <PrintDocs receipt={receipt} initial={printKind} onClose={() => setPrintKind(null)} />}
 
       {/* Итог пересчёта: что подорожало или подешевело и что осталось нетронутым. */}
+      {shelving && (
+        <ShelfPutModal receipt={receipt} onClose={() => setShelving(false)} onDone={() => setShelving(false)} />
+      )}
       {repriced && (
         <Modal
           title={t("reprice.resultTitle", { number: receipt.order_number })}

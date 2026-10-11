@@ -184,25 +184,35 @@ class SupplierPaymentError(Exception):
 
 @transaction.atomic
 def pay_lot_supplier(roll: Roll, amount, account, *, paid_on=None, user=None) -> Decimal:
-    """Заплатить поставщику за партию, взятую в долг.
+    """Заплатить поставщику за одиночную партию.
 
     Деньги уходят из кассы или со счёта (`account`) датой оплаты, долг партии
     уменьшается. Больше долга не платим: переплату поставщику система не
     ведёт, а молча записанная она увела бы кассу ниже ящика.
+
+    Долг — расчётом (D-195): сумма закупки − уже заплаченное по кассе. Так
+    платится и партия «в долг», и старый приход без оплаты и без отметки
+    (его долг — вся сумма). После оплаты отметка `supplier_debt` равна
+    остатку. Партия из накладной оплачивается по накладной.
     """
     from finance import cash
 
+    from .supplier_debts import is_standalone, lot_debt
+
     locked = Roll.objects.select_for_update().get(pk=roll.pk)
+    if not is_standalone(locked):
+        raise SupplierPaymentError("Партия пришла накладной — оплачивайте накладную.")
     amount = Decimal(str(amount))
     if amount <= 0:
         raise SupplierPaymentError("Сумма должна быть больше нуля.")
     if account not in ("CASH", "BANK"):
         raise SupplierPaymentError("Укажите, чем платили: наличными или с банка.")
-    if amount > locked.supplier_debt:
+    debt = max(lot_debt(locked), Decimal("0"))
+    if amount > debt:
         raise SupplierPaymentError(
-            f"По этой партии долг {locked.supplier_debt} — больше заплатить нельзя."
+            f"По этой партии долг {debt} — больше заплатить нельзя."
         )
-    locked.supplier_debt -= amount
+    locked.supplier_debt = debt - amount
     locked.save(update_fields=["supplier_debt"])
     cash.supplier_paid(
         amount, account, roll=locked, happened_on=paid_on,

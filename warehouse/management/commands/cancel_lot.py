@@ -69,7 +69,12 @@ class Command(BaseCommand):
                 f"У партии №{roll.id} не нашлось однозначной записи журнала "
                 "— уберите вручную, иначе закуп разойдётся со складом."
             )
-        purchase = log.quantity_changed * (log.actual_price or Decimal("0"))
+        # Закуп одиночной партии в отчётах — её сумма (D-195), у прихода из
+        # накладной — как раньше, по журналу.
+        if log.supply_id is None:
+            purchase = roll.purchase_cost
+        else:
+            purchase = log.quantity_changed * (log.actual_price or Decimal("0"))
         gone = roll.initial_area - roll.remaining_area
         sold_items = roll.sold_items.count()
 

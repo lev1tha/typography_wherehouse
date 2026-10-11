@@ -43,9 +43,9 @@ class CancelLotTests(TestCase):
 
     def test_dry_run_changes_nothing(self):
         out = self._run(str(self.bogus.id))
-        # 30 000 / 28,8 не делится нацело: цена за кв.м округляется до копеек,
-        # и закуп в отчёте считается уже по ней — отсюда копеечный хвост.
-        self.assertIn("−30 000.10", out)
+        # 30 000 / 28,8 не делится нацело, но закуп одиночной партии в отчёте —
+        # её сумма, без копеечного хвоста цены кв.м (D-195; было «−30 000.10»).
+        self.assertIn("−30 000.00", out)
         self.assertTrue(Roll.objects.filter(pk=self.bogus.pk).exists())
 
     def test_removes_the_lot_its_journal_entry_and_the_stock(self):
@@ -62,7 +62,8 @@ class CancelLotTests(TestCase):
     def test_purchases_drop_by_the_lot(self):
         before = purchases_from_stock(None, None)
         self._run(str(self.bogus.id), "--yes")
-        self.assertEqual(before - purchases_from_stock(None, None), Decimal("30000.096"))
+        # Сумма партии, а не «площадь × цена кв.м» (30 000,096) — D-195.
+        self.assertEqual(before - purchases_from_stock(None, None), Decimal("30000.00"))
 
     def test_card_price_falls_back_to_the_remaining_lot(self):
         self.material.refresh_from_db()

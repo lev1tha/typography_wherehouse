@@ -80,6 +80,22 @@ def work_of(line) -> str | None:
     return Work.OTHER
 
 
+def work_amount(line) -> Decimal:
+    """Сумма строки для процента мастера — БЕЗ наценки за срочность (D-197).
+
+    Решение владельца 11.10: срочность — деньги цеха, мастер получает процент
+    от работы. Строка хранит процент срочности (`urgency_percent`); сумма без
+    неё = сумма строки (как в чеке) / (1 + срочность / 100), до тыйына. Резка
+    650 со срочностью 25 % стоит в чеке 813 (812,50 вверх до сома), в выработке
+    813 / 1,25 = 650,40. Строка без срочности (и проданная до правил прайса) —
+    как стоит в чеке. Метры реза не меняются."""
+    amount = line.sold_total
+    urgency = getattr(line, "urgency_percent", None) or ZERO
+    if urgency <= 0:
+        return amount
+    return q2(amount * 100 / (100 + urgency))
+
+
 def _rate_for(rates: dict, work: str) -> Decimal:
     """Процент вида работы: свой станочный, иначе общий для резки, иначе 0."""
     if work in rates:
@@ -151,7 +167,8 @@ def line_master_share(line, directory: Directory | None = None) -> Decimal:
         from services.models import PricingSettings
 
         percent = PricingSettings.load().master_commission_percent or ZERO
-    return q2(line.sold_total * (percent or ZERO) / 100)
+    # Процент — от работы без срочности (D-197).
+    return q2(work_amount(line) * (percent or ZERO) / 100)
 
 
 # --- Выработка периода --------------------------------------------------------------
@@ -161,7 +178,9 @@ def output(d_from, d_to, directory: Directory | None = None) -> dict:
     """{id сотрудника или None: {вид работы: {"amount", "meters"}}} за период.
 
     `amount` — стоимость работы, как стоит в чеке (вверх до сома по строке),
-    `meters` — погонные метры реза (количество строк резки).
+    но без наценки за срочность (`work_amount`, D-197): срочность — деньги
+    цеха, не выработка мастера. `meters` — погонные метры реза (количество
+    строк резки), срочность их не меняет.
 
     Гарантийная переделка (`Receipt.is_warranty`) — НЕ выработка (RF-N1,
     D-161): ни суммы, ни метров. Иначе виновник брака получал проценты и
@@ -174,7 +193,7 @@ def output(d_from, d_to, directory: Directory | None = None) -> dict:
         if work is None or line.receipt.is_warranty:
             continue
         slot = result[directory.executor_of(line)][work]
-        slot["amount"] += sign * line.sold_total
+        slot["amount"] += sign * work_amount(line)
         if work.startswith("CUTTING"):
             slot["meters"] += sign * line.quantity
     return result

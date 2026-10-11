@@ -28,6 +28,9 @@ const CustomerOrders = lazy(() => import("./pages/customer/CustomerOrders.jsx"))
 const Warehouse = lazy(() => import("./pages/store/Warehouse.jsx"));
 const Checkout = lazy(() => import("./pages/store/Checkout.jsx"));
 const StoreReceipts = lazy(() => import("./pages/store/StoreReceipts.jsx"));
+// Полка остатков (D-200): у админа — вкладка «Склада», у склада и бухгалтера —
+// свой пункт меню (бухгалтер только смотрит).
+const Shelf = lazy(() => import("./components/Shelf.jsx"));
 
 const ADMIN_NAV = [
   {
@@ -64,6 +67,7 @@ const STORE_NAV = [
       // Приход накладной — работа складовщика: он принимает товар и выдаёт
       // приходную накладную. Тот же экран, что у админа во вкладке «Приходы».
       { to: "/app/supplies", label: "nav.supply", icon: "inbox" },
+      { to: "/app/shelf", label: "nav.shelf", icon: "archive" },
     ],
   },
 ];
@@ -81,6 +85,7 @@ const ACCOUNTANT_NAV = [
       { to: "/acc/cash", label: "nav.cash", icon: "wallet" },
       { to: "/acc/payroll", label: "nav.payroll", icon: "users" },
       { to: "/acc/dashboard", label: "nav.dashboard", icon: "dashboard" },
+      { to: "/acc/shelf", label: "nav.shelf", icon: "archive" },
     ],
   },
 ];
@@ -175,6 +180,7 @@ export default function App() {
         <Route path="/app/clients" element={<Clients />} />
         <Route path="/app/receipts" element={<StoreReceipts />} />
         <Route path="/app/supplies" element={<Supplies />} />
+        <Route path="/app/shelf" element={<Shelf />} />
       </Route>
 
       {/* Бухгалтер — отдельный раздел, всё только на просмотр */}
@@ -187,6 +193,7 @@ export default function App() {
       >
         <Route path="/acc" element={<Receipts />} />
         <Route path="/acc/clients" element={<Clients />} />
+        <Route path="/acc/shelf" element={<Shelf />} />
         <Route
           path="/acc/finance"
           element={
