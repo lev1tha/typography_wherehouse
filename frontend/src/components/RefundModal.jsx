@@ -41,10 +41,14 @@ export default function RefundModal({ receipt, onClose, onDone }) {
   const [picked, setPicked] = useState(() => new Set(items.map((i) => i.id)));
   // Сколько вернуть по строке: пусто — всё количество.
   const [backQty, setBackQty] = useState({});
+  const backOf = (it) => Number(String(backQty[it.id] ?? "").replace(",", "."));
   const partOf = (it) => {
-    const v = Number(String(backQty[it.id] ?? "").replace(",", "."));
+    const v = backOf(it);
     return canSplit(it) && v > 0 && v < qtyOf(it) ? v : null;
   };
+  // Больше, чем осталось в строке (RM-N10): сервер ответит отказом — не шлём.
+  const overOf = (it) => picked.has(it.id) && canSplit(it) && backOf(it) > qtyOf(it);
+  const anyOver = items.some(overOf);
   const [account, setAccount] = useState(""); // "" — с того счёта, куда пришли деньги
   const [reason, setReason] = useState("");
   const [errors, setErrors] = useState({});
@@ -63,6 +67,8 @@ export default function RefundModal({ receipt, onClose, onDone }) {
   const refundedBefore = Number(receipt.refunded_amount || 0);
   const excess = (refunded) => Math.max(0, paid - (total - refunded));
   const moneyBack = Math.max(0, excess(refundedBefore + sum) - excess(refundedBefore));
+  // Зачтённый в заказ аванс по умолчанию возвращается в аванс, а не деньгами.
+  const advanceBack = Math.min(moneyBack, Number(receipt.advance_applied || 0));
   const reasonRequired = !isAdmin && paid > 0;
 
   function toggle(id) {
@@ -115,7 +121,7 @@ export default function RefundModal({ receipt, onClose, onDone }) {
       footer={
         <>
           <button className="secondary" onClick={onClose} disabled={busy}>{t("common.cancel")}</button>
-          <button className="danger" onClick={submit} disabled={busy || !picked.size}>
+          <button className="danger" onClick={submit} disabled={busy || !picked.size || anyOver}>
             {busy ? t("common.loading") : t("receipts.refund")}
           </button>
         </>
@@ -144,7 +150,7 @@ export default function RefundModal({ receipt, onClose, onDone }) {
             <label
               key={it.id}
               className="crow"
-              style={{ cursor: "pointer", borderBottom: "1px solid var(--hairline)" }}
+              style={{ cursor: "pointer", borderBottom: "1px solid var(--hairline)", flexWrap: "wrap" }}
             >
               <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <input
@@ -178,6 +184,11 @@ export default function RefundModal({ receipt, onClose, onDone }) {
                 )}
                 <strong>{som(partOf(it) ? partValue(it, partOf(it)) : it.line_total)}</strong>
               </span>
+              {overOf(it) && (
+                <span className="field-error" role="alert" style={{ flexBasis: "100%" }}>
+                  {t("receiptsV2.refundQtyOver", { n: String(+qtyOf(it).toFixed(3)) })}
+                </span>
+              )}
             </label>
           );
         })}
@@ -192,7 +203,14 @@ export default function RefundModal({ receipt, onClose, onDone }) {
             <option value="CASH">{t("checkout.cash")}</option>
             <option value="MBANK">{t("checkout.mbank")}</option>
             <option value="DEMIRBANK">{t("checkout.demirbank")}</option>
+            {/* «На аванс клиента» (RM-N7): деньги остаются у цеха авансом. */}
+            {receipt.client && <option value="ADVANCE">{t("receiptsV2.accountAdvance")}</option>}
           </select>
+          {!account && advanceBack > 0 && (
+            <p className="muted" style={{ fontSize: 12, margin: "4px 0 0" }}>
+              {t("receiptsV2.refundAdvanceBack", { sum: som(advanceBack) })}
+            </p>
+          )}
         </Field>
       )}
 

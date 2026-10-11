@@ -246,12 +246,58 @@ def _sum(values) -> Decimal:
     return sum((Decimal(v or 0) for v in values), ZERO)
 
 
+def carried_deductions(month, directory: Directory | None = None) -> dict:
+    """{id сотрудника: удержание, перенесённое в `month` из прошлых месяцев}
+    (RF-N4, D-186).
+
+    Удержание больше начисленного не пропадает: остаток переходит на следующий
+    месяц и уменьшает его начисление, пока не погасится. Остаток месяца X =
+    max(0, удержания X + перенос в X − начислено X). «Начислено» — проведённое
+    в ОПиУ (`PayrollAccrual.gross`), а не проведённый месяц — расчёт на лету.
+    Начисление считается только в месяцах, где есть что удерживать, —
+    удержания редки, и ведомость не пересчитывает весь год."""
+    month = month_start(month)
+    by_emp = defaultdict(lambda: defaultdict(lambda: ZERO))
+    for emp_id, m, amount in PayrollAdjustment.objects.filter(month__lt=month).values_list(
+        "employee_id", "month", "amount",
+    ):
+        by_emp[emp_id][month_start(m)] += amount
+    if not by_emp:
+        return {}
+    from .periods import add_months
+
+    posted = {
+        (a.employee_id, a.month): a.gross
+        for a in PayrollAccrual.objects.filter(month__lt=month, employee_id__in=list(by_emp))
+    }
+    outputs: dict = {}
+    result = {}
+    for emp_id, months in by_emp.items():
+        carry = ZERO
+        cur = min(months)
+        while cur < month:
+            due = carry + months.get(cur, ZERO)
+            if due > 0:
+                gross = posted.get((emp_id, cur))
+                if gross is None:
+                    if cur not in outputs:
+                        directory = directory or Directory()
+                        outputs[cur] = output(cur, month_end(cur), directory)
+                    gross = calculate_employee(emp_id, cur, outputs[cur].get(emp_id, {}))["gross"]
+                carry = max(due - gross, ZERO)
+            cur = add_months(cur, 1)
+        if carry > 0:
+            result[emp_id] = carry
+    return result
+
+
 def statement(month) -> dict:
     """Ведомость за месяц: по каждому человеку и итого."""
     month = month_start(month)
     d_from, d_to = month, month_end(month)
     directory = Directory()
     out = output(d_from, d_to, directory)
+    carried = carried_deductions(month, directory)
 
     employees = {e.id: e for e in Employee.objects.select_related("user")}
     accruals = {a.employee_id: a for a in PayrollAccrual.objects.filter(month=month)}
@@ -265,7 +311,7 @@ def statement(month) -> dict:
     # Кто в ведомости: все работающие, плюс любой, у кого за месяц есть деньги,
     # выработка или правила.
     ids = {e.id for e in employees.values() if e.is_active}
-    ids |= set(accruals) | set(adjustments) | set(payments)
+    ids |= set(accruals) | set(adjustments) | set(payments) | set(carried)
     ids |= {i for i in out if i}
     ids |= {
         pid for pid in PayScheme.objects.filter(valid_from__lte=month)
@@ -279,7 +325,11 @@ def statement(month) -> dict:
         adjs = adjustments.get(emp_id, [])
         pays = payments.get(emp_id, [])
         accrual = accruals.get(emp_id)
-        deductions = _sum(a.amount for a in adjs)
+        # Удержано за месяц = свои удержания + остаток, перенесённый с прошлого
+        # месяца (RF-N4); что не покрыло начисление — уходит дальше.
+        carry_in = carried.get(emp_id, ZERO)
+        deductions = _sum(a.amount for a in adjs) + carry_in
+        carry_out = max(deductions - calc["gross"], ZERO)
         advances = _sum(p.amount for p in pays if p.kind == PayrollPayment.Kind.ADVANCE)
         payouts = _sum(p.amount for p in pays if p.kind == PayrollPayment.Kind.PAYOUT)
         live_amount = max(calc["gross"] - deductions, ZERO)
@@ -294,6 +344,8 @@ def statement(month) -> dict:
             },
             **calc,
             "deductions": deductions,
+            "carry_in": carry_in,
+            "carry_out": carry_out,
             "adjustments": [
                 {
                     "id": a.id, "reason": a.reason, "reason_display": a.get_reason_display(),
@@ -325,7 +377,10 @@ def statement(month) -> dict:
     ]
     totals = {
         key: _sum(r[key] for r in rows)
-        for key in ("salary", "percent_total", "gross", "deductions", "accrued", "advances", "payouts", "paid", "to_pay")
+        for key in (
+            "salary", "percent_total", "gross", "deductions", "carry_in", "carry_out",
+            "accrued", "advances", "payouts", "paid", "to_pay",
+        )
     }
     totals["bonus"] = _sum(r["bonus"]["amount"] for r in rows)
     return {
@@ -466,6 +521,38 @@ def default_period(kind, paid_on) -> date:
 
         return add_months(current, -1)
     return current
+
+
+def payment_warnings(employee, *, kind, amount, paid_on=None, period=None) -> list[dict]:
+    """Что в выплате похоже на ошибку (RF-N3, D-185): больше «к выдаче» за
+    месяц, за месяц, который ещё не наступил, или отключённому сотруднику.
+    Пусто — платить без вопросов; иначе вьюха спрашивает подтверждение (409)."""
+    paid_on = local_day(paid_on or timezone.localdate())
+    period = month_start(period) if period else default_period(kind, paid_on)
+    warnings = []
+    if not employee.is_active:
+        warnings.append({
+            "code": "inactive",
+            "message": f"Сотрудник «{employee.full_name}» отключён — он у вас больше не работает.",
+        })
+    if period > month_start(timezone.localdate()):
+        warnings.append({
+            "code": "future_month", "period": period.strftime("%Y-%m"),
+            "message": f"Выплата за {period:%m.%Y} — этот месяц ещё не наступил.",
+        })
+    row = next((r for r in statement(period)["rows"] if r["employee"]["id"] == employee.id), None)
+    to_pay = row["to_pay"] if row else ZERO
+    amount = Decimal(str(amount))
+    if amount > to_pay:
+        warnings.append({
+            "code": "over_to_pay", "amount": str(amount), "to_pay": str(to_pay),
+            "period": period.strftime("%Y-%m"),
+            "message": (
+                f"Выплата {fmt(amount)} сом больше, чем «к выдаче» за {period:%m.%Y}: "
+                f"{fmt(max(to_pay, ZERO))} сом."
+            ),
+        })
+    return warnings
 
 
 @transaction.atomic

@@ -699,6 +699,23 @@ export default function Finance() {
               <Icon name="chevron-right" size={14} />
             </span>
           </button>
+          {/* АВАНСЫ ПОСТАВЩИКАМ (RS-N3) — деньги цеха у поставщиков, тоже на
+              сегодня: аванс без накладной и переплата. Аванс, закрывший долг по
+              другой накладной, уже вычтен из долга выше и здесь не считается. */}
+          <div className="crow" style={{ padding: "7px 0" }}>
+            <span className="k">
+              {t("suppliersDebt.advancesTitle")}
+              <span className="muted" style={{ fontSize: 12 }}> · {t("suppliersDebt.asOfToday")}</span>
+              <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>
+                {(report.supplier_advances?.rows || []).length
+                  ? report.supplier_advances.rows.map((r) => `${r.supplier} ${som(r.amount)}`).join(" · ")
+                  : t("suppliersDebt.advancesNone")}
+              </div>
+            </span>
+            <span style={Number(report.supplier_advances?.total || 0) > 0 ? { color: "var(--accent-ink)" } : undefined}>
+              {som(report.supplier_advances?.total || 0)}
+            </span>
+          </div>
           {addKindButton("MATERIALS")}
           <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>
             {t("finance.materialsHint")}

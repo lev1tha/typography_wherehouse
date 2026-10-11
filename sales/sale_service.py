@@ -328,7 +328,13 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False, happen
     last_log = (
         InventoryLog.objects.filter(receipt=receipt).aggregate(m=Max("id"))["m"] or 0
     )
-    warnings = _move_stock_for_item(item, user, restore=restore, happened_at=happened_at)
+    try:
+        warnings = _move_stock_for_item(item, user, restore=restore, happened_at=happened_at)
+    except InsufficientStock as e:
+        better = None if restore else _shortage_text(item)
+        if better is None:
+            raise
+        raise InsufficientStock(better) from e
     InventoryLog.objects.filter(receipt=receipt, id__gt=last_log).update(receipt_item=item)
     if warnings:
         from audit.models import AuditLog
@@ -337,6 +343,49 @@ def _deduct_stock_for_item(item: TransactionItem, user, *, restore=False, happen
         for warning in warnings:
             AuditLog.record(user, f"Чек {number}: {warning['message']}")
     return warnings
+
+
+def _sheets_word(value: Decimal) -> str:
+    """«1 лист», «3 листа», «50 листов», «3.4 листа»."""
+    if value != value.to_integral_value():
+        return "листа"
+    n = int(value)
+    if n % 10 == 1 and n % 100 != 11:
+        return "лист"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "листа"
+    return "листов"
+
+
+def _shortage_text(item: TransactionItem) -> str | None:
+    """Нехватка склада под строку — в единицах, которыми её продают (RU-N20).
+
+    Склад меряет лист площадью, и отказ звучал «нужно 148.8400000 кв.м, в
+    наличии 29.768» — кассир не узнавал в этом свои 50 листов. Здесь: «нужно
+    50 листов, есть 10 листов», «нужно 40 кв.м, есть 29.77 кв.м». None — строка
+    не про материал, продажа метрами рулона (там текст уже в пог.м) или
+    нехватка не по самой строке (обрезки раскроя) — остаётся текст склада.
+    """
+    if item.type != TransactionItem.Type.MATERIAL or not item.material_id:
+        return None
+    if item.sale_mode == TransactionItem.SaleMode.METER or item.roll_area:
+        return None
+    material = Material.objects.get(pk=item.material_id)
+    have = material.quantity or Decimal("0")
+    need = item.quantity
+    if item.sale_mode == TransactionItem.SaleMode.PIECE and material.piece_area:
+        left = (have / material.piece_area).quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+        if need <= left:
+            return None
+        need_text = f"{_qty_text(need)} {_sheets_word(need)}"
+        left_text = f"{_qty_text(left)} {_sheets_word(left)}"
+    else:
+        if need <= have:
+            return None
+        unit = "кв.м" if material.is_roll_material else material.get_unit_display()
+        need_text = f"{_qty_text(need)} {unit}"
+        left_text = f"{_qty_text(have.quantize(Decimal('0.01'), rounding=ROUND_FLOOR))} {unit}"
+    return f"Не хватает «{material.name}»: нужно {need_text}, есть {left_text}."
 
 
 def _move_stock_for_item(item: TransactionItem, user, *, restore=False, happened_at=None) -> list:
@@ -563,9 +612,11 @@ def _create_line(receipt: Receipt, *, part_material=Decimal("0"), **fields) -> T
     обычно, а выручки нет (себестоимость переделки видна отдельно).
     """
     rules = _line_rules(receipt, fields.get("type"), fields.get("service"), part_material)
-    if fields.get("client_price"):
+    if fields.get("client_price") or fields.get("price_is_manual"):
         # Договорная цена уже учитывает договорённость с клиентом: его скидка
         # к ней не применяется, минимум и срочность заказа — как у всех строк.
+        # Вписанная руками цена — тоже окончательная (RP-N6, D-181): кассир
+        # назвал клиенту цифру, и скидка карточки не должна её молча уменьшать.
         rules = LineRules(minimum=rules.minimum, urgency=rules.urgency, discount=Decimal("0"))
     base = Decimal(fields.pop("price_per_item"))
     if receipt.is_warranty:
@@ -825,6 +876,11 @@ def reprice_line(item: TransactionItem, *, base_price=None) -> None:
     item.price_per_item, item.min_applied = price_for(item.quantity, item.catalog_price, rules)
 
 
+def _qty_text(value) -> str:
+    """Количество для сообщения: 3.000 → «3», 148.8400000 → «148.84»."""
+    return format(Decimal(value).normalize(), "f")
+
+
 def _line_name(item: TransactionItem) -> str:
     if item.material_id:
         return item.material.name
@@ -864,6 +920,82 @@ def below_cost_warnings(items, user=None) -> list:
             AuditLog.record(
                 user, f"Чек {number}: {w['message']} Себестоимость {w['cost_total']} сом."
             )
+    return warnings
+
+
+def catalogue_work_rate(service, *, mode=None, material=None, own_material=False, passes=1):
+    """Каталожная цена единицы работы — то, с чем сравнивают ручную цену
+    складовщика (граница `staff_min_price_percent` и предупреждение CALC-08).
+    None — сравнивать не с чем: материал клиента, услуги нет или в каталоге 0."""
+    if service is None or own_material:
+        return None
+    if service.uses_free_measure:
+        reference = {
+            TransactionItem.SaleMode.METER: service.rate_per_pm,
+            TransactionItem.SaleMode.PIECE: service.rate_per_piece,
+        }.get(mode, service.rate_flat)
+    elif service.uses_area:
+        reference = apply_passes(resolve_rate(service, material).rate, passes or 1)
+    elif service.uses_pieces:
+        reference = service.rate_per_piece
+    else:
+        reference = service.base_price
+    if not reference or Decimal(reference) <= 0:
+        return None
+    return Decimal(reference)
+
+
+def low_manual_price_warnings(items, user=None) -> list:
+    """«Складовщик вписал цену работы ниже N % каталога» (CALC-08, S3, D-182).
+
+    Не запрет — жёсткая граница своя (`staff_min_price_percent`, по умолчанию
+    выключена): цену на месте называют и для крупного заказа. Но владелец
+    должен видеть, что монтаж за 2 854 ушёл за 1 000: предупреждение в ответе
+    кассы и запись в журнале. Админа не касается; 0 в настройке — выключено.
+    """
+    from services.models import PricingSettings
+
+    items = list(items)
+    if user is None or getattr(user, "is_admin_role", False) or not items:
+        return []
+    receipt = items[0].receipt
+    if receipt.is_warranty:
+        return []
+    percent = PricingSettings.load().staff_price_warn_percent
+    if not percent or percent <= 0:
+        return []
+    warnings = []
+    for item in items:
+        if item.is_returned or not item.price_is_manual or item.type != TransactionItem.Type.SERVICE:
+            continue
+        reference = catalogue_work_rate(
+            item.service, mode=item.sale_mode, material=item.work_material,
+            own_material=item.own_material, passes=item.passes,
+        )
+        if reference is None:
+            continue
+        price = item.catalog_price if item.catalog_price is not None else item.price_per_item
+        if price * 100 >= reference * percent:
+            continue
+        name = _line_name(item)
+        warnings.append({
+            "code": "low_manual_price",
+            "item": item.id,
+            "name": name,
+            "price": price,
+            "catalog_price": reference,
+            "percent": percent,
+            "message": (
+                f"«{name}»: цена {price} сом — ниже {percent.normalize():f} % каталожной "
+                f"({reference} сом). Проверьте цену."
+            ),
+        })
+    if warnings:
+        from audit.models import AuditLog
+
+        number = receipt.order_number or receipt.pk
+        for w in warnings:
+            AuditLog.record(user, f"Чек {number}: {w['message']}")
     return warnings
 
 
@@ -1347,8 +1479,8 @@ def _build_item(receipt, entry) -> list[TransactionItem]:
         material = None if own_material else entry.get("material")
 
         # Ставка работы — `services.pricing.resolve_rate`: матрица (материал →
-        # толщина) → ставка станка → ставка материала, к последним двум
-        # коэффициент по толщине. Ручная ставка заменяет всю цепочку, но
+        # толщина) → ставка станка → ставка материала; коэффициент по толщине —
+        # только к ставке станка (RP-N5). Ручная ставка заменяет всю цепочку, но
         # «проходы» умножают и её. Любую ставку админ может перебить в момент
         # продажи (складовщик — там, где это разрешено услуге).
         manual_rate = _override("cut_rate")
@@ -1705,10 +1837,12 @@ def create_sale(
             paid = min(brought, total)
         receipt.cost_warnings = _deduct_all(receipt)
         if not receipt.is_warranty:
-            receipt.cost_warnings += below_cost_warnings(
-                list(receipt.items.filter(is_returned=False).select_related("material", "service")),
-                cashier,
+            sold = list(
+                receipt.items.filter(is_returned=False)
+                .select_related("material", "service", "work_material")
             )
+            receipt.cost_warnings += below_cost_warnings(sold, cashier)
+            receipt.cost_warnings += low_manual_price_warnings(sold, cashier)
         receipt.stock_deducted = True
         receipt.amount_paid = paid
         surplus = brought - paid
@@ -1942,6 +2076,7 @@ def add_items_to_receipt(receipt: Receipt, items_data, *, user=None, confirmed=(
             receipt.cost_warnings += _deduct_stock_for_item(item, user)
     if deduct_now:
         receipt.cost_warnings += below_cost_warnings(built, user)
+    receipt.cost_warnings += low_manual_price_warnings(built, user)
 
     receipt.recalculate_total()
     if (
@@ -2454,7 +2589,7 @@ def _drop_item_journal(receipt: Receipt, item: TransactionItem, linked_ids: set)
 # Поля правки размеров строки (STAFF-08). Ширина/длина/число деталей/проходы
 # пересчитывают количество и цену по правилам заказа; `machine` меняет услугу
 # резки на услугу того же вида с другим станком.
-EDIT_DIM_KEYS = {"width", "length", "parts_count", "passes", "machine"}
+EDIT_DIM_KEYS = {"width", "length", "parts_count", "passes", "machine", "running_meters"}
 
 
 def _parse_dim_edit(item: TransactionItem, change) -> dict:
@@ -2482,6 +2617,15 @@ def _parse_dim_edit(item: TransactionItem, change) -> dict:
             if value <= 0:
                 raise ItemEditRejected("Размер должен быть больше нуля.")
             out[key] = value
+    if "running_meters" in change:
+        # Длина реза ОДНОЙ детали (S3): количество работы — она × число деталей.
+        # Количеством пог.м у строки с деталями не правятся (см. правку состава).
+        if not item.service.uses_running_meter:
+            raise ItemEditRejected(f"«{_line_name(item)}»: пог.м на деталь бывают только у резки.")
+        value = _edit_number(change["running_meters"], places=3, digits=8, what="Пог.м на деталь")
+        if value <= 0:
+            raise ItemEditRejected("Длина реза должна быть больше нуля.")
+        out["running_meters"] = value
     for key, top in (("parts_count", 1000), ("passes", 20)):
         if key in change:
             try:
@@ -2572,7 +2716,9 @@ def _apply_dim_edit(item: TransactionItem, dims: dict, qty, price, *, pair_sizes
                     item.client_price = False
                     item.discount_percent = item.receipt.discount_percent or Decimal("0")
     if item.service.uses_running_meter:
-        if qty is None and new_parts != old_parts:
+        if qty is None and "running_meters" in dims:
+            qty = _qty(dims["running_meters"] * new_parts)
+        elif qty is None and new_parts != old_parts:
             qty = _qty(item.quantity / old_parts * new_parts)
     elif qty is None and width and length:
         qty = _qty(width * length * new_parts)
@@ -2709,7 +2855,7 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
             raise ItemEditRejected(
                 f"Неизвестные поля правки: {', '.join(sorted(unknown))}. Можно: "
                 "quantity, price_per_item, remove, width, length, parts_count, passes, machine, "
-                "executor."
+                "running_meters, executor."
             )
         if "executor" in change:
             # Исполнитель работы (волна 2): склада и денег не касается — только
@@ -2733,6 +2879,19 @@ def update_receipt_items(receipt: Receipt, changes, *, user=None) -> Receipt:
                     raise ItemEditRejected(
                         f"«{_line_name(item)}»: площадь изделия из рулона не правится — "
                         "поправьте ширину или длину."
+                    )
+                if (
+                    item.type == TransactionItem.Type.SERVICE and item.service.uses_running_meter
+                    and item.width and item.length and (item.parts_count or 1) > 1
+                ):
+                    # Рез с деталями и размерами (S3): пог.м — это длина реза
+                    # детали × число деталей. Правка одного количества меняла
+                    # бы длину реза, не трогая ни детали, ни материал куска, —
+                    # «12 → 10» по пог.м оставляло материал на 12 деталей. У
+                    # одной детали пог.м — просто её длина реза, правится как раньше.
+                    raise ItemEditRejected(
+                        f"«{_line_name(item)}»: пог.м резки с деталями не правятся напрямую — "
+                        "меняйте детали или размеры (или пог.м на одну деталь, running_meters)."
                     )
                 qty = _edit_number(
                     change["quantity"], places=3, digits=12, what="Количество"
@@ -3283,8 +3442,21 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None, method=None, q
     `quantities` (cash-09, волна 2) — `{id строки: сколько вернуть}`: часть
     количества строки отделяется в новую строку (`split_line_for_refund`) и
     возвращается она; всё количество — строка целиком.
+
+    Аванс (RM-N7, D-183). Без явного счёта деньги идут туда, откуда пришли:
+    зачтённый в заказ аванс — обратно в аванс клиента (касса не двигается),
+    остальное — расходом кассы. `method="ADVANCE"` — «на аванс клиента»: и
+    деньги кассы остаются у цеха авансом клиента (расход «Возврат» и тут же
+    приход аванса — касса не меняется). Явный счёт (CASH/MBANK/DEMIRBANK) —
+    всё деньгами с него, как раньше.
     """
-    method = normalize_method(method)
+    to_advance = str(method or "").strip().upper() == REFUND_TO_ADVANCE
+    method = None if to_advance else normalize_method(method)
+    if to_advance and receipt.client_id is None:
+        raise ItemEditRejected(
+            "Вернуть на аванс можно только заказ клиента — у этого заказа клиента нет. "
+            "Выберите счёт, с которого отдать деньги."
+        )
     # Замок до чтения строк: 8 параллельных возвратов видели одни и те же
     # невозвращённые строки и писали 8 записей REFUND в кассу.
     lock_receipt(receipt)
@@ -3297,7 +3469,14 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None, method=None, q
             except (TransactionItem.DoesNotExist, ValueError, TypeError):
                 raise ItemEditRejected("Строка не найдена в этом чеке или уже возвращена.")
             value = _edit_number(raw_qty, places=3, digits=12, what="Количество возврата")
-            if value >= line.quantity:
+            if value > line.quantity:
+                # RM-N10: «вернуть 15 из 10» раньше молча возвращало всю строку —
+                # кассир думал, что вернул 15. Больше остатка строки — отказ.
+                raise ItemEditRejected(
+                    f"«{_line_name(line)}»: вернуть можно не больше {_qty_text(line.quantity)} — "
+                    f"столько осталось в строке, а указано {_qty_text(value)}."
+                )
+            if value == line.quantity:
                 item_ids.append(line.pk)
             else:
                 item_ids.append(split_line_for_refund(line, value).pk)
@@ -3372,7 +3551,13 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None, method=None, q
     # стоимость возвращённых строк, оплаченный частично — только то, что
     # выходит за стоимость оставшихся.
     paid_out = _excess() - excess_before
-    if method is None:
+    if method is None and paid_out > 0:
+        # Зачтённый аванс — обратно в аванс, а не наличными из ящика (RM-N7):
+        # денег за него в кассу по этому заказу не приходило.
+        paid_out -= _return_advance_share(receipt, paid_out, user=user)
+    if to_advance:
+        _refund_into_advance(receipt, paid_out, user=user)
+    elif method is None:
         cash.refund_paid(receipt, paid_out, user=user)
     else:
         from finance.models import CashEntry
@@ -3383,6 +3568,81 @@ def refund_receipt(receipt: Receipt, *, item_ids=None, user=None, method=None, q
             note=f"Возврат по заказу №{receipt.order_number}" if receipt.order_number else "",
         )
     return receipt
+
+
+# Способ возврата «на аванс клиента» (RM-N7) — не счёт кассы, поэтому не среди
+# `Receipt.PaymentMethod`.
+REFUND_TO_ADVANCE = "ADVANCE"
+
+
+def refund_advance_note(receipt: Receipt) -> str:
+    """Примечание аванса, в который ушёл возврат: по нему его узнаёт отмена возврата."""
+    return f"Возврат по заказу №{receipt.order_number or receipt.pk} — на аванс"
+
+
+def _return_advance_share(receipt: Receipt, limit: Decimal, *, user=None) -> Decimal:
+    """Вернуть в аванс клиента до `limit` из аванса, зачтённого в этот заказ.
+
+    Возвращает, сколько вернулось. Через функции `clients.advances`: зачёт
+    снимается целиком (`release_receipt_advance`), а то, что остаётся
+    оплатой заказа, зачитывается заново теми же днями, что был зачёт, — от
+    старых записей к новым (уходит последнее зачтённое). Заказ: `amount_paid`
+    и `change_applied` меньше на вернувшееся — как при откате оплаты.
+    """
+    from clients.advances import release_receipt_advance, take_advance
+    from clients.models import BalanceOffset
+
+    offsets = list(
+        BalanceOffset.objects.filter(
+            receipt=receipt, source=BalanceOffset.Source.ADVANCE, advance__isnull=False,
+        ).order_by("used_on", "id").values_list("used_on", "amount")
+    )
+    applied = sum((amount for _day, amount in offsets), Decimal("0"))
+    back = min(limit, applied)
+    if back <= 0 or receipt.client_id is None:
+        return Decimal("0")
+    released = release_receipt_advance(receipt)
+    keep = released - back
+    for day, amount in offsets:
+        if keep <= 0:
+            break
+        part = min(amount, keep)
+        keep -= take_advance(receipt.client, part, receipt=receipt, user=user, used_on=day)
+    receipt.amount_paid -= back
+    receipt.change_applied = max(receipt.change_applied - back, Decimal("0"))
+    receipt.save(update_fields=["amount_paid", "change_applied", "updated_at"])
+    return back
+
+
+def _refund_into_advance(receipt: Receipt, amount: Decimal, *, user=None) -> None:
+    """Возврат «на аванс клиента» (RM-N7): деньги, принятые по заказу, остаются
+    у цеха авансом клиента.
+
+    В кассовой книге — расход «Возврат» по заказу с тех счетов, куда деньги по
+    нему пришли (`take_back`), и тут же приход аванса (`accept_advance`) на те
+    же счета: остаток кассы не меняется, акт сверки и сверка «прибыль →
+    деньги» видят обычный возврат и обычный аванс. Аванс помечен номером заказа
+    (`refund_advance_note`) — по нему отмена возврата его находит.
+    """
+    from clients.advances import accept_advance
+    from clients.models import ClientAdvance
+    from finance.models import CashEntry
+
+    if amount <= 0:
+        return
+    note = refund_advance_note(receipt)
+    entries = cash.take_back(receipt, amount, CashEntry.Article.REFUND, user=user, note=note)
+    own = str(receipt.payment_method)
+    for entry in entries:
+        if entry is None:
+            continue
+        if cash.account_for(own) == entry.account and own in ClientAdvance.Method.values:
+            method = own
+        elif entry.account == CashEntry.Account.CASH:
+            method = ClientAdvance.Method.CASH
+        else:
+            method = ClientAdvance.Method.MBANK
+        accept_advance(receipt.client, entry.amount, method=method, note=note, user=user)
 
 
 # --- Отмена ОДНОЙ оплаты, отмена возврата, выдача по позициям, пересчёт ------
@@ -3563,6 +3823,18 @@ def undo_refund(receipt: Receipt, *, item_ids=None, user=None) -> Receipt:
     lines = list(lines)
     if not lines:
         raise ItemEditRejected("Отменять нечего: возвращённых позиций нет.")
+    if receipt.client_id:
+        from clients.models import ClientAdvance
+
+        if ClientAdvance.objects.filter(
+            client_id=receipt.client_id, note=refund_advance_note(receipt), reverted_at__isnull=True,
+        ).exists():
+            # Возврат ушёл в аванс (RM-N7): отмена вернула бы в кассу деньги,
+            # которых клиент не приносил, а аванс остался бы. Сначала аванс.
+            raise ItemEditRejected(
+                "Деньги этого возврата ушли в аванс клиента. Сначала отмените этот аванс в "
+                "карточке клиента (если он не потрачен), потом отмените возврат."
+            )
 
     def _excess():
         return max(receipt.amount_paid - (receipt.total_price - receipt.refunded_amount), Decimal("0"))

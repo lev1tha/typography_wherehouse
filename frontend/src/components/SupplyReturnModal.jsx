@@ -12,9 +12,11 @@ const today = () => new Date().toLocaleDateString("sv-SE");
 const som = (n) => formatMoney(n);
 
 // «Вернуть поставщику» (G1-N2): сколько по каждой строке уезжает назад. Склад
-// уменьшается по цене партии (потерь в прибыли нет), закуп и сумма накладной
-// падают на стоимость возвращённого. Деньги — либо вернулись на счёт, либо
-// остались кредитом у поставщика (виден в сальдо).
+// уменьшается по цене партии (потерь в прибыли нет). Накладная остаётся как в
+// бумаге, возврат — строкой с минусом датой возврата (D-171, с RU-N23 — и в
+// открытом месяце): закуп этого дня и долг по накладной меньше на стоимость
+// возвращённого. Деньги — либо вернулись на счёт, либо остались кредитом у
+// поставщика (виден в сальдо).
 export default function SupplyReturnModal({ supply, onClose, onDone }) {
   const { t } = useTranslation();
   const { toast } = useUI();
@@ -153,12 +155,7 @@ export default function SupplyReturnModal({ supply, onClose, onDone }) {
 
       {value > 0 && (
         <div className="muted" style={{ fontSize: 13, marginTop: 10 }}>
-          {closed
-            ? t("supplyReturn.previewClosed", { value: som(value), debt: som(Math.max(0, newTotal - paid)) })
-            : t("supplyReturn.preview", {
-              value: som(value), total: som(newTotal),
-              debt: som(Math.max(0, newTotal - paid)),
-            })}
+          {t("supplyReturn.previewClosed", { value: som(value), debt: som(Math.max(0, newTotal - paid)) })}
           {mode === "CREDIT" && paid - newTotal > 0 && (
             <strong style={{ color: "var(--ok-ink)" }}> {t("supplyReturn.creditLeft", { sum: som(paid - newTotal) })}</strong>
           )}

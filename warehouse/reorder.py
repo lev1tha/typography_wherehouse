@@ -3,7 +3,8 @@
 Порог вводился в кв.м: «5 листов» владелец пересчитывал в 14,88 сам, а
 Telegram писал «Осталось всего 11.9072000» без единицы. Здесь — единица
 материала (лист, метр, штука), перевод в единицу хранения и таблица «что и
-сколько докупить»: до двух минимумов, у поставщика последней партии.
+сколько докупить»: до «заказывать до» из карточки (пусто — до двух минимумов),
+у поставщика последней партии.
 """
 from __future__ import annotations
 
@@ -66,6 +67,14 @@ def min_in_units(material: Material) -> Decimal:
     return crit
 
 
+def order_target(material: Material, minimum: Decimal) -> tuple[Decimal, str]:
+    """До скольких единиц докупать и по какому правилу (S3, STK-06):
+    «заказывать до» из карточки (`field`) или два минимума (`double_min`)."""
+    if material.reorder_to is not None:
+        return material.reorder_to, "field"
+    return minimum * 2, "double_min"
+
+
 def _round_order(material: Material, value: Decimal) -> Decimal:
     """Листы и штуки — целыми вверх; метры — целыми метрами вверх; кв.м — сотые."""
     if value <= 0:
@@ -94,8 +103,9 @@ def last_supplier(material: Material):
 def reorder_rows(queryset=None) -> list[dict]:
     """«К заказу»: материалы с порогом, упавшие до него.
 
-    Докупить до двух минимумов (правило Excel владельца: 2 × мин − остаток),
-    по закупу последней партии — ориентир суммы.
+    Докупить до «заказывать до» из карточки, а без него — до двух минимумов
+    (`target`, `target_rule` — экран подписывает формулу), по закупу последней
+    партии — ориентир суммы.
     """
     from .pricing import unit_costs
 
@@ -109,7 +119,8 @@ def reorder_rows(queryset=None) -> list[dict]:
         if stock > minimum:
             continue
         kind = unit_kind(m)
-        need = _round_order(m, minimum * 2 - stock)
+        target, rule = order_target(m, minimum)
+        need = _round_order(m, target - stock)
         cost = unit_costs(m).get(kind)
         out.append({
             "id": m.pk,
@@ -118,6 +129,8 @@ def reorder_rows(queryset=None) -> list[dict]:
             "unit_label": unit_label(m),
             "stock": stock,
             "min": minimum,
+            "target": target,
+            "target_rule": rule,
             "to_order": need,
             "supplier": last_supplier(m),
             "unit_cost": cost.quantize(Decimal("0.01")) if cost else None,
@@ -142,7 +155,7 @@ def low_stock_text(material: Material) -> str:
     if unit_kind(material) in ("sheet", "pm"):
         text += f" ({n(material.quantity.quantize(Decimal('0.01')))} кв.м)"
     if minimum and minimum > 0:
-        need = _round_order(material, minimum * 2 - stock)
+        need = _round_order(material, order_target(material, minimum)[0] - stock)
         text += f", минимум {n(minimum)} {unit}. Заказать ≈{n(need)} {unit}"
         supplier = last_supplier(material)
         if supplier:

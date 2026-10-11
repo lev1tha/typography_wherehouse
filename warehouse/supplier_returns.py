@@ -10,16 +10,16 @@
   ПАРТИИ, поэтому потерь в ОПиУ нет (это не брак и не недостача), а цена
   единицы остальных штук не меняется. Больше, чем осталось на полке, вернуть
   нельзя: проданное уже ушло к клиентам.
-* НАКЛАДНАЯ: строка (количество, сумма) уменьшается — закуп месяца накладной и
-  её сумма падают на стоимость возвращённого, запись прихода в журнале склада
-  правится на месте (как в «Исправить приход», D-71) и рядом пишется запись
-  «Возврат поставщику». Накладная закрытого периода не правится (D-75).
-* НАКЛАДНАЯ ЗАКРЫТОГО МЕСЯЦА (перепроверка 10.10, D-171) — возврат датой
-  возврата, как строка с минусом в Excel: накладная, её закуп и приход в
-  журнале остаются как были; в месяце возврата закуп меньше на стоимость
-  возвращённого, склад уменьшается записью «Возврат поставщику» по партии
+* НАКЛАДНАЯ — как в бумаге, возврат ДАТОЙ ВОЗВРАТА, как строка с минусом в
+  Excel (D-171 для закрытого месяца; с S3 перепроверки, RU-N23, — для любого):
+  накладная, её строка, партия (принято и закуп) и приход в журнале остаются
+  как были; закуп дня возврата меньше на стоимость возвращённого, склад
+  уменьшается записью «Возврат поставщику» с минусом и стоимостью по партии
   (по её цене, без потерь), долг по накладной — на ту же сумму
-  (`Supply.returned_after`). Раньше такой возврат требовал открыть месяц.
+  (`Supply.returned_after`). Раньше у накладной открытого месяца возврат
+  переписывал запись прихода в «Движении» («после возврата поставщику») и
+  саму накладную (D-113, `in_place=True` — такие возвраты в базе остаются и
+  читаются как раньше).
 * ДЕНЬГИ: либо возвращены на счёт (платёж-строка вида «возврат денег»,
   приход в кассу), либо остались кредитом у поставщика — накладная оплачена
   больше своей суммы, и сальдо поставщика это показывает.
@@ -31,7 +31,6 @@ from decimal import ROUND_HALF_UP, Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from .lot_correction import _supply_log_for_line, supply_log_for_roll
 from .models import (
     InventoryLog,
     Material,
@@ -56,6 +55,12 @@ def _q(value, step=CENT) -> Decimal:
 
 def _num(value) -> str:
     return format(Decimal(value).normalize(), "f")
+
+
+def _closed(day) -> bool:
+    from finance.periods import is_closed
+
+    return bool(day and is_closed(day))
 
 
 def _som(value) -> str:
@@ -127,15 +132,15 @@ def return_to_supplier(supply: Supply, items, *, returned_on=None, mode="CREDIT"
             "Накладная начальных остатков — это склад на дату переезда, поставщику его не "
             "возвращают. Количество и цену правит «Исправить приход»."
         )
-    from finance.periods import is_closed
-
     returned_on = returned_on or timezone.localdate()
     if returned_on > timezone.localdate():
         raise SupplyError("Дата возврата не может быть в будущем.")
+    if returned_on < supply.received_on:
+        raise SupplyError("Дата возврата не может быть раньше даты накладной.")
     ensure_open(returned_on, "Оформить возврат поставщику этой датой")
-    # Накладная закрытого месяца — возврат датой возврата, накладная не
-    # переписывается (D-171). Открытого — правка на месте, как было (D-113).
-    in_place = not is_closed(supply.received_on)
+    # Накладная не переписывается ни в каком месяце: возврат — строка с минусом
+    # датой возврата (D-171; для открытого месяца — с RU-N23).
+    in_place = False
     if mode not in ("CREDIT", "REFUND"):
         raise SupplyError("Укажите, что с деньгами: вернуть на счёт или оставить кредитом у поставщика.")
     if not items:
@@ -167,8 +172,7 @@ def return_to_supplier(supply: Supply, items, *, returned_on=None, mode="CREDIT"
             raise SupplyError("Некорректное количество возврата.")
         if qty <= 0:
             raise SupplyError("Количество возврата должно быть больше нуля.")
-        fn = _return_line if in_place else _return_line_after
-        value, area, text, value_fc = fn(supply, line, qty, label, user, returned_on)
+        value, area, text, value_fc = _return_line_after(supply, line, qty, label, user, returned_on)
         returned_total += value
         returned_fc += value_fc or ZERO
         SupplierReturnLine.objects.create(
@@ -177,7 +181,7 @@ def return_to_supplier(supply: Supply, items, *, returned_on=None, mode="CREDIT"
         )
 
     ret.amount = returned_total
-    if not in_place and supply.is_foreign:
+    if supply.is_foreign:
         ret.amount_fc = returned_fc
     # Сохраняем сумму до денег: у возврата датой возврата долг и переплату
     # накладной считает именно она (`Supply.returned_after`).
@@ -218,105 +222,18 @@ def return_to_supplier(supply: Supply, items, *, returned_on=None, mode="CREDIT"
 
 
 @transaction.atomic
-def _return_line(supply, line, qty, label, user, returned_on):
-    """Вернуть qty (в единицах строки) по одной строке. → (стоимость, площадь/шт, текст)."""
-    material = Material.objects.select_for_update().get(pk=line.material_id)
-    roll = Roll.objects.select_for_update().get(pk=line.roll_id) if line.roll_id else None
-    unit, per_unit, total_units = line_unit(line)
-    area = _q(qty * per_unit, AREA) if per_unit else _q(qty, AREA)
-
-    if roll is not None:
-        if area > roll.remaining_area + TINY:
-            on_shelf = roll.remaining_area / per_unit if per_unit else roll.remaining_area
-            raise SupplyError(
-                f"«{material.name}»: на полке из этой поставки осталось {_num(_q(on_shelf))} {unit}, "
-                f"вернуть {_num(qty)} нельзя — остальное уже продано или списано."
-            )
-    else:
-        in_lots = sum((r.remaining_area for r in material.rolls.all()), ZERO)
-        loose = (material.quantity or ZERO) - in_lots
-        if area > loose + TINY:
-            raise SupplyError(
-                f"«{material.name}»: на складе вне партий {_num(_q(max(loose, ZERO)))} {unit}, "
-                f"вернуть {_num(qty)} нельзя — часть уже продана или списана."
-            )
-    if area > line.quantity + TINY:
-        raise SupplyError(f"«{material.name}»: по накладной принято {_num(line.quantity)}, вернуть больше нельзя.")
-
-    whole = area >= line.quantity - TINY
-    unit_price = (roll.cost_per_sqm if roll is not None else line.unit_cost)
-    # Стоимость — ПРОПОРЦИОНАЛЬНО доле партии, а не «площадь × округлённая цена
-    # кв.м»: так один лист из трёх на 25 200 стоит ровно 8 400, а цена единицы
-    # остальных не уходит на копейку.
-    value = line.cost if whole else min(_q(line.cost * area / line.quantity), line.cost)
-    cost_fc = line.cost_fc
-    new_fc = None
-    if cost_fc is not None:
-        new_fc = ZERO if whole else max(cost_fc - _q(cost_fc * area / line.quantity), ZERO)
-
-    log = supply_log_for_roll(roll) if roll is not None else _supply_log_for_line(line)
-    if log is None:
-        raise SupplyError(
-            "Запись прихода в журнале склада однозначно не найдена (двойной ввод?) — "
-            "вернуть автоматически нельзя, иначе закуп разойдётся со складом."
-        )
-
-    new_area = line.quantity - area
-    # --- партия ---
-    if roll is not None:
-        roll.initial_area -= area
-        roll.remaining_area -= area
-        roll.purchase_cost -= value
-        if per_unit and roll.form == Roll.Form.SHEET:
-            roll.sheet_count = (roll.sheet_count or ZERO) - qty
-        elif per_unit and roll.form == Roll.Form.ROLL:
-            roll.length = (roll.length or ZERO) - qty
-        elif roll.form == Roll.Form.PIECE:
-            roll.sheet_count = roll.initial_area
-        roll.save()
-        if roll.supplier_debt:
-            roll.supplier_debt = max(roll.supplier_debt - value, ZERO)
-            roll.save(update_fields=["supplier_debt"])
-    # --- строка ---
-    line.quantity = new_area
-    line.cost = line.cost - value
-    if new_fc is not None:
-        line.cost_fc = new_fc
-    if roll is not None:
-        line.width, line.height = roll.width, roll.height
-        line.length, line.sheet_count = roll.length, roll.sheet_count
-    line.save()
-    # --- материал ---
-    material.quantity = (material.quantity or ZERO) - area
-    material.save(update_fields=["quantity", "updated_at"])
-    # --- журнал склада: приход на месте + запись «Возврат поставщику» ---
-    log.quantity_changed = new_area
-    if roll is not None and roll.form == Roll.Form.ROLL:
-        log.metres_changed = roll.metres_initial
-    log.reason = (
-        f"Поступление: {roll.dimensions_label if roll is not None else _num(new_area) + ' ' + unit}, "
-        f"{_som(line.cost)} сом (после возврата поставщику {returned_on:%d.%m.%Y})"
-    )
-    log.save(update_fields=["quantity_changed", "metres_changed", "reason"])
-    text = f"{material.name}: {_num(qty)} {unit} на {_som(value)} сом"
-    InventoryLog.objects.create(
-        type=InventoryLog.Type.CORRECTION, material=material, quantity_changed=ZERO,
-        actual_price=unit_price, roll=roll, supply=supply, created_by=user,
-        reason=f"Возврат поставщику (накладная {label}): {text}",
-    )
-    return value, area, text, None
-
-
-@transaction.atomic
 def _return_line_after(supply, line, qty, label, user, returned_on):
-    """Возврат по строке накладной ЗАКРЫТОГО месяца — датой возврата (D-171).
+    """Возврат по строке накладной — датой возврата (D-171; с RU-N23 — и у
+    накладной открытого месяца).
 
     Накладная, её строка, партия (принято и закуп) и приход в журнале не
-    меняются: сентябрь принят. Уменьшается остаток партии — записью журнала
-    «Возврат поставщику» датой возврата со своей раскладкой по партии, — и
-    закуп месяца возврата (`purchases_from_stock_by_day` вычитает такие
-    возвраты). Стоимость — доля строки, как и у возврата на месте: цена
-    единицы остальных не меняется, потерь в ОПиУ нет."""
+    меняются: приход — как в бумаге. Уменьшается остаток партии — записью
+    журнала «Возврат поставщику» с минусом и стоимостью датой возврата, со своей
+    раскладкой по партии, — и закуп дня возврата (`purchases_from_stock_by_day`
+    вычитает такие возвраты). Стоимость — доля строки: цена единицы остальных
+    не меняется, потерь в ОПиУ нет. Если партия — ровно эта строка, доля
+    считается так же, как продажа (на сколько подешевела полка партии, STK-10):
+    закуп минус возврат сходится со стоимостью склада до тыйына."""
     from .rolls import record_lot_moves
     from .waste import _moment
 
@@ -349,9 +266,11 @@ def _return_line_after(supply, line, qty, label, user, returned_on):
             f"уже возвращено {_num(done_area)} — вернуть больше нельзя."
         )
     whole = area >= left_area - TINY
-    value = (line.cost - done_cost) if whole else min(
-        _q(line.cost * area / line.quantity), line.cost - done_cost,
+    same_lot = (
+        roll is not None and roll.purchase_cost == line.cost and roll.initial_area == line.quantity
     )
+    share = roll.take_cost(area) if same_lot else _q(line.cost * area / line.quantity)
+    value = (line.cost - done_cost) if whole else min(share, line.cost - done_cost)
     value_fc = None
     if line.cost_fc is not None:
         value_fc = (line.cost_fc - done_fc) if whole else min(
@@ -369,7 +288,8 @@ def _return_line_after(supply, line, qty, label, user, returned_on):
         actual_price=(roll.cost_per_sqm if roll is not None else line.unit_cost),
         cost=value, roll=roll, supply=supply, created_by=user,
         reason=(
-            f"Возврат поставщику (накладная {label} закрытого месяца, "
+            f"Возврат поставщику (накладная {label}"
+            f"{' закрытого месяца' if _closed(supply.received_on) else ''}, "
             f"датой {returned_on:%d.%m.%Y}): {text}"
         ),
         happened_at=_moment(returned_on),

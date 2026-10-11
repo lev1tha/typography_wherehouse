@@ -40,7 +40,9 @@ class NegativeStockTests(APITestCase):
     def test_sale_beyond_stock_is_rejected(self):
         resp = self._sale(11)
         self.assertEqual(resp.status_code, 400, resp.data)
-        self.assertIn("недостаточно", str(resp.data).lower())
+        # Текст нехватки касса переписала в единицах материала (RU-N20,
+        # «Не хватает … нужно 11 шт, есть 10 шт») — проверяем смысл, а не слово.
+        self.assertRegex(str(resp.data).lower(), "недостаточно|не хватает")
         self.piece.refresh_from_db()
         self.assertEqual(self.piece.quantity, Decimal("10"))
         # Ни чека, ни движения по складу после отказа не осталось.

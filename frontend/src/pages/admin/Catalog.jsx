@@ -66,7 +66,7 @@ function suggestedName(m, types) {
 //
 // Толщина и размеры листа МОГУТ быть не заданы (у крепежа нет ни того, ни
 // другого) — там пустое значение осмысленно и уходит как null.
-const NULLABLE_NUMS = ["thickness_mm", "sheet_width", "sheet_height", "kim_percent", "min_stock"];
+const NULLABLE_NUMS = ["thickness_mm", "sheet_width", "sheet_height", "kim_percent", "min_stock", "reorder_to"];
 // Цены и остатки null не принимают. Стёртая цена означает ноль — так её и
 // отправляем, вместо того чтобы молча оставить прежнюю.
 const ZERO_NUMS = [
@@ -1184,12 +1184,27 @@ export default function Catalog({ embedded = false }) {
               )}
               {/* Минимум — листами у листа и метрами у рулона (STK-06), а не
                   в кв.м: «5 листов» раньше пересчитывали в 14,88 в уме. */}
-              <NumField
-                label={t("stock2.minStock", { unit: matForm === "ROLL" ? t("unit.METER") : sheetArea > 0 ? t("warehouse.unitSheet") : t("unit.SQM") })}
-                value={editing.min_stock}
-                placeholder={editing.stock_units ? qty(editing.stock_units.min) : ""}
-                onChange={setF("min_stock")}
-              />
+              <div className="row">
+                <NumField
+                  grow
+                  label={t("stock2.minStock", { unit: matForm === "ROLL" ? t("unit.METER") : sheetArea > 0 ? t("warehouse.unitSheet") : t("unit.SQM") })}
+                  value={editing.min_stock}
+                  placeholder={editing.stock_units ? qty(editing.stock_units.min) : ""}
+                  onChange={setF("min_stock")}
+                />
+                {/* «Заказывать до» (S3, STK-06): своё правило докупки у
+                    материала; пусто — до двух минимумов, и это написано. */}
+                <NumField
+                  grow
+                  label={t("stock2.reorderTo")}
+                  value={editing.reorder_to}
+                  placeholder={(() => {
+                    const min = parseNumber(editing.min_stock) ?? parseNumber(editing.stock_units?.min);
+                    return min ? t("stock2.reorderToPh", { n: qty(min * 2) }) : t("stock2.reorderToPhEmpty");
+                  })()}
+                  onChange={setF("reorder_to")}
+                />
+              </div>
               <p className="muted" style={{ fontSize: 12, marginTop: -6 }}>{t("stock2.minStockHint")}</p>
 
               {/* Опт рулону не нужен: его единица продажи — погонный метр, а

@@ -82,6 +82,11 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
   // цены у материалов, которые уже есть, — сначала предпросмотр «было → стало».
   const [upsert, setUpsert] = useState(false);
   const [preview, setPreview] = useState(null);
+  // Неизвестное производство в пачке (RU-N11): сервер называет, чего нет в
+  // справочнике, а сетка предлагает завести его для всех строк — раньше одна
+  // ячейка «Лазер» молча отклоняла всю пачку.
+  const [missingSites, setMissingSites] = useState([]);
+  const [createSites, setCreateSites] = useState([]);
   const gridRef = useRef(null);
 
   // Колонки сгруппированы шапкой в два яруса — как в складском листе заказчика:
@@ -211,7 +216,7 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
     return { out, bad };
   }
 
-  async function save(apply = false) {
+  async function save(apply = false, sitesToCreate = createSites) {
     if (!filled.length) return;
     const { out: normalized, bad } = normalizeRows();
     if (Object.keys(bad).length) {
@@ -222,6 +227,8 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
     setRows(normalized);
     setBusy(true);
     setErrors({});
+    setMissingSites([]);
+    const extra = sitesToCreate.length ? { create_sites: sitesToCreate } : {};
     try {
       const payload = normalized.filter((row) => !isEmptyRow(row)).map((row) => {
         if (upsert) return upsertRow(row);
@@ -252,17 +259,23 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
         return out;
       });
       if (upsert && !apply) {
-        const r = await api.post("/warehouse/materials/bulk/", { rows: payload, mode: "upsert", preview: true });
+        const r = await api.post("/warehouse/materials/bulk/", { rows: payload, mode: "upsert", preview: true, ...extra });
         setPreview(r.data);
         return;
       }
-      const r = await api.post("/warehouse/materials/bulk/", { rows: payload, ...(upsert ? { mode: "upsert" } : {}) });
+      const r = await api.post("/warehouse/materials/bulk/", { rows: payload, ...(upsert ? { mode: "upsert" } : {}), ...extra });
       toast(upsert
         ? t("stock2.upsertDone", { created: r.data.created, updated: r.data.updated })
         : t("grid.saved", { count: r.data.created }));
+      if (r.data.created_sites?.length) {
+        toast(t("grid.sitesCreated", { names: r.data.created_sites.map((n) => `«${n}»`).join(", ") }));
+        onRefsChanged?.();
+      }
       onDone?.();
     } catch (e) {
       const rowErrors = e.response?.data?.errors;
+      const missing = e.response?.data?.missing_sites;
+      if (Array.isArray(missing) && missing.length) setMissingSites(missing);
       if (Array.isArray(rowErrors)) {
         // Номера строк приходят по НЕПУСТЫМ строкам — переводим их в номера
         // строк сетки, иначе подсветка сядет не туда.
@@ -379,6 +392,25 @@ export default function CatalogGrid({ types, sites, onDone, onClose, onRefsChang
           </tbody>
         </table>
       </div>
+
+      {missingSites.length > 0 && (
+        <div className="card" role="alert" style={{ marginTop: 12, padding: 12 }}>
+          <p style={{ margin: "0 0 8px", fontSize: 13 }}>
+            {t("grid.missingSites", { names: missingSites.map((n) => `«${n}»`).join(", ") })}
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              const next = [...createSites, ...missingSites];
+              setCreateSites(next);
+              save(false, next);
+            }}
+          >
+            {t("grid.createSites", { names: missingSites.map((n) => `«${n}»`).join(", ") })}
+          </button>
+        </div>
+      )}
 
       {errorList.length > 0 && (
         <div className="card" style={{ marginTop: 12, background: "var(--warn-bg)", padding: 12 }}>

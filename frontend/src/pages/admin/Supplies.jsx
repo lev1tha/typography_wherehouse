@@ -655,9 +655,40 @@ export default function Supplies({ embedded = false }) {
                   </span>
                 </div>
               )}
+              {/* Возврат строкой с минусом (RU-N23, D-171): сумма накладной —
+                  как в бумаге, рядом — сколько уехало назад и сколько по ней
+                  осталось. */}
+              {Number(open.returned_after) > 0 && (
+                <div className="crow">
+                  <span className="k">{t("supplies.returnedAfter")}</span>
+                  <span>
+                    −{som(open.returned_after)} · {t("supplies.netTotal", { sum: som(Number(open.total_cost) - Number(open.returned_after)) })}
+                  </span>
+                </div>
+              )}
               {!open.is_opening && (
                 <>
-                  <div className="crow"><span className="k">{t("supplies.paidTo")}</span><span>{som(open.paid_total)}</span></div>
+                  {/* В валюте «оплачено» — две разные цифры (RU-N16): сколько
+                      долга закрыто по курсу накладной и сколько денег ушло из
+                      кассы по курсу дня оплаты. Одна строка «Оплачено» с
+                      первой из них не сходилась с кассой. */}
+                  {open.currency !== "KGS" ? (
+                    <>
+                      <div className="crow">
+                        <span className="k">{t("supplies.debtClosed")}</span>
+                        <span>
+                          {som(open.paid_total)}
+                          {open.paid_foreign != null ? ` · ${formatNumber(open.paid_foreign, { max: 2 })} ${open.currency}` : ""}
+                        </span>
+                      </div>
+                      <div className="crow">
+                        <span className="k">{t("supplies.paidMoney")}</span>
+                        <span>{som(open.paid_cash)}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="crow"><span className="k">{t("supplies.paidTo")}</span><span>{som(open.paid_total)}</span></div>
+                  )}
                   <div className="crow">
                     <span className="k">{t("supplies.debt")}</span>
                     <strong style={Number(open.debt) > 0 ? { color: "var(--danger-ink)" } : undefined}>
@@ -720,7 +751,14 @@ export default function Supplies({ embedded = false }) {
               {Number(open.paid_amount) > 0 && (
                 <div className="crow">
                   <span className="k">{t("supplies.legacyPaid")}</span>
-                  <span>{som(open.paid_amount)}{open.paid_account ? ` · ${t(`suppliersDebt.${open.paid_account === "CASH" ? "cash" : "bank"}`)}` : ""}</span>
+                  <span>
+                    {som(open.paid_amount)}{open.paid_account ? ` · ${t(`suppliersDebt.${open.paid_account === "CASH" ? "cash" : "bank"}`)}` : ""}
+                    {/* Оплата при приёмке — в сомах; в валюте накладной это
+                        столько по её курсу (RU-N16). */}
+                    {open.currency !== "KGS" && Number(open.rate) > 0
+                      ? ` · ≈ ${formatNumber(Number(open.paid_amount) / Number(open.rate), { max: 2 })} ${open.currency} ${t("supplies.atRate", { rate: formatNumber(open.rate, { max: 4 }) })}`
+                      : ""}
+                  </span>
                 </div>
               )}
               {(open.payments || []).map((p) => (
@@ -1048,7 +1086,18 @@ export default function Supplies({ embedded = false }) {
               </Field>
               {isAdmin && !draft.is_opening && (
                 <>
-                  <Field style={{ margin: 0, width: 190 }} label={foreign ? `${t("supplies.paidTo")}, ${t("supplies.currencySom")}` : t("supplies.paidTo")}>
+                  <Field
+                    style={{ margin: 0, width: 190 }}
+                    label={foreign ? `${t("supplies.paidTo")}, ${t("supplies.currencySom")}` : t("supplies.paidTo")}
+                    hint={
+                      foreign && Number(draft.paid_amount) > 0 && Number(draft.rate) > 0
+                        ? t("supplies.paidSomHint", {
+                          fc: formatNumber(Number(draft.paid_amount) / Number(draft.rate), { max: 2 }),
+                          cur: draft.currency,
+                        })
+                        : undefined
+                    }
+                  >
                     <input
                       type="number" step="any" value={draft.paid_amount}
                       placeholder="0"

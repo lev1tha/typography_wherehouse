@@ -356,10 +356,11 @@ def consume_area(
         if remaining <= 0:
             break
         take = min(roll.remaining_area, remaining)
+        # На сколько подешевела полка партии (S3, STK-10): последний лист
+        # забирает весь остаток её стоимости — партия стоит ровно свой закуп.
+        cogs += roll.take_cost(take)
         roll.remaining_area -= take
         roll.save(update_fields=["remaining_area"])
-        # Закуп × взято / принято — без копеечного хвоста цены кв.м (STK-10).
-        cogs += roll.cost_of(take)
         remaining -= take
         moves.append((roll.pk, -take))
         if trace is not None:
@@ -482,9 +483,9 @@ def consume_metres(
         roll_metres = roll.remaining_area / roll.width
         take_m = min(roll_metres, remaining)
         take_area = take_m * roll.width
+        cogs += roll.take_cost(take_area)
         roll.remaining_area -= take_area
         roll.save(update_fields=["remaining_area"])
-        cogs += roll.cost_of(take_area)
         area_taken += take_area
         remaining -= take_m
         moves.append((roll.pk, -take_area))
@@ -730,6 +731,10 @@ def write_off_roll(roll: Roll, metres: Decimal, *, reason: str = "", user=None,
         area = locked_roll.remaining_area
 
     was_above = material.quantity > material.critical_balance
+    # По цене ЭТОГО рулона: на сколько подешевела его полка (STK-10, S3) — для
+    # целых метров то же, что метры × цена метра, но без хвоста округления, и
+    # хвост рулона забирает весь остаток его стоимости.
+    cost = locked_roll.take_cost(area)
     locked_roll.remaining_area -= area
     locked_roll.save(update_fields=["remaining_area"])
     material.quantity = (material.quantity or Decimal("0")) - area
@@ -740,10 +745,7 @@ def write_off_roll(roll: Roll, metres: Decimal, *, reason: str = "", user=None,
         quantity_changed=-area,
         metres_changed=-metres,
         reason=f"{reason} Рулон {label}: {metres.normalize():f} м".strip(),
-        # По цене ЭТОГО рулона: закуп × списанная площадь / принятая (STK-10) —
-        # для целых метров то же, что метры × цена метра, но без хвоста
-        # округления цены метра и с хвостом рулона, ушедшим целиком.
-        cost=locked_roll.cost_of(area).quantize(Decimal("0.01")),
+        cost=cost,
         created_by=user,
     )
     # Дата самой операции: отход, как и приход, вносят задним числом.

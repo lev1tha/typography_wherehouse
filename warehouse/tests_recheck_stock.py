@@ -285,13 +285,16 @@ class ReturnFromClosedMonthTests(Base):
         self.assertEqual(purchases_from_stock(*OCT), D("-3000.00"))
         self.assertEqual(bridge(*OCT)["unexplained"], D("0"))
 
-    def test_open_month_still_corrects_in_place(self):
+    def test_open_month_goes_to_the_return_date_too(self):
+        """С S3 (RU-N23) и у открытого сентября возврат — строкой с минусом
+        датой возврата: накладная как в бумаге, закуп октября −3 000."""
         self.give_back()
         supply = Supply.objects.get(pk=self.doc["id"])
-        self.assertTrue(SupplierReturn.objects.get().in_place)
-        self.assertEqual(supply.total_cost, D("12000.00"))
-        self.assertEqual(purchases_from_stock(*SEP), D("12000.00"))
-        self.assertEqual(purchases_from_stock(*OCT), D("0"))
+        self.assertFalse(SupplierReturn.objects.get().in_place)
+        self.assertEqual(supply.total_cost, D("15000.00"))
+        self.assertEqual(supply.debt, D("12000.00"))
+        self.assertEqual(purchases_from_stock(*SEP), D("15000.00"))
+        self.assertEqual(purchases_from_stock(*OCT), D("-3000.00"))
 
     def test_return_date_in_a_closed_month_is_refused(self):
         self.close("2026-09-30")
@@ -399,8 +402,10 @@ class ReturnRepricedAfterCorrectionTests(Base):
         }, format="json")
         self.assertEqual(r.status_code, 200, r.data)
         lot = Roll.objects.get(material=self.m)
+        # Возврат датой возврата (RU-N23): партия и строка — все 10 листов по
+        # бумаге, исправляем сумму всей партии: 10 × 3 654 = 36 540.
         r = self.client.post("/api/warehouse/lot-correction/apply/",
-                             {"roll": lot.id, "purchase_cost": "32886"}, format="json")
+                             {"roll": lot.id, "purchase_cost": "36540"}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
         self.assertEqual(SupplierReturn.objects.get().amount, D("3654.00"))
         st = self.client.get(f"/api/warehouse/suppliers/{self.sup.id}/statement/").data

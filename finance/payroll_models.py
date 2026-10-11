@@ -43,8 +43,10 @@ class PayScheme(models.Model):
         RUNNING_METERS = "RUNNING_METERS", _("Погонные метры резки")
         WORK_AMOUNT = "WORK_AMOUNT", _("Сумма выполненных работ, сом")
 
+    # PROTECT (RF-N5, D-187): правила — история зарплаты; сотрудника с ними
+    # отключают, а не удаляют. Раньше CASCADE молча стирал их вместе с ним.
     employee = models.ForeignKey(
-        "accounts.Employee", on_delete=models.CASCADE, related_name="pay_schemes",
+        "accounts.Employee", on_delete=models.PROTECT, related_name="pay_schemes",
         verbose_name=_("сотрудник"),
     )
     valid_from = models.DateField(_("действует с месяца"))

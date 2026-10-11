@@ -36,6 +36,19 @@ class AdvanceRejected(Exception):
     """Аванс принять/отменить нельзя. Текст уходит пользователю как есть."""
 
 
+def _checked(amount) -> Decimal:
+    """Сумма аванса: больше нуля, меньше 10^10, не больше двух знаков (RM-N9)."""
+    from .amounts import AmountRejected, check_amount
+
+    amount = Decimal(str(amount))
+    if not amount.is_finite() or amount <= 0:
+        raise AdvanceRejected("Сумма аванса должна быть больше нуля.")
+    try:
+        return check_amount(amount, "Сумма аванса")
+    except AmountRejected as e:
+        raise AdvanceRejected(str(e))
+
+
 def advance_available(client) -> Decimal:
     """Сколько аванса клиента ещё не зачтено."""
     if client is None:
@@ -52,9 +65,7 @@ def accept_advance(client, amount, *, method="CASH", paid_on: date | None = None
     from finance import cash
     from finance.models import CashEntry
 
-    amount = Decimal(str(amount))
-    if not amount.is_finite() or amount <= 0:
-        raise AdvanceRejected("Сумма аванса должна быть больше нуля.")
+    amount = _checked(amount)
     method = str(method or "CASH").upper()
     if method not in ClientAdvance.Method.values:
         raise AdvanceRejected(
@@ -93,9 +104,7 @@ def accept_advance_or_offset(client, amount, *, method="CASH", paid_on: date | N
 
     from .opening import open_debts_qs, pay_opening_debts
 
-    amount = Decimal(str(amount))
-    if not amount.is_finite() or amount <= 0:
-        raise AdvanceRejected("Сумма аванса должна быть больше нуля.")
+    amount = _checked(amount)
     method = str(method or "CASH").upper()
     if method not in ClientAdvance.Method.values:
         raise AdvanceRejected("Способ оплаты: " + ", ".join(ClientAdvance.Method.values) + ".")

@@ -100,9 +100,22 @@ def parse_number(raw) -> Decimal | None:
         text = text.replace(",", ".")
     if not re.fullmatch(r"-?\d+(\.\d+)?", text):
         raise ValueError(f"«{raw}» — не число")
+    # Телефон в колонке суммы (RM-N9, D-186): 12+ цифр подряд без разделителей
+    # («996700100200») или номер с ведущим нулём («0555112233») — не долг на
+    # сотни миллиардов, а ошибка строки.
+    digits = text.lstrip("-")
+    plain = re.sub(r"(?i)(сом|сомов|som|kgs|с\.?)$", "", str(raw or "").strip()).strip().lstrip("-−–")
+    if digits.isdigit() and (
+        (len(digits) >= 12 and plain.isdigit()) or (digits.startswith("0") and len(digits) >= 9)
+    ):
+        raise ValueError(f"«{raw}» — похоже на телефон, а не на сумму")
     value = Decimal(text)
     if value != value.quantize(CENT, rounding=ROUND_HALF_UP):
         raise ValueError(f"«{raw}» — больше двух знаков после запятой")
+    from .amounts import MAX_AMOUNT
+
+    if abs(value) >= MAX_AMOUNT:
+        raise ValueError(f"«{raw}» — слишком большая сумма (должна быть меньше 10 000 000 000)")
     return value.quantize(CENT)
 
 
@@ -259,6 +272,14 @@ def post(text: str, as_of: date, *, user=None, note: str = "", batch: str | None
         raise OpeningRejected("Укажите дату переезда.")
     if as_of > timezone.localdate():
         raise OpeningRejected("Дата переезда не может быть в будущем.")
+    # Дата остатка — день его входа в долг, акт сверки и возраст долга: в
+    # закрытом месяце он переписал бы принятые цифры (RM-N8, D-186).
+    from finance.periods import PeriodClosed, ensure_open
+
+    try:
+        ensure_open(as_of, "Провести входящие остатки этой датой")
+    except PeriodClosed as e:
+        raise OpeningRejected(" ".join(str(x) for x in (e.detail if isinstance(e.detail, list) else [e.detail])))
     plan = preview(parse_text(text))
     bad = [r for r in plan["rows"] if r["status"] == "error"]
     if not plan["rows"]:

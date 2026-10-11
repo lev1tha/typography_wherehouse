@@ -215,12 +215,50 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         e = serializer.save()
         AuditLog.record(self.request.user, f"Сотрудник добавлен: {e.full_name}", kind="staff")
 
+    # Поля сотрудника для журнала «было → стало» (XL-07, D-187).
+    LABELS = {
+        "full_name": "ФИО", "position": "должность", "machine": "станок",
+        "is_active": "работает", "login": "учётная запись", "note": "примечание",
+    }
+
+    @staticmethod
+    def _snapshot(e) -> dict:
+        return {
+            "full_name": e.full_name, "position": e.position,
+            "machine": e.get_default_machine_display() if e.default_machine else "",
+            "is_active": e.is_active, "login": e.user.username if e.user_id else "", "note": e.note,
+        }
+
     def perform_update(self, serializer):
+        from finance import auditing
+
+        before = self._snapshot(serializer.instance)
         e = serializer.save()
-        AuditLog.record(self.request.user, f"Сотрудник изменён: {e.full_name}", kind="staff")
+        diff = auditing.changes(before, self._snapshot(e), self.LABELS)
+        AuditLog.record(
+            self.request.user, f"Сотрудник изменён: {e.full_name} — {diff or 'без изменений'}", kind="staff",
+        )
 
     def destroy(self, request, *args, **kwargs):
         employee = self.get_object()
+        # Правила оплаты и выработка (исполнитель строки или заказы под его
+        # учёткой) — история зарплаты: с ними сотрудника отключают, а не
+        # удаляют (RF-N5, D-187). Раньше удаление молча стирало правила, а
+        # выработка по учётке уходила в «Без сотрудника».
+        from finance.models import PayScheme
+        from sales.models import TransactionItem
+
+        work = TransactionItem.objects.filter(executor=employee)
+        if employee.user_id:
+            work = work | TransactionItem.objects.filter(
+                type=TransactionItem.Type.SERVICE, receipt__cashier_id=employee.user_id,
+            )
+        if PayScheme.objects.filter(employee=employee).exists() or work.exists():
+            return Response(
+                {"detail": "У сотрудника есть правила оплаты или выработка в заказах — удалить "
+                           "нельзя, отключите его вместо удаления (снимите «Работает»)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             name = employee.full_name
             employee.delete()

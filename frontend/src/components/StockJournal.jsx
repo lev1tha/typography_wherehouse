@@ -9,7 +9,7 @@
  * Месяц по умолчанию НЕ выбран. Поставки вносят задним числом, и лента,
  * обрезанная текущим месяцем, прятала бы приход ровно в момент его ввода.
  */
-import { formatDate } from "../utils/format.js";
+import { formatDate, formatMoney } from "../utils/format.js";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -104,7 +104,9 @@ export default function StockJournal() {
       key: "type",
       label: t("journal.type"),
       render: (r) => (
-        <span className={`badge ${TONE[r.type] || ""}`}>{t(`logType.${r.type}`, r.type_display)}</span>
+        r.supplier_return
+          ? <span className="badge amber">{t("journal.supplierReturn")}</span>
+          : <span className={`badge ${TONE[r.type] || ""}`}>{t(`logType.${r.type}`, r.type_display)}</span>
       ),
     },
     { key: "material_name", label: t("checkout.material") },
@@ -121,8 +123,9 @@ export default function StockJournal() {
         const value = metres ?? Number(r.quantity_changed);
         const unit = metres == null ? t(`unit.${r.material_unit}`) : t("unit.METER");
         // Исправление прихода движения не несёт: сам приход поправлен на
-        // месте, а «было → стало» — в причине.
-        if (r.type === "CORRECTION") return <span className="muted">—</span>;
+        // месте, а «было → стало» — в причине. Возврат поставщику (RU-N23) —
+        // строка с минусом: приход над ним остаётся как в бумаге.
+        if (r.type === "CORRECTION" && !Number(r.quantity_changed)) return <span className="muted">—</span>;
         return (
           <strong
             style={{
@@ -135,6 +138,13 @@ export default function StockJournal() {
           </strong>
         );
       },
+    },
+    // Стоимость движения (себестоимость продажи, списания, возврата
+    // поставщику) — только тем, кто видит деньги: складовщику сервер шлёт null.
+    {
+      key: "cost",
+      label: t("journal.cost"),
+      render: (r) => (r.cost != null && Number(r.quantity_changed) ? formatMoney(r.cost, { fraction: 2 }) : "—"),
     },
     {
       key: "order_number",

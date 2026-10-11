@@ -142,8 +142,14 @@ class PassesAndThicknessTests(CalcBase):
         self.assertEqual(r.status_code, 400, r.data)
 
     def test_thickness_coefficient_scales_the_catalogue_rate(self):
+        # Коэффициент — к ставке СТАНКА; ставка материала своя для каждой
+        # толщины, и на неё он не ложится (RP-N5, D-180: `tests_s3_price`).
+        self.cnc.rate_per_pm = D("45")
+        self.cnc.save()
         ThicknessCoefficient.objects.create(kind="CUTTING", thickness_from=D("5"), coefficient=D("1.35"))
         thick = self.co([self.cut(self.forex8, "0.5", "0.5", "1")])
+        self.cnc.rate_per_pm = D("35")
+        self.cnc.save()
         thin = self.co([self.cut(self.forex3, "0.5", "0.5", "1")])
         work_thick = thick.data["items"][0]
         self.assertEqual(D(str(work_thick["price_per_item"])), D("60.75"))   # 45 × 1.35
@@ -152,6 +158,8 @@ class PassesAndThicknessTests(CalcBase):
         self.assertIsNone(thin.data["items"][0]["thickness_coef"])
 
     def test_thickness_table_is_a_step_function(self):
+        self.cnc.rate_per_pm = D("35")
+        self.cnc.save()
         ThicknessCoefficient.objects.create(kind="CUTTING", thickness_from=D("3"), coefficient=D("1.1"))
         ThicknessCoefficient.objects.create(kind="CUTTING", thickness_from=D("6"), coefficient=D("1.5"))
         r3 = self.co([self.cut(self.forex3, "0.5", "0.5", "1")])

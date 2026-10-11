@@ -50,6 +50,10 @@ function ReceiptsTab() {
   const [dateTo, setDateTo] = useState("");
   // «Кому мы должны отдать сдачу» — рабочий список кассира.
   const [onlyChange, setOnlyChange] = useState(false);
+  // На телефоне фильтры свёрнуты под кнопку «Фильтры» (RU-N26): до первого
+  // чека было десять блоков. На широком экране кнопки нет, фильтры видны.
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const activeFilters = [method, pstatus, client, dateFrom, dateTo, onlyChange].filter(Boolean).length;
   const [advancingId, setAdvancingId] = useState(null);
   const [paying, setPaying] = useState(null);
   const [givingChange, setGivingChange] = useState(null);
@@ -547,6 +551,16 @@ function ReceiptsTab() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
+        <button
+          type="button"
+          className="secondary filters-toggle"
+          aria-expanded={filtersOpen}
+          aria-controls="receipts-filters"
+          onClick={() => setFiltersOpen((v) => !v)}
+        >
+          {t("receipts.filtersBtn")}{activeFilters ? ` · ${activeFilters}` : ""}
+        </button>
+        <div id="receipts-filters" className={`filters-more${filtersOpen ? " open" : ""}`}>
         <select aria-label={t("receipts.method")} value={method} onChange={(e) => setMethod(e.target.value)}>
           <option value="">{t("receipts.method")}: {t("common.all")}</option>
           <option value="CASH">{t("checkout.cash")}</option>
@@ -597,6 +611,7 @@ function ReceiptsTab() {
           </button>
         )}
         <button className="secondary" onClick={exportCsv}>{t("clients.exportCsv")}</button>
+        </div>
       </div>
       {/* С себестоимостью и маржой колонок стало одиннадцать — таблица
           прокручивается вбок сама, а не тянет за собой всю страницу. */}

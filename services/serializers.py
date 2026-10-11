@@ -161,6 +161,10 @@ class PricingSettingsSerializer(serializers.ModelSerializer):
         max_digits=5, decimal_places=2, min_value=Decimal("0"), max_value=Decimal("100"),
         required=False,
     )
+    staff_price_warn_percent = serializers.DecimalField(
+        max_digits=5, decimal_places=2, min_value=Decimal("0"), max_value=Decimal("100"),
+        required=False,
+    )
     # «ЗП мастера, % от работы» (STAFF-05, волна 2): доля от стоимости работы —
     # 0–100. Раньше проходили −5 и 250: расчётная доля мастера в отчёте
     # становилась отрицательной или больше самой работы. Проверка на уровне
@@ -175,7 +179,7 @@ class PricingSettingsSerializer(serializers.ModelSerializer):
         fields = [
             "master_commission_percent", "min_line_amount", "urgency_percent",
             "min_mode", "rounding_mode", "confirm_line_total", "staff_line_cap",
-            "staff_min_price_percent", "debt_warn_days", "updated_at",
+            "staff_min_price_percent", "staff_price_warn_percent", "debt_warn_days", "updated_at",
         ]
         read_only_fields = ["updated_at"]
 

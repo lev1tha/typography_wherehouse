@@ -258,6 +258,15 @@ class Material(models.Model):
         null=True, blank=True,
         help_text=_("Листы, метры или штуки. «К заказу» — до двух минимумов"),
     )
+    # «Заказывать до» (S3, STK-06): до скольких единиц материала докупать, когда
+    # он упал до минимума. Пусто — до двух минимумов, как было. У владельца в
+    # Excel своё правило на материал (=МАКС(0; 12 − 10) — до минимума), у
+    # системы было одно на всех и без подписи: «к заказу 14» вместо 2 листов.
+    reorder_to = models.DecimalField(
+        _("заказывать до, в единицах материала"), max_digits=12, decimal_places=2,
+        null=True, blank=True,
+        help_text=_("Пусто — до двух минимумов"),
+    )
     # Откуда возят материал — колонка «производство» в складской таблице
     # заказчика (Бишкек, Глобал). Справочник, а не свободный текст: печатать
     # его на каждом материале руками — лишняя работа, а опечатка заводила бы
@@ -873,6 +882,31 @@ class Roll(models.Model):
             return Decimal("0")
         return self.purchase_cost * Decimal(area) / self.initial_area
 
+    def shelf_value(self, area) -> Decimal:
+        """Стоимость `area` кв.м (штук) этой партии на полке — до тыйына."""
+        return self.cost_of(area).quantize(Decimal("0.01"))
+
+    def take_cost(self, area) -> Decimal:
+        """Себестоимость того, что берём из партии СЕЙЧАС: на сколько подешевела
+        её полка — стоимость остатка до минус после, каждая до тыйына (S3,
+        STK-10). Вызывать ДО того, как `remaining_area` уменьшен.
+
+        Так партия, проданная по листу, стоит в сумме ровно свой закуп:
+        7 листов из партии за 10 000 по 1 428,57 давали 9 999,99, тыйын
+        оставался на пустой полке. Последний лист забирает весь остаток
+        стоимости партии; копейка округления ложится на ту продажу, где
+        накопилась, а не теряется."""
+        area = Decimal(area)
+        before = self.remaining_area
+        after = max(before - area, Decimal("0"))
+        if not self.initial_area or area <= 0:
+            return Decimal("0")
+        if area > before:
+            # Берут больше, чем числится в партии (старые хвосты) — сверх
+            # остатка по цене партии, как раньше.
+            return self.shelf_value(before) + self.cost_of(area - before).quantize(Decimal("0.01"))
+        return self.shelf_value(before) - self.shelf_value(after)
+
     # --- Рулон в погонных метрах: считаем СВОЕЙ шириной ------------------
     #
     # Ширина партии заморожена при приёмке и живёт здесь, а не в карточке
@@ -1215,6 +1249,18 @@ class Supply(models.Model):
     @property
     def paid_total(self) -> Decimal:
         return (self.paid_amount or Decimal("0")) + self.payments_settled
+
+    @property
+    def paid_cash(self) -> Decimal:
+        """Сколько ДЕНЕГ ушло поставщику по накладной, сом (RU-N16): оплата при
+        приёмке + платежи по кассе (у валютных — с курсовой разницей) + зачёт
+        аванса, уплаченного раньше, − возвращённые деньги. У накладной в
+        валюте это не «закрыто долга» (`paid_total`, по курсу накладной): 150 USD
+        по 88,1 — 13 215 из кассы, а долга закрыто на 13 117."""
+        total = self.paid_amount or Decimal("0")
+        for p in self.payments.all():
+            total += -p.amount if p.kind == SupplierPayment.Kind.REFUND else p.amount
+        return total
 
     @property
     def returned_after(self) -> Decimal:

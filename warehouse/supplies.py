@@ -14,7 +14,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from .models import InventoryLog, Roll, Supply, SupplyLine
+from .models import InventoryLog, Roll, SupplierReturnLine, Supply, SupplyLine
 from .rolls import compute_area, receive_lot
 from .stock import apply_stock_change
 
@@ -189,7 +189,7 @@ def move_supply_date(supply: Supply, day) -> None:
 
 @transaction.atomic
 def pay_supply(supply: Supply, amount, account, *, paid_on=None, user=None,
-               rate=None, note="") -> Decimal:
+               rate=None, note="", confirm_rate=False) -> Decimal:
     """Заплатить поставщику по накладной (часть долга или весь).
 
     Каждая оплата — ОТДЕЛЬНАЯ СТРОКА (`SupplierPayment`: дата, сумма, счёт,
@@ -202,7 +202,7 @@ def pay_supply(supply: Supply, amount, account, *, paid_on=None, user=None,
 
     record_payment(
         supply=supply, amount=amount, account=account, paid_on=paid_on,
-        rate=rate, note=note, user=user,
+        rate=rate, note=note, user=user, confirm_rate=confirm_rate,
     )
     return Supply.objects.get(pk=supply.pk).debt
 
@@ -281,16 +281,24 @@ def unpost_supply(supply: Supply, *, user=None) -> None:
     без записи в журнал — приход и его отмена дают ноль. След остаётся в
     ЖУРНАЛЕ ДЕЙСТВИЙ, вместе с составом (см. `supply_summary` во вьюхе).
     """
+    # Возвращённое поставщику датой возврата (RU-N23, D-171) ушло с полки
+    # записью «Возврат поставщику» этой же накладной — это не «резали»: такая
+    # запись уйдёт вместе с накладной, и снимаем с остатка только то, что ещё
+    # лежит.
+    returned = {}
+    for row in SupplierReturnLine.objects.filter(supply_line__supply=supply, ret__in_place=False):
+        returned[row.supply_line_id] = returned.get(row.supply_line_id, Decimal("0")) + row.area
     for line in supply.lines.select_related("material", "roll"):
         roll = line.roll
-        if roll and roll.remaining_area != roll.initial_area:
+        back = returned.get(line.pk, Decimal("0"))
+        if roll and roll.remaining_area + back != roll.initial_area:
             raise SupplyError(
                 f"«{line.material.name}» из этой накладной уже резали — "
                 "отменить её нельзя. Опечатку в цене или количестве поправит "
                 "«Исправить приход», а часть товара можно вернуть поставщику."
             )
         material = line.material
-        if not material.is_roll_material and material.quantity < line.quantity:
+        if not material.is_roll_material and material.quantity < line.quantity - back:
             raise SupplyError(
                 f"«{material.name}»: на складе осталось меньше, чем пришло по "
                 "накладной, — часть уже продали. Отменить нельзя."
@@ -307,9 +315,10 @@ def unpost_supply(supply: Supply, *, user=None) -> None:
             line.save(update_fields=["roll"])
             cash.reverse_supplier_payments(roll=roll, note=f"Отмена накладной {label}")
             roll.delete()
-        # Снимаем с остатка ровно то, что накладная принесла, — без строки в
-        # журнале: её приход тоже уходит ниже, и движения в сумме нет.
-        apply_stock_change(material, -line.quantity)
+        # Снимаем с остатка ровно то, что накладная принесла и что не уехало
+        # назад поставщику, — без строки в журнале: её приход и возвраты тоже
+        # уходят ниже, и движения в сумме нет.
+        apply_stock_change(material, -(line.quantity - returned.get(line.pk, Decimal("0"))))
     supply.inventory_logs.all().delete()
     # Оплата поставщику НЕ стирается (2026-10-07, аудит Б-13): исходная запись
     # остаётся в книге, рядом — встречная сегодняшним днём. Раньше записи

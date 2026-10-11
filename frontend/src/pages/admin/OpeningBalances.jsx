@@ -9,7 +9,7 @@ import DataTable from "../../components/DataTable.jsx";
 import Field from "../../components/Field.jsx";
 import LoadError from "../../components/LoadError.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
-import { formatDate, formatMoney } from "../../utils/format.js";
+import { formatDate, formatMoneyExact as formatMoney } from "../../utils/format.js";
 import { useIdempotency } from "../../utils/idempotency.js";
 
 // «Входящие остатки» (волна 2, XL-04/F6/CLI-06): долги и авансы клиентов на
@@ -23,6 +23,29 @@ import { useIdempotency } from "../../utils/idempotency.js";
 const today = () => new Date().toLocaleDateString("sv-SE");
 const STATUS_BADGE = { found: "ok", create: "blue", error: "red" };
 
+// Черновик вставки (RU-N9) — в localStorage, как корзина кассы: F5 или уход с
+// экрана не стирают вставленное из Excel. Любое обращение — в try/catch: в
+// приватном окне хранилище бросает исключение, а экран обязан работать.
+const DRAFT_KEY = "chpu.openingDraft.v1";
+
+function loadDraft() {
+  try {
+    const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+    return d && typeof d === "object" && typeof d.text === "string" ? d : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveDraft(d) {
+  try {
+    if (d.text || d.note) localStorage.setItem(DRAFT_KEY, JSON.stringify(d));
+    else localStorage.removeItem(DRAFT_KEY);
+  } catch {
+    /* нет хранилища — без черновика */
+  }
+}
+
 export default function OpeningBalances() {
   const { t } = useTranslation();
   const { toast, confirm } = useUI();
@@ -31,9 +54,10 @@ export default function OpeningBalances() {
   // Отмена одной оплаты входящего долга: {row, payment}.
   const [cancelling, setCancelling] = useState(null);
 
-  const [text, setText] = useState("");
-  const [asOf, setAsOf] = useState(today());
-  const [note, setNote] = useState("");
+  const [draft] = useState(loadDraft);
+  const [text, setText] = useState(draft?.text || "");
+  const [asOf, setAsOf] = useState(draft?.asOf || today());
+  const [note, setNote] = useState(draft?.note || "");
   const [plan, setPlan] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -51,6 +75,7 @@ export default function OpeningBalances() {
 
   // Предпросмотр устаревает, как только вставку поменяли.
   useEffect(() => setPlan(null), [text]);
+  useEffect(() => saveDraft({ text, asOf, note }), [text, asOf, note]);
 
   async function check() {
     setBusy(true);
@@ -89,7 +114,9 @@ export default function OpeningBalances() {
         ? t("clients.repeatIgnored")
         : t("opening.done", { n: data.rows.length, clients: data.created_clients }));
       setText("");
+      setNote("");
       setPlan(null);
+      saveDraft({ text: "", note: "" });
       load();
     } catch (e) {
       idem.failed(e);
@@ -112,7 +139,7 @@ export default function OpeningBalances() {
 
   const previewColumns = [
     { key: "line", label: "#" },
-    { key: "phone", label: t("checkout.phone") },
+    { key: "phone", label: t("clients.phone") },
     { key: "name", label: t("opening.name"), render: (r) => r.name || "—" },
     { key: "debt", label: t("opening.debt"), render: (r) => (Number(r.debt) ? formatMoney(r.debt) : "—") },
     { key: "advance", label: t("opening.advance"), render: (r) => (Number(r.advance) ? formatMoney(r.advance) : "—") },

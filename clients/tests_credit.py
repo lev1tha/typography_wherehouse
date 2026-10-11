@@ -74,11 +74,11 @@ class ClientLimitTests(ShopCase):
         self.assertEqual(self.agency.credit_limit, D("50000"))
         self.assertEqual(D(str(r.data["effective_credit_limit"])), D("50000"))
         log = AuditLog.objects.filter(action__startswith="Изменён лимит долга клиента").get()
-        self.assertIn("не задан → 50000", log.action)
+        self.assertIn("не задан → 50 000 сом", log.action)
         # и обратно: убрать лимит
         self.client.patch(self.url(), {"credit_limit": None}, format="json")
         log = AuditLog.objects.filter(action__startswith="Изменён лимит долга клиента").first()
-        self.assertIn("50000 → не задан", log.action)
+        self.assertIn("50 000 → не задан", log.action)
 
     def test_storekeeper_cannot_set_limit(self):
         self.client.force_authenticate(self.store)

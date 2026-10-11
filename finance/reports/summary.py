@@ -123,6 +123,29 @@ def supplier_debts():
     return {"total": sum((r["debt"] for r in rows), Decimal("0")), "rows": rows}
 
 
+def supplier_advances():
+    """Деньги, которые лежат у поставщиков, — выданные авансы и переплаты
+    (RS-N3, D-188). Рядом с «Долгом поставщикам», тоже на сегодня.
+
+    По поставщику — его сальдо в нашу пользу (`supplier_balance()["credit"]`):
+    аванс, уже закрывший долг по другой накладной того же поставщика, входит
+    в «Долг поставщикам» минусом и здесь второй раз не считается. `advances` —
+    сколько из этого — незачтённые авансы (остальное — переплата накладных)."""
+    rows = []
+    for supplier in Supplier.objects.prefetch_related(
+        "supplies__lines", "supplies__payments", "supplies__returns", "payments__offsets",
+        "opening_debts",
+    ):
+        balance = supplier_balance(supplier)
+        if balance["credit"] > 0:
+            rows.append({
+                "id": supplier.id, "supplier": supplier.name,
+                "amount": balance["credit"], "advances": min(balance["advances"], balance["credit"]),
+            })
+    rows.sort(key=lambda r: (-r["amount"], r["supplier"]))
+    return {"total": sum((r["amount"] for r in rows), Decimal("0")), "rows": rows}
+
+
 
 
 def finance_summary(d_from=None, d_to=None) -> dict:
@@ -766,6 +789,8 @@ def finance_summary(d_from=None, d_to=None) -> dict:
         # цех должен за материал, взятый в долг. Раньше приход «в долг»
         # не оставлял следа, а оплату было некуда провести.
         "suppliers": supplier_debts(),
+        # Авансы и переплаты поставщикам на сегодня (RS-N3) — деньги цеха у них.
+        "supplier_advances": supplier_advances(),
         "period": {
             "from": d_from.isoformat() if d_from else None,
             "to": d_to.isoformat() if d_to else None,

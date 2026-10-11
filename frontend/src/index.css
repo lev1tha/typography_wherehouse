@@ -3229,3 +3229,53 @@ button.ghost.kind-row > span:last-child {
 .rc-pay:last-of-type {
   border-bottom: 0;
 }
+
+/* Вторичные действия карточки заказа — в меню «…» над кнопкой (RU-N26). */
+.rc-more {
+  position: relative;
+}
+
+.rc-more-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 210px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-2);
+}
+
+.rc-more-menu button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.rc-more-menu .row-danger {
+  color: var(--danger-ink);
+}
+
+/* «Чеки»: фильтры под кнопкой «Фильтры» только на телефоне (RU-N26). На
+   широком экране обёртка не участвует в раскладке — фильтры в строке. */
+.filters-toggle {
+  display: none;
+}
+
+.filters-more {
+  display: contents;
+}
+
+@media (max-width: 600px) {
+  .filters-toggle {
+    display: inline-flex;
+  }
+  .filters-more:not(.open) {
+    display: none;
+  }
+}

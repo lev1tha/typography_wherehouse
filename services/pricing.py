@@ -13,9 +13,11 @@
 3. прежняя цепочка: у резки — ставка станка (`rate_per_pm`), если она задана,
    иначе ставка материала (`cut_rate_per_pm`); у прочих площадных услуг —
    `rate_flat`;
-4. к ставке из пункта 3 (и только к ней) применяется коэффициент по толщине
-   материала (`ThicknessCoefficient`). Ставка из матрицы — явная цена, и
-   коэффициент на неё не накладывается.
+4. коэффициент по толщине материала (`ThicknessCoefficient`) применяется
+   только к ставке УСЛУГИ — станка или `rate_flat` (S3, RP-N5, D-180). Ставка,
+   которая уже зависит от материала или толщины, — ставка материала (у
+   форекса 8 мм она своя, 45 против 35 у 3 мм) и матрица — явная цена, и
+   коэффициент на неё не накладывается: иначе толщина считалась бы дважды.
 
 Ручная ставка кассы (админ, или складовщик там, где ей разрешено) заменяет всю
 цепочку, но множитель «проходы» к ней применяется.
@@ -102,7 +104,9 @@ def resolve_rate(service, material=None) -> ResolvedRate:
     base = Decimal(base or 0)
 
     coef = None
-    if base > 0 and material is not None:
+    # Ставка материала уже своя для каждой толщины — коэффициент только к
+    # ставке станка или услуги (RP-N5).
+    if base > 0 and material is not None and source != SOURCE_MATERIAL:
         coef = thickness_coefficient(service.kind, material.thickness_mm)
     rate = _q(base * coef) if coef is not None else base
     return ResolvedRate(rate, base, source, coef)

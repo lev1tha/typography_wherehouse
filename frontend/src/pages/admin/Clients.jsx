@@ -19,7 +19,7 @@ import PrintAct from "../../components/PrintAct.jsx";
 import MonthPicker from "../../components/MonthPicker.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import { isCanceled, useLatest } from "../../utils/latest.js";
-import { formatDate, formatMoney, formatNumber } from "../../utils/format.js";
+import { formatDate, formatMoney, formatMoneyExact, formatNumber } from "../../utils/format.js";
 
 // Сколько заказов показывать в карточке сразу — остальные под кнопкой.
 const ORDERS_PREVIEW = 5;
@@ -361,7 +361,7 @@ export default function Clients() {
   }
 
   async function revertAdvance(a) {
-    if (!(await confirm(t("clients.advanceRevertConfirm", { sum: formatMoney(a.amount) })))) return;
+    if (!(await confirm(t("clients.advanceRevertConfirm", { sum: formatMoneyExact(a.amount) })))) return;
     try {
       await api.post(`/clients/clients/${detail.id}/advances/${a.id}/revert/`, {});
       toast(t("clients.advanceRevertDone"));
@@ -526,7 +526,7 @@ export default function Clients() {
       render: (c) =>
         Number(c.debt) > 0 ? (
           <span style={{ color: "var(--danger-ink)", fontWeight: 600 }}>
-            {formatMoney(c.debt)}
+            {formatMoneyExact(c.debt)}
           </span>
         ) : (
           // Ноль долга — не достижение, а обычное состояние: приглушённый
@@ -547,10 +547,10 @@ export default function Clients() {
           <span
             style={{ color: v > 0 ? "var(--danger-ink)" : "var(--accent-ink)", fontWeight: 600 }}
             title={t("clients.balanceBreak", {
-              debt: formatMoney(c.debt), change: formatMoney(c.change_due), advance: formatMoney(c.advance_balance),
+              debt: formatMoneyExact(c.debt), change: formatMoneyExact(c.change_due), advance: formatMoneyExact(c.advance_balance),
             })}
           >
-            {v < 0 ? "−" : ""}{formatMoney(Math.abs(v))}
+            {v < 0 ? "−" : ""}{formatMoneyExact(Math.abs(v))}
           </span>
         );
       },
@@ -634,7 +634,7 @@ export default function Clients() {
               >
                 <div className="label">{t(`clients.bucket_${b.key}`)}</div>
                 <div className="value" style={Number(b.amount) > 0 && b.key !== "0_30" ? { color: "var(--danger-ink)" } : undefined}>
-                  {formatMoney(b.amount)}
+                  {formatMoneyExact(b.amount)}
                 </div>
                 <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
                   {t("clients.bucketMeta", { orders: b.orders, clients: b.clients })}
@@ -901,7 +901,7 @@ export default function Clients() {
             <span className="k">{t("receipts.debt")}</span>
             <span className="row" style={{ gap: 8, alignItems: "center", margin: 0 }}>
               {Number(detail.debt) > 0 ? (
-                <strong style={{ color: "var(--danger-ink)" }}>{formatMoney(detail.debt)}</strong>
+                <strong style={{ color: "var(--danger-ink)" }}>{formatMoneyExact(detail.debt)}</strong>
               ) : (
                 <span className="paid">{formatMoney(0)}</span>
               )}
@@ -933,14 +933,14 @@ export default function Clients() {
             <div className="crow">
               <span className="k">{t("clients.changeDue")}</span>
               <strong style={{ color: "var(--accent-ink)" }}>
-                {formatMoney(detail.change_due)}
+                {formatMoneyExact(detail.change_due)}
               </strong>
             </div>
           )}
           {Number(detail.advance_balance) > 0 && (
             <div className="crow">
               <span className="k">{t("clients.advanceBalance")}</span>
-              <strong style={{ color: "var(--accent-ink)" }}>{formatMoney(detail.advance_balance)}</strong>
+              <strong style={{ color: "var(--accent-ink)" }}>{formatMoneyExact(detail.advance_balance)}</strong>
             </div>
           )}
           {/* Сальдо = долг − сдача − аванс: одна цифра «кто кому должен». */}
@@ -950,11 +950,11 @@ export default function Clients() {
               <strong
                 style={{ color: Number(detail.balance) > 0 ? "var(--danger-ink)" : Number(detail.balance) < 0 ? "var(--accent-ink)" : undefined }}
                 title={t("clients.balanceBreak", {
-                  debt: formatMoney(detail.debt), change: formatMoney(detail.change_due), advance: formatMoney(detail.advance_balance),
+                  debt: formatMoneyExact(detail.debt), change: formatMoneyExact(detail.change_due), advance: formatMoneyExact(detail.advance_balance),
                 })}
               >
-                {Number(detail.balance) > 0 && t("clients.balanceDebt", { sum: formatMoney(detail.balance) })}
-                {Number(detail.balance) < 0 && t("clients.balanceCredit", { sum: formatMoney(-detail.balance) })}
+                {Number(detail.balance) > 0 && t("clients.balanceDebt", { sum: formatMoneyExact(detail.balance) })}
+                {Number(detail.balance) < 0 && t("clients.balanceCredit", { sum: formatMoneyExact(-detail.balance) })}
                 {Number(detail.balance) === 0 && t("clients.balanceZero")}
               </strong>
             </div>
@@ -1211,11 +1211,11 @@ export default function Clients() {
                     {b.note ? <span className="muted"> · {b.note}</span> : null}
                   </span>
                   <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                    <strong>{formatMoney(b.amount)}</strong>
+                    <strong>{formatMoneyExact(b.amount)}</strong>
                     <span className="muted" style={{ fontSize: 12 }}>
                       {b.kind === "DEBT"
-                        ? t("opening.cardDebtLeft", { sum: formatMoney(b.remaining) })
-                        : t("clients.advanceRemaining", { sum: formatMoney(b.remaining) })}
+                        ? t("opening.cardDebtLeft", { sum: formatMoneyExact(b.remaining) })
+                        : t("clients.advanceRemaining", { sum: formatMoneyExact(b.remaining) })}
                     </span>
                   </span>
                 </div>
@@ -1236,12 +1236,12 @@ export default function Clients() {
                     {a.note ? <span className="muted"> · {a.note}</span> : null}
                   </span>
                   <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                    <strong>{formatMoney(a.amount)}</strong>
+                    <strong>{formatMoneyExact(a.amount)}</strong>
                     {a.reverted ? (
                       <span className="badge warn">{t("clients.advanceReverted")}</span>
                     ) : (
                       <span className="muted" style={{ fontSize: 12 }}>
-                        {t("clients.advanceRemaining", { sum: formatMoney(a.remaining) })}
+                        {t("clients.advanceRemaining", { sum: formatMoneyExact(a.remaining) })}
                       </span>
                     )}
                     {isAdmin && !a.reverted && Number(a.remaining) === Number(a.amount) && (
@@ -1339,7 +1339,7 @@ export default function Clients() {
                               <span className={`badge ${b.status === "paid" ? "ok" : b.status === "partial" ? "warn" : "blue"}`}>
                                 {t(`clients.bonusStatus_${b.status}`)}
                               </span>{" "}
-                              <strong>{formatMoney(b.amount)}</strong>
+                              <strong>{formatMoneyExact(b.amount)}</strong>
                               <span className="muted">
                                 {" · "}
                                 {b.order_number ? t("clients.bonusForOrder", { n: b.order_number }) : ""}

@@ -434,9 +434,11 @@ class MaterialViewSet(viewsets.ModelViewSet):
         ОБНОВЛЕНИЕ: у него меняются цены, ставка резки, опт и минимальный
         остаток из непустых ячеек строки; новые названия заводятся. С
         ``preview=true`` ничего не пишет и отвечает «было → стало».
-        """
-        from .reprice import UPSERT_FIELDS, apply_changes, plan_json
 
+        ``create_sites=[«Лазер»]`` (RU-N11) — завести эти производства, если их
+        нет в справочнике; без него неизвестное производство — 400 с
+        ``missing_sites``.
+        """
         rows = request.data.get("rows")
         if not isinstance(rows, list) or not rows:
             return Response(
@@ -445,6 +447,16 @@ class MaterialViewSet(viewsets.ModelViewSet):
             )
         upsert = request.data.get("mode") == "upsert"
         preview = request.data.get("preview") in (True, "true", "1", 1)
+        # Всё или ничего — и вместе со справочником, заведённым по ходу (RU-N11):
+        # ошибка в любой строке или предпросмотр откатывают и новое производство.
+        with transaction.atomic():
+            response = self._bulk(request, rows, upsert, preview)
+            if response.status_code >= 400 or preview:
+                transaction.set_rollback(True)
+        return response
+
+    def _bulk(self, request, rows, upsert, preview):
+        from .reprice import UPSERT_FIELDS, apply_changes, plan_json
 
         # Справочники и занятые названия — одним запросом на всю пачку, а не на
         # каждую строку. Регистр сводится в Python: в SQLite `iexact` не
@@ -453,6 +465,25 @@ class MaterialViewSet(viewsets.ModelViewSet):
             "types": build_ref_index(MaterialType.objects.all()),
             "sites": build_ref_index(ProductionSite.objects.all()),
         }
+        # Неизвестное производство (RU-N11, перепроверка 10.10): одна ячейка
+        # «Лазер» отклоняла всю пачку, и надо было идти в справочник, заводить
+        # его и вставлять заново. Теперь сервер называет, чего нет
+        # (`missing_sites`), сетка предлагает «создать для всех строк», и
+        # повтор с `create_sites` заводит справочник в той же транзакции.
+        missing = {}
+        for row in rows:
+            text = str((row or {}).get("production") or "").strip() if isinstance(row, dict) else ""
+            if text and text.casefold() not in context["sites"]:
+                missing.setdefault(text.casefold(), text)
+        confirmed = {str(n).strip().casefold() for n in (request.data.get("create_sites") or []) if str(n).strip()}
+        created_sites = []
+        for key, name in missing.items():
+            if key in confirmed:
+                site = ProductionSite.objects.create(code=ProductionSite.make_code(name), name=name[:80])
+                context["sites"][key] = site
+                context["sites"][str(site.pk)] = site
+                created_sites.append(site.name)
+        missing_sites = [name for key, name in missing.items() if key not in confirmed]
         taken = {m.name.strip().casefold(): m for m in Material.objects.all()}
 
         cleaned, updates, unchanged, errors, seen = [], [], 0, [], set()
@@ -498,7 +529,10 @@ class MaterialViewSet(viewsets.ModelViewSet):
             errors.append({"row": index, "fields": {"name": [message]}})
 
         if errors:
-            return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
+            body = {"errors": errors}
+            if missing_sites:
+                body["missing_sites"] = missing_sites
+            return Response(body, status=status.HTTP_400_BAD_REQUEST)
 
         if preview:
             return Response({
@@ -506,11 +540,14 @@ class MaterialViewSet(viewsets.ModelViewSet):
                 "create": [d["name"] for d in cleaned],
                 "update": plan_json(updates),
                 "unchanged": unchanged,
+                "create_sites": created_sites,
             })
 
-        with transaction.atomic():
-            created = [Material.objects.create(**data) for data in cleaned]
-            updated = apply_changes(updates, request.user, why="обновление пачкой") if updates else 0
+        created = [Material.objects.create(**data) for data in cleaned]
+        updated = apply_changes(updates, request.user, why="обновление пачкой") if updates else 0
+        for name in created_sites:
+            AuditLog.record(request.user, f"Каталог: из «Ввести пачкой» заведено производство «{name}»",
+                            kind="stock")
         if created:
             AuditLog.record(request.user, f"Каталог пополнен пачкой: {len(created)} материалов")
         if updated:
@@ -520,6 +557,7 @@ class MaterialViewSet(viewsets.ModelViewSet):
                 "created": len(created),
                 "updated": updated,
                 "unchanged": unchanged,
+                "created_sites": created_sites,
                 "materials": MaterialSerializer(
                     created, many=True, context={"request": request}
                 ).data,
@@ -1036,11 +1074,43 @@ class MaterialMonthOpeningViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        old = MaterialMonthOpening.objects.filter(
+            material=data["material"], year=data["year"], month=data["month"],
+        ).values_list("quantity", flat=True).first()
         row, _created = MaterialMonthOpening.objects.update_or_create(
             material=data["material"], year=data["year"], month=data["month"],
             defaults={"quantity": data["quantity"], "updated_by": request.user},
         )
+        self._journal(request.user, row, old, row.quantity)
         return Response(self.get_serializer(row).data, status=status.HTTP_200_OK)
+
+    def perform_update(self, serializer):
+        old = serializer.instance.quantity
+        row = serializer.save(updated_by=self.request.user)
+        self._journal(self.request.user, row, old, row.quantity)
+
+    def perform_destroy(self, instance):
+        self._journal(self.request.user, instance, instance.quantity, None)
+        instance.delete()
+
+    @staticmethod
+    def _journal(user, row, old, new):
+        """Журнал действий «было → стало» (XL-07, перепроверка 10.10): остаток
+        на начало месяца — ручная цифра складского листа, и её правка меняла
+        конец месяца молча, без следа, кто и когда."""
+        if old is not None and new is not None and Decimal(old) == Decimal(new):
+            return
+
+        def n(value):
+            if value is None:
+                return "—"
+            return format(Decimal(value).normalize(), "f").replace(".", ",")
+
+        AuditLog.record(
+            user,
+            f"Склад: остаток на начало {row.month:02d}.{row.year} «{row.material.name}»: {n(old)} → {n(new)}",
+            kind="stock",
+        )
 
 
 class MaterialTypeViewSet(viewsets.ModelViewSet):
@@ -1110,6 +1180,19 @@ class ProductionSiteViewSet(viewsets.ModelViewSet):
 
 def _truthy(value) -> bool:
     return str(value).lower() in ("1", "true", "yes", "on")
+
+
+def _supply_error(exc):
+    """Ошибка денег поставщика → ответ. Курс оплаты далеко от курса накладной
+    (RU-N18) — 409 с подтверждением, как предупреждения кассы; остальное — 400."""
+    from .supplier_ledger import RateNeedsConfirmation
+
+    if isinstance(exc, RateNeedsConfirmation):
+        return Response(
+            {"detail": str(exc), "needs_confirmation": True, "code": exc.code},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 def _day_or_400(raw, what="Дата"):
@@ -1303,9 +1386,10 @@ class SupplierPaymentViewSet(viewsets.ModelViewSet):
                 supply=supply, supplier=supplier, amount=data.get("amount"),
                 account=data.get("account"), paid_on=paid_on, rate=data.get("rate"),
                 note=str(data.get("note") or "")[:255], user=request.user,
+                confirm_rate=_truthy(data.get("confirm_rate")),
             )
         except SupplyError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            return _supply_error(exc)
         AuditLog.record(request.user, "Платёж поставщику: " + _payment_text(payment))
         payment = self.get_queryset().get(pk=payment.pk)
         return Response(self.get_serializer(payment).data, status=status.HTTP_201_CREATED)
@@ -1606,10 +1690,12 @@ class SupplyViewSet(viewsets.ModelViewSet):
             left = pay_supply(
                 supply, amount, request.data.get("account"), paid_on=paid_on, user=request.user,
                 rate=request.data.get("rate"), note=str(request.data.get("note") or "")[:255],
+                confirm_rate=_truthy(request.data.get("confirm_rate")),
             )
-        except (SupplyError, ArithmeticError, ValueError) as e:
-            text = str(e) if isinstance(e, SupplyError) else "Некорректная сумма."
-            return Response({"detail": text}, status=status.HTTP_400_BAD_REQUEST)
+        except SupplyError as e:
+            return _supply_error(e)
+        except (ArithmeticError, ValueError):
+            return Response({"detail": "Некорректная сумма."}, status=status.HTTP_400_BAD_REQUEST)
         AuditLog.record(
             request.user,
             f"Оплата по накладной {supply.number or f'#{supply.pk}'}: {amount} {supply.currency}, "
@@ -1643,7 +1729,7 @@ class SupplyViewSet(viewsets.ModelViewSet):
         what = "; ".join(l.label for l in ret.lines.all())
         head = (
             f"Сумма накладной {before[0]} → {fresh.total_cost}" if ret.in_place else
-            f"Накладная закрытого месяца не изменена, закуп {ret.returned_on:%d.%m.%Y} −{ret.amount} сом"
+            f"Накладная не изменена (как в бумаге), закуп {ret.returned_on:%d.%m.%Y} −{ret.amount} сом"
         )
         AuditLog.record(
             request.user,

@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 
 from django.db import transaction
@@ -221,24 +222,18 @@ def _staff_rate_floor(item, percent):
     None — границы нет (выключена, чужой материал или в каталоге ставки нет)."""
     from decimal import ROUND_CEILING
 
-    from services.pricing import resolve_rate
+    from .sale_service import catalogue_work_rate
 
-    service = item.get("service")
-    if not percent or percent <= 0 or service is None or item.get("own_material"):
+    if not percent or percent <= 0:
         return None
-    if service.uses_free_measure:
-        reference = {
-            "METER": service.rate_per_pm, "PIECE": service.rate_per_piece,
-        }.get(item.get("mode"), service.rate_flat)
-    elif service.uses_area:
-        reference = resolve_rate(service, item.get("material")).rate
-    elif service.uses_pieces:
-        reference = service.rate_per_piece
-    else:
-        reference = service.base_price
-    if not reference or reference <= 0:
+    # Ставка за один проход: вписанную складовщиком сравниваем до проходов.
+    reference = catalogue_work_rate(
+        item.get("service"), mode=item.get("mode"), material=item.get("material"),
+        own_material=bool(item.get("own_material")),
+    )
+    if reference is None:
         return None
-    return (Decimal(reference) * percent / Decimal("100")).quantize(
+    return (reference * percent / Decimal("100")).quantize(
         Decimal("0.01"), rounding=ROUND_CEILING
     )
 
@@ -315,6 +310,38 @@ def _search_number(raw: str):
     return query if query.isdigit() else None
 
 
+_SIZE_SPLIT = re.compile(r"[x×х*]")  # латинская x, знак ×, кириллическая х, звёздочка
+
+
+def _search_sizes(raw: str):
+    """Размеры из запроса поиска, метры (XL-10): «0.33» и «0,33» — метры,
+    «330» — миллиметры (до пяти цифр), «330×370» — пара ширина × длина.
+    None — запрос не похож на размеры."""
+    query = _normalize_query(raw).lower().replace(" ", "")
+    parts = _SIZE_SPLIT.split(query)
+    if not query or len(parts) > 2:
+        return None
+    out = []
+    for part in parts:
+        if re.fullmatch(r"\d{1,5}", part):
+            out.append(Decimal(part) / 1000)
+        elif re.fullmatch(r"\d{1,2}[.,]\d{1,3}", part):
+            out.append(Decimal(part.replace(",", ".")))
+        else:
+            return None
+    return out
+
+
+def _size_match(sizes) -> Q:
+    """Чеки, у которых есть строка такой ширины или длины (пара — в любом порядке)."""
+    if len(sizes) == 1:
+        cond = Q(width=sizes[0]) | Q(length=sizes[0])
+    else:
+        a, b = sizes
+        cond = (Q(width=a) & Q(length=b)) | (Q(width=b) & Q(length=a))
+    return Q(pk__in=TransactionItem.objects.filter(cond).values("receipt_id"))
+
+
 # Столько цифр и меньше — это номер чека, а не кусок телефона: телефон короче
 # четырёх цифр никто не набирает, зато «5» раньше находило 242 заказа из 280
 # (любой номер, телефон или название с пятёркой внутри).
@@ -345,16 +372,30 @@ class ReceiptSearchFilter(SearchFilter):
     - «№100», «#100», « 100 » — то же, что «100»;
     - до трёх цифр — ТОЧНЫЙ номер чека;
     - от четырёх цифр — точный номер ИЛИ вхождение в телефон клиента;
-    - всё остальное (слова) — как раньше: название, клиент, компания, телефон.
+    - всё остальное (слова) — как раньше: название, клиент, компания, телефон;
+    - размеры строк (XL-10): «0.33»/«0,33» — метры, «330» — миллиметры (вместе
+      с номером: №330 — первым), «330×370» — деталь ширина × длина.
     """
 
     def filter_queryset(self, request, queryset, view):
         raw = request.query_params.get(self.search_param, "")
         digits = _search_number(raw)
+        sizes = _search_sizes(raw)
         if digits is None:
+            if sizes:
+                # «0,33» в названии заказа или материала тоже находится.
+                text = _normalize_query(raw)
+                return queryset.filter(
+                    _size_match(sizes)
+                    | Q(title__icontains=text)
+                    | Q(pk__in=TransactionItem.objects.filter(
+                        material__name__icontains=text).values("receipt_id"))
+                )
             return super().filter_queryset(request, queryset, view)
         number = int(digits)
         exact = Q(order_number=number) if number < 2**31 else Q(pk__in=[])
+        if sizes:
+            exact |= _size_match(sizes)
         if len(digits) <= SHORT_NUMBER_DIGITS:
             return queryset.filter(exact)
         return queryset.filter(exact | Q(client__phone__icontains=digits))
@@ -971,7 +1012,8 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                     payload = self._preview_payload(receipt, request)
                     transaction.set_rollback(True)
         except InsufficientStock as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            # `code` — касса по нему закрывает «Оформить», пока нехватка видна (RU-N20).
+            return Response({"detail": str(e), "code": "stock_short"}, status=status.HTTP_400_BAD_REQUEST)
         except OrderRejected as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except NeedsAdmin as e:
@@ -1353,6 +1395,22 @@ class ReceiptViewSet(viewsets.ModelViewSet):
                 {"detail": "Не передано ни одной правки."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if request.data.get("dry_run"):
+            # Предпросмотр правки (S3): тот же `update_receipt_items` в
+            # откатываемой транзакции — окно показывает итог и количества ровно
+            # такими, какими их сохранит сервер (раньше окно считало само и
+            # ошибалось: ≈1 155 при сохранённых 1 125).
+            try:
+                with transaction.atomic():
+                    update_receipt_items(receipt, changes, user=request.user)
+                    fresh = self.get_queryset().get(pk=receipt.pk)
+                    payload = dict(ReceiptSerializer(fresh, context={"request": request}).data)
+                    payload["dry_run"] = True
+                    payload["warnings"] = strip_cost(getattr(receipt, "cost_warnings", []), request.user)
+                    transaction.set_rollback(True)
+            except (ItemEditRejected, InsufficientStock) as e:
+                return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(payload)
         before = receipt_summary(receipt)
         executors_before = _line_executors(receipt)
         try:

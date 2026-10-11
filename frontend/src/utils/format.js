@@ -54,6 +54,13 @@ export function formatMoney(n, { fraction = 0 } = {}) {
   return `${formatNumber(n, { min: fraction, max: fraction })}${NBSP}сом`;
 }
 
+/** Деньги «как в акте» (RU-N8): целые — «7 000 сом», с тыйынами — «7 000,50 сом».
+ *  Для сумм, которые вводят руками с копейками (входящие остатки, авансы, долг). */
+export function formatMoneyExact(n) {
+  const cents = Math.round(toNumber(n) * 100) % 100;
+  return formatMoney(n, { fraction: cents ? 2 : 0 });
+}
+
 // «2026-10-07» без времени парсится как UTC и в часовых поясах западнее
 // Гринвича показывал бы вчерашний день — собираем из частей, локально.
 function toDate(d) {

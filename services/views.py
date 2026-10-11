@@ -76,6 +76,7 @@ SETTINGS_LABELS = {
     "confirm_line_total": "порог подтверждения суммы строки",
     "staff_line_cap": "потолок строки для складовщика",
     "staff_min_price_percent": "нижняя граница цены складовщика, %",
+    "staff_price_warn_percent": "предупреждать о цене складовщика ниже, %",
     "debt_warn_days": "предупреждать о долге старше, дней",
 }
 

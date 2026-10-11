@@ -102,10 +102,20 @@ def matching_client_ids(search: str) -> list:
 
 
 def _num(value) -> str:
-    """Число для журнала: без хвоста «.00»; пусто — «не задан»."""
+    """Число для журнала: без хвоста «.00», запятая вместо точки; пусто — «не задан»."""
     if value is None:
         return "не задан"
-    return f"{Decimal(value).normalize():f}"
+    return f"{Decimal(value).normalize():f}".replace(".", ",")
+
+
+def _money(value) -> str:
+    """Сумма для журнала (RU-N22, D-189): «12 000,50» — разряды, запятая, без «,00»;
+    пусто — «не задан». Единицы («сом») пишет сам текст записи."""
+    if value is None:
+        return "не задан"
+    from finance.auditing import fmt
+
+    return fmt(Decimal(str(value)))
 
 
 def _int_param(value):
@@ -385,7 +395,7 @@ class ClientViewSet(viewsets.ModelViewSet):
             AuditLog.record(
                 who,
                 f"Изменён лимит долга клиента «{name}»: "
-                f"{_num(before['limit'])} → {_num(client.credit_limit)}",
+                f"{_money(before['limit'])} → {_money(client.credit_limit)}" + (" сом" if client.credit_limit is not None else ""),
             )
         if phone_key(client.phone) != phone_key(before["phone"]):
             AuditLog.record(who, f"Изменён телефон клиента «{name}»: {before['phone']} → {client.phone}")
@@ -546,7 +556,7 @@ class ClientViewSet(viewsets.ModelViewSet):
                 AuditLog.record(
                     request.user,
                     f"Выплачен реферальный бонус клиенту «{referrer.display_name}» за "
-                    f"«{referred.display_name}»: {_num(value)} сом",
+                    f"«{referred.display_name}»: {_money(value)} сом",
                 )
             else:
                 row = unpay_bonus(referrer, referred)
@@ -659,9 +669,13 @@ class ClientViewSet(viewsets.ModelViewSet):
         # Лишний ноль (RM-N5, D-164): «37 000 при долге 3 700» — сначала вопрос,
         # как у оплаты одного заказа (`/pay/`). До ключа повтора: вопрос — не
         # операция, подтверждение уйдёт новой попыткой.
+        from .amounts import AmountRejected, check_amount
+
         try:
-            entered = parse_amount(request.data.get("amount"))
-        except PaymentRejected as e:
+            # Потолок суммы и тыйыны (RM-N9): телефон в поле суммы или «0,001»
+            # — отказ, а не долг на 996 млрд и не тыйын, которого не бывает.
+            entered = check_amount(parse_amount(request.data.get("amount")))
+        except (PaymentRejected, AmountRejected) as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         if (
             entered is not None and not writing_off and not offset_only
@@ -748,12 +762,15 @@ class ClientViewSet(viewsets.ModelViewSet):
         numbers = ", ".join(ordered)
         who = "" if is_admin else f" (принял складовщик {request.user.username})"
         written_off = str(method or "").upper() == "WRITE_OFF"
-        what = f"списан долг {paid} сом" if written_off else f"+{paid} сом"
+        what = f"списан долг {_money(paid)} сом" if written_off else f"+{_money(paid)} сом"
         reason = str(request.data.get("note") or "").strip()
         if written_off and reason:
             what += f" — {reason[:120]}"
         if offset_total:
-            what += f", зачтено {offset_total} сом (сдача {via_change}, аванс {via_advance})"
+            what += (
+                f", зачтено {_money(offset_total)} сом (сдача {_money(via_change)}, "
+                f"аванс {_money(via_advance)})"
+            )
         AuditLog.record(
             request.user,
             f"{'Списание долга клиента' if written_off else 'Общая выплата клиента'} "
@@ -878,13 +895,13 @@ class ClientViewSet(viewsets.ModelViewSet):
         method_display = dict(ClientAdvance.Method.choices).get(
             str(request.data.get("method") or "CASH").upper(), ""
         )
-        what = f"Принят аванс от клиента «{client.display_name}»: {accepted} сом ({method_display})"
+        what = f"Принят аванс от клиента «{client.display_name}»: {_money(accepted)} сом ({method_display})"
         if to_debt:
             numbers = (["входящий долг"] if result["opening"] else []) + [
                 f"№{r.order_number}" for r, _a in result["receipts"]
             ]
-            what += f", из них в долг {to_debt} сом ({', '.join(numbers)}), авансом " + (
-                f"{advance.amount} сом" if advance else "0 сом"
+            what += f", из них в долг {_money(to_debt)} сом ({', '.join(numbers)}), авансом " + (
+                f"{_money(advance.amount)} сом" if advance else "0 сом"
             )
         AuditLog.record(request.user, what)
 
@@ -935,7 +952,7 @@ class ClientViewSet(viewsets.ModelViewSet):
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         AuditLog.record(
             request.user,
-            f"Отменён аванс клиента «{client.display_name}»: {advance.amount} сом",
+            f"Отменён аванс клиента «{client.display_name}»: {_money(advance.amount)} сом",
         )
         advance.refresh_from_db()
         return Response(advance_row(advance))
@@ -1148,8 +1165,8 @@ class OpeningBalanceViewSet(viewsets.ViewSet):
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         AuditLog.record(
             request.user,
-            f"Проведены входящие остатки клиентов на {as_of:%d.%m.%Y}: долг {result['debt']} сом, "
-            f"аванс {result['advance']} сом, строк {len(result['balances'])}, "
+            f"Проведены входящие остатки клиентов на {as_of:%d.%m.%Y}: долг {_money(result['debt'])} сом, "
+            f"аванс {_money(result['advance'])} сом, строк {len(result['balances'])}, "
             f"новых клиентов {result['created_clients']} (партия {result['batch']})",
             kind="client",
         )
@@ -1173,7 +1190,7 @@ class OpeningBalanceViewSet(viewsets.ViewSet):
         AuditLog.record(
             request.user,
             f"Отменён входящий {'долг' if balance.kind == 'DEBT' else 'аванс'} клиента "
-            f"«{balance.client.display_name}» на {balance.as_of:%d.%m.%Y}: {balance.amount} сом",
+            f"«{balance.client.display_name}» на {balance.as_of:%d.%m.%Y}: {_money(balance.amount)} сом",
             kind="client",
         )
         return Response(_plain(balances_payload(OpeningBalance.objects.filter(pk=balance.pk))[0]))
@@ -1206,7 +1223,7 @@ class OpeningBalanceViewSet(viewsets.ViewSet):
         AuditLog.record(
             request.user,
             f"Клиент «{balance.client.display_name}»: отмена {what} входящего долга от "
-            f"{payment.paid_on:%d.%m.%Y} — −{payment.amount} сом ({payment.get_method_display()})"
+            f"{payment.paid_on:%d.%m.%Y} — −{_money(payment.amount)} сом ({payment.get_method_display()})"
             + (f" ({reason})" if reason else ""),
             kind="client",
         )
@@ -1255,7 +1272,7 @@ class ClientPriceViewSet(viewsets.ModelViewSet):
         cp = serializer.save(updated_by=self.request.user)
         AuditLog.record(
             self.request.user,
-            f"Договорная цена клиента «{cp.client.display_name}»: {self._what(cp)} — {cp.price} сом",
+            f"Договорная цена клиента «{cp.client.display_name}»: {self._what(cp)} — {_money(cp.price)} сом",
             kind="price",
         )
 
@@ -1266,7 +1283,7 @@ class ClientPriceViewSet(viewsets.ModelViewSet):
             AuditLog.record(
                 self.request.user,
                 f"Изменена договорная цена клиента «{cp.client.display_name}»: {self._what(cp)} — "
-                f"{was} → {cp.price} сом",
+                f"{_money(was)} → {_money(cp.price)} сом",
                 kind="price",
             )
 
@@ -1274,7 +1291,7 @@ class ClientPriceViewSet(viewsets.ModelViewSet):
         AuditLog.record(
             self.request.user,
             f"Удалена договорная цена клиента «{instance.client.display_name}»: "
-            f"{self._what(instance)} — {instance.price} сом",
+            f"{self._what(instance)} — {_money(instance.price)} сом",
             kind="price",
         )
         instance.delete()

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
@@ -83,6 +83,42 @@ export default function ReceiptCard({ receipt, onClose, onChange }) {
     !noMoreWork &&
     items.some((i) => !i.is_returned && Number(i.issued_qty || 0) < Number(i.quantity));
 
+  // Действия окна (RU-N26): на телефоне восемь кнопок занимали пол-экрана.
+  // На виду — до трёх главных (принять оплату, следующий шаг выдачи, печать),
+  // остальные — в меню «…». Порядок — по частоте в цеху.
+  const fulfil = !readOnly && receipt.has_service && !noMoreWork;
+  const primary = [
+    hasDebt && !readOnly && live && { key: "pay", label: t("receipts.acceptPayment"), onClick: () => setPaying(true) },
+    fulfil && receipt.fulfillment_status === "PROCESSING" &&
+      { key: "ready", className: "secondary", label: t("receipts.markReady"), onClick: () => setFulfillment("READY") },
+    canIssue && { key: "issue", className: "secondary", label: t("issue.btn"), onClick: () => setIssuing(true) },
+    fulfil && ["READY", "PARTIALLY_ISSUED"].includes(receipt.fulfillment_status) &&
+      { key: "issued", className: "secondary", label: t("receipts.markIssued"), onClick: () => setFulfillment("ISSUED") },
+    { key: "print", className: "secondary", label: t("print.print"), onClick: () => setPrintKind("CHECK") },
+  ].filter(Boolean);
+  const mainActions = primary.slice(0, 3);
+  const moreActions = [
+    ...primary.slice(3),
+    canAdd && { key: "add", className: "secondary", label: `+ ${t("receipts.addBtn")}`, onClick: () => setAdding(true) },
+    { key: "workorder", className: "secondary", label: t("workOrder.btn"), onClick: () => setPrintKind("WORKORDER") },
+    // Откат прямо в окне чека: промах по «Готово» замечают чаще всего здесь.
+    fulfil && receipt.fulfillment_status !== "PROCESSING" && {
+      key: "rollback", className: "secondary", label: `← ${t("receipts.markProcessing")}`,
+      title: t("receipts.rollbackTitle"), onClick: () => setFulfillment("PROCESSING"),
+    },
+    canRefund && { key: "refund", className: "danger", label: t("receipts.refund"), onClick: () => setRefunding(true) },
+  ].filter(Boolean);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef(null);
+  useEffect(() => {
+    if (!moreOpen) return undefined;
+    const close = (e) => {
+      if (moreRef.current && !moreRef.current.contains(e.target)) setMoreOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [moreOpen]);
+
   const methodLabel = (m) => (["CHANGE", "WRITE_OFF"].includes(m) ? t(`receiptsV2.method${m}`) : t(`checkout.${String(m).toLowerCase()}`));
 
   async function run(fn) {
@@ -160,49 +196,52 @@ export default function ReceiptCard({ receipt, onClose, onChange }) {
         onClose={onClose}
         footer={
           <>
-            {hasDebt && !readOnly && live && (
-              <button onClick={() => setPaying(true)} disabled={busy}>{t("receipts.acceptPayment")}</button>
-            )}
-            {canAdd && (
-              <button className="secondary" onClick={() => setAdding(true)} disabled={busy}>
-                + {t("receipts.addBtn")}
+            {mainActions.map((a) => (
+              <button key={a.key} className={a.className} onClick={a.onClick} disabled={busy} title={a.title}>
+                {a.label}
               </button>
-            )}
-            {!readOnly && receipt.has_service && !noMoreWork && receipt.fulfillment_status === "PROCESSING" && (
-              <button className="secondary" onClick={() => setFulfillment("READY")} disabled={busy}>
-                {t("receipts.markReady")}
-              </button>
-            )}
-            {canIssue && (
-              <button className="secondary" onClick={() => setIssuing(true)} disabled={busy}>
-                {t("issue.btn")}
-              </button>
-            )}
-            {!readOnly && receipt.has_service && !noMoreWork &&
-              ["READY", "PARTIALLY_ISSUED"].includes(receipt.fulfillment_status) && (
-                <button className="secondary" onClick={() => setFulfillment("ISSUED")} disabled={busy}>
-                  {t("receipts.markIssued")}
+            ))}
+            {moreActions.length > 0 && (
+              <div className="rc-more" ref={moreRef}>
+                <button
+                  type="button"
+                  className="secondary"
+                  aria-haspopup="menu"
+                  aria-expanded={moreOpen}
+                  aria-label={t("receipts.moreActions")}
+                  title={t("receipts.moreActions")}
+                  onClick={() => setMoreOpen((v) => !v)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape" && moreOpen) {
+                      e.stopPropagation();
+                      setMoreOpen(false);
+                    }
+                  }}
+                >
+                  …
                 </button>
-              )}
-            {/* Откат прямо в окне чека: сюда заходят разбираться с заказом, а
-                промах по «Готово» замечают чаще всего именно здесь. */}
-            {!readOnly && receipt.has_service && !noMoreWork && receipt.fulfillment_status !== "PROCESSING" && (
-              <button
-                className="secondary"
-                onClick={() => setFulfillment("PROCESSING")}
-                disabled={busy}
-                title={t("receipts.rollbackTitle")}
-              >
-                ← {t("receipts.markProcessing")}
-              </button>
+                {moreOpen && (
+                  <div className="rc-more-menu" role="menu">
+                    {moreActions.map((a) => (
+                      <button
+                        key={a.key}
+                        type="button"
+                        role="menuitem"
+                        className={a.className === "danger" ? "ghost row-danger" : "ghost"}
+                        disabled={busy}
+                        title={a.title}
+                        onClick={() => {
+                          setMoreOpen(false);
+                          a.onClick();
+                        }}
+                      >
+                        {a.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
-            {canRefund && (
-              <button className="danger" onClick={() => setRefunding(true)} disabled={busy}>
-                {t("receipts.refund")}
-              </button>
-            )}
-            <button className="secondary" onClick={() => setPrintKind("CHECK")}>{t("print.print")}</button>
-            <button className="secondary" onClick={() => setPrintKind("WORKORDER")}>{t("workOrder.btn")}</button>
           </>
         }
       >

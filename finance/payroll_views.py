@@ -125,6 +125,32 @@ class PayrollPaymentViewSet(viewsets.ModelViewSet):
         month = parse_month(self.request.query_params.get("month"))
         return qs.filter(period=month) if month else qs
 
+    def create(self, request, *args, **kwargs):
+        """Выплата, похожая на ошибку (больше «к выдаче», за будущий месяц,
+        отключённому), — сначала вопрос: 409 `needs_confirmation` со списком
+        `warnings`; повтор с `confirm_warnings: true` проводит (RF-N3, D-185)."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        ensure_open(data.get("paid_on") or timezone.localdate(), "Записать выплату зарплаты этой датой")
+        confirmed = str(request.data.get("confirm_warnings", "")).lower() in ("1", "true", "yes", "on")
+        if not confirmed:
+            warnings = payroll.payment_warnings(
+                data["employee"], kind=data["kind"], amount=data["amount"],
+                paid_on=data.get("paid_on"), period=data.get("period"),
+            )
+            if warnings:
+                return Response(
+                    {
+                        "detail": " ".join(w["message"] for w in warnings) + " Всё верно?",
+                        "needs_confirmation": True,
+                        "warnings": warnings,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+        self.perform_create(serializer)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
     def perform_create(self, serializer):
         data = serializer.validated_data
         payment = payroll.pay(

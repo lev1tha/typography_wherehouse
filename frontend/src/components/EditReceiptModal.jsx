@@ -10,6 +10,7 @@ import { useUI } from "./UIProvider.jsx";
 import { fieldErrors } from "../utils/fieldErrors.js";
 import { isCutLine, itemTitle } from "../utils/itemLabel.js";
 import { formatMoney, formatNumber } from "../utils/format.js";
+import { isCanceled, useLatest } from "../utils/latest.js";
 import { applyRules, itemRules } from "../utils/pricingRules.js";
 
 const dayOf = (iso) => (iso ? new Date(iso).toLocaleDateString("sv-SE") : "");
@@ -25,6 +26,11 @@ const today = () => new Date().toLocaleDateString("sv-SE");
 // число деталей, проходы и — у резки — станок. Сервер пересчитывает количество
 // и цену по правилам заказа сам, поэтому шлём только то, что поменяли: ушедшее
 // «как было» количество перебило бы пересчёт по новым размерам.
+//
+// Итог и количества до сохранения (S3) — у сервера: та же правка в
+// откатываемой транзакции (`edit-items` с `dry_run`). Своя формула окна
+// расходилась с сохранённым (≈1 155 при 1 125). Пог.м резки с деталями правятся
+// не количеством, а «пог.м на деталь»: количество — оно × детали.
 const num = (v) => Number(v) || 0;
 const trim = (v) => String(+Number(v).toFixed(4));
 const trim3 = (v) => String(+Number(v).toFixed(3));
@@ -83,6 +89,8 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
         rollArea: !!i.roll_area,
         work: i.type === "SERVICE",
         cut: isCutLine(i),
+        // Длина реза одной детали: пог.м строки ÷ детали.
+        runM: trim3(Number(i.quantity) / (i.parts_count || 1)),
         width: i.width != null ? trim3(i.width) : "",
         length: i.length != null ? trim3(i.length) : "",
         parts: String(i.parts_count || 1),
@@ -114,6 +122,7 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
         p: String(+Number(basePrice(i)).toFixed(2)),
         width: i.width != null ? trim3(i.width) : "",
         length: i.length != null ? trim3(i.length) : "",
+        runM: trim3(Number(i.quantity) / (i.parts_count || 1)),
         parts: String(i.parts_count || 1),
         passes: String(i.passes || 1),
         machine: MACHINES.includes(i.machine) ? i.machine : "",
@@ -127,22 +136,21 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
       !!o &&
       l.dims &&
       (l.width !== o.width || l.length !== o.length || l.parts !== o.parts ||
-        (l.work && l.passes !== o.passes) || (l.cut && l.machine !== o.machine))
+        (l.work && l.passes !== o.passes) || (l.cut && (l.machine !== o.machine || l.runM !== o.runM)))
     );
   };
 
-  // Количество и цена строки ПОСЛЕ правки — для итога в окне. Формулы те же, что
-  // у сервера: рез масштабируется по числу деталей, площадь — ширина × длина ×
-  // детали, проходы умножают ставку. Станок меняет ставку — её знает только
-  // сервер, поэтому итог при смене размеров помечен как приблизительный.
+  // Количество и цена строки ПОСЛЕ правки — пока не пришёл ответ сервера. Рез с
+  // размерами — пог.м на деталь × детали, площадь — ширина × длина × детали,
+  // проходы умножают ставку. Станок меняет ставку — её знает только сервер.
   function afterEdit(l) {
     const o = orig.get(l.id);
     let q = num(l.quantity);
     let p = num(l.price);
+    if (l.cut && l.dims) q = Math.round(num(l.runM) * int(l.parts) * 1000 + 1e-7) / 1000;
     if (o && dimsTouched(l)) {
-      if (l.quantity === o.q) {
-        if (l.cut) q = (q / int(o.parts)) * int(l.parts);
-        else if (num(l.width) > 0 && num(l.length) > 0) {
+      if (l.quantity === o.q && !l.cut) {
+        if (num(l.width) > 0 && num(l.length) > 0) {
           q = Math.round(num(l.width) * num(l.length) * int(l.parts) * 1000 + 1e-7) / 1000;
         }
       }
@@ -156,13 +164,56 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
     return [q, p];
   }
 
-  const newTotal = lines.reduce((s, l) => {
+  const localTotal = lines.reduce((s, l) => {
     if (l.remove) return s;
     const [q, p] = afterEdit(l);
     // Строка — вверх до сома, как на сервере (line_total), по своим правилам.
     return s + applyRules(q * p, l.rules || {});
   }, 0);
-  const approx = lines.some((l) => !l.remove && dimsTouched(l));
+
+  // Предпросмотр правки на сервере (S3): с задержкой, последний запрос побеждает.
+  const editItems = changedLines();
+  const previewKey = editItems.length ? JSON.stringify(editItems) : "";
+  const [preview, setPreview] = useState(null); // {key, data} | {key, error}
+  const nextPreview = useLatest();
+  useEffect(() => {
+    if (!previewKey) {
+      nextPreview();
+      setPreview(null);
+      return undefined;
+    }
+    const id = setTimeout(() => {
+      api
+        .post(`/sales/receipts/${receipt.id}/edit-items/`, { items: JSON.parse(previewKey), dry_run: true },
+          { signal: nextPreview() })
+        .then((r) => setPreview({ key: previewKey, data: r.data }))
+        .catch((e) => {
+          if (isCanceled(e)) return;
+          setPreview({ key: previewKey, error: apiError(e, t("common.error")) });
+        });
+    }, 350);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewKey, receipt.id]);
+  const fresh = preview && preview.key === previewKey && preview.data ? preview.data : null;
+  const previewError = preview && preview.key === previewKey ? preview.error : "";
+  // Количество строки так, как его сохранит сервер (или оценка окна, пока ждём).
+  const serverQty = (id) => {
+    const it = fresh?.items?.find((x) => x.id === id);
+    return it ? String(+Number(it.quantity).toFixed(4)) : null;
+  };
+  const computedQty = (l) => serverQty(l.id) ?? String(afterEdit(l)[0]);
+  // Поле количества показывает пересчёт, пока его не правили руками; у реза с
+  // размерами и изделия из рулона количество только расчётное.
+  const shownQty = (l) => {
+    if (l.rollArea || (l.cut && l.dims)) return computedQty(l);
+    const o = orig.get(l.id);
+    return o && l.quantity === o.q ? computedQty(l) : l.quantity;
+  };
+  const newTotal = fresh
+    ? Math.round((Number(fresh.total_price) || 0) - (Number(fresh.refunded_amount) || 0))
+    : localTotal;
+  const approx = !fresh && lines.some((l) => !l.remove && dimsTouched(l));
   // Сравниваем с тем, что клиенту осталось платить: итог чека держит и
   // возвращённые строки (возврат уменьшает `refunded_amount`, а не итог), а в
   // окне их нет — иначе у чека с частичным возвратом старая сумма всегда
@@ -181,7 +232,8 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
         continue;
       }
       const change = { id: l.id };
-      if (!o || o.q !== l.quantity) {
+      // Пог.м резки с размерами — расчётные (пог.м на деталь × детали).
+      if ((!o || o.q !== l.quantity) && !(l.cut && l.dims)) {
         if (l.quantity !== "") change.quantity = num(l.quantity);
       }
       if (!o || o.p !== l.price) {
@@ -193,6 +245,7 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
         if (l.parts !== o.parts && l.parts !== "") change.parts_count = int(l.parts);
         if (l.work && l.passes !== o.passes && l.passes !== "") change.passes = int(l.passes);
         if (l.cut && l.machine !== o.machine && l.machine) change.machine = l.machine;
+        if (l.cut && l.runM !== o.runM && l.runM !== "") change.running_meters = num(l.runM);
       }
       if (l.work && o && l.executor !== o.executor) change.executor = l.executor ? Number(l.executor) : null;
       if (Object.keys(change).length > 1) out.push(change);
@@ -205,7 +258,7 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
     setErrors({});
     setFormError("");
     try {
-      const items = changedLines();
+      const items = editItems;
       let data = receipt;
       if (items.length) {
         ({ data } = await api.post(`/sales/receipts/${receipt.id}/edit-items/`, { items }));
@@ -302,8 +355,8 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
                     step="any"
                     min="0"
                     inputMode="decimal"
-                    value={l.rollArea ? String(afterEdit(l)[0]) : l.quantity}
-                    disabled={l.remove || l.rollArea}
+                    value={shownQty(l)}
+                    disabled={l.remove || l.rollArea || (l.cut && l.dims)}
                     onChange={(e) => setLine(l.id, { quantity: e.target.value })}
                   />
                 </Field>
@@ -370,6 +423,19 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
                       />
                     </Field>
                   )}
+                  {l.cut && (
+                    <Field style={{ margin: 0, width: 96 }} label={t("receiptsV2.editRunM")}>
+                      <input
+                        type="number"
+                        step="0.001"
+                        min="0"
+                        inputMode="decimal"
+                        value={l.runM}
+                        disabled={l.remove}
+                        onChange={(e) => setLine(l.id, { runM: e.target.value })}
+                      />
+                    </Field>
+                  )}
                   {l.work && (
                     <Field style={{ margin: 0, width: 84 }} label={t("receiptsV2.editPasses")}>
                       <input
@@ -431,8 +497,13 @@ export default function EditReceiptModal({ receipt, onClose, onSaved }) {
               <strong>{approx ? "≈ " : ""}{formatMoney(newTotal)}</strong>
             </span>
           </div>
-          {approx && (
+          {approx && !previewError && (
             <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("receiptsV2.editServerCalc")}</p>
+          )}
+          {previewError && (
+            <p className="callout" role="status" style={{ fontSize: 13, margin: "6px 0 0" }}>
+              <strong>{t("receiptsV2.editRejected")}</strong> {previewError}
+            </p>
           )}
           {newTotal < Math.round(Number(receipt.amount_paid) || 0) && (
             <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>

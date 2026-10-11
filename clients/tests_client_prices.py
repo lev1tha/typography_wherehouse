@@ -103,7 +103,7 @@ class ApiTests(ClientPriceCase):
         cp = ClientPrice.objects.get()
         r = self.client.patch(f"/api/clients/client-prices/{cp.id}/", {"price": "1800"}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
-        self.assertTrue(AuditLog.objects.filter(action__contains="2000.00 → 1800").exists())
+        self.assertTrue(AuditLog.objects.filter(action__contains="2 000 → 1 800 сом").exists())
         self.client.force_authenticate(self.store)
         self.assertEqual(self.client.get("/api/clients/client-prices/", {"client": self.agency.id}).status_code, 200)
         r = self.client.post("/api/clients/client-prices/",

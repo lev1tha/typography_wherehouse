@@ -30,7 +30,7 @@ class CloudeTokenObtainPairSerializer(TokenObtainPairSerializer):
             "is_admin": self.user.is_admin_role,
             "full_name": self.user.get_full_name(),
         }
-        AuditLog.record(self.user, "Вход в систему")
+        AuditLog.record(self.user, "Вход в систему", kind="login")
         return data
 
 

@@ -5,11 +5,16 @@ import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
-import { formatDate, formatMoney, formatNumber } from "../utils/format.js";
+import { formatDate, formatMoney, formatMoneyExact, formatNumber } from "../utils/format.js";
 import { useIdempotency } from "../utils/idempotency.js";
+import { money2, parseNumber } from "../utils/pasteTable.js";
 import Field from "./Field.jsx";
 
-const som = (n) => formatNumber(n);
+// Суммы с тыйынами, если они есть (RU-N8): «7 000,50», а не «7 001».
+const som = (n) => {
+  const cents = Math.round((Number(n) || 0) * 100) % 100;
+  return formatNumber(n, { min: cents ? 2 : 0, max: cents ? 2 : 0 });
+};
 const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, местная дата
 
 // Общая выплата: клиент приходит и отдаёт деньги «за всё», а не по одному чеку.
@@ -66,22 +71,24 @@ export default function BulkPayModal({ client, orders: initialOrders, onClose, o
   );
 
   const chosen = picked === null ? debtors : debtors.filter((o) => picked.includes(o.id));
-  const chosenDebt = chosen.reduce((s, o) => s + Math.round(Number(o.debt) || 0), 0);
+  const chosenDebt = money2(chosen.reduce((s, o) => s + (Number(o.debt) || 0), 0));
   // Пустая сумма = закрыть выбранные заказы целиком. Так не приходится вбивать
-  // цифру, которую система и так знает.
-  const entered = amount === "" ? chosenDebt : Math.round(Number(amount) || 0);
+  // цифру, которую система и так знает. Сумма — текстом (RU-N14): «5 000» и
+  // «5 000,50», как пишут и копируют из Excel.
+  const typed = amount.trim() === "" ? null : parseNumber(amount);
+  const entered = typed == null ? (amount.trim() === "" ? chosenDebt : 0) : typed;
   const valid = chosen.length > 0 && entered > 0;
-  const change = Math.max(0, entered - chosenDebt);
+  const change = money2(Math.max(0, entered - chosenDebt));
 
   // Как деньги разойдутся по заказам — показываем ДО отправки, чтобы не гадать,
   // какой заказ закроется, а какой останется частично оплаченным.
   const preview = useMemo(() => {
     let left = entered;
     return chosen.map((o) => {
-      const debt = Math.round(Number(o.debt) || 0);
-      const take = Math.max(0, Math.min(left, debt));
-      left -= take;
-      return { ...o, take, leftAfter: debt - take };
+      const debt = Number(o.debt) || 0;
+      const take = money2(Math.max(0, Math.min(left, debt)));
+      left = money2(left - take);
+      return { ...o, take, leftAfter: money2(debt - take) };
     });
   }, [chosen, entered]);
 
@@ -97,7 +104,7 @@ export default function BulkPayModal({ client, orders: initialOrders, onClose, o
     setBusy(true);
     const base = {
       // Сумму отправляем только если её ввели: пусто = «закрыть целиком».
-      ...(amount === "" ? {} : { amount: entered }),
+      ...(typed == null ? {} : { amount: String(typed) }),
       receipt_ids: chosen.map((o) => o.id),
       paid_on: paidOn,
       method,
@@ -210,18 +217,18 @@ export default function BulkPayModal({ client, orders: initialOrders, onClose, o
 
           <div className="crow">
             <span className="k">{t("clients.bulkPaySelectedDebt")}</span>
-            <strong style={{ color: "var(--danger-ink)" }}>{formatMoney(chosenDebt)}</strong>
+            <strong style={{ color: "var(--danger-ink)" }}>{formatMoneyExact(chosenDebt)}</strong>
           </div>
 
           <Field style={{ marginTop: 10 }} label={t("receipts.payAmount")}>
             {(a) => (
               <>
               <input {...a}
-              type="number"
-              min="0"
+              type="text"
+              inputMode="decimal"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              placeholder={String(chosenDebt)}
+              placeholder={som(chosenDebt)}
               autoFocus
             />
               <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>{t("clients.bulkPayAmountHint")}</p>
@@ -256,7 +263,7 @@ export default function BulkPayModal({ client, orders: initialOrders, onClose, o
                   погашенный заказ и висит там, пока её не отдадут. Раньше
                   остаток просто показывался числом и нигде не сохранялся. */}
               {t("checkout.change")}:{" "}
-              <strong style={{ color: "var(--accent-ink)" }}>{formatMoney(change)}</strong>
+              <strong style={{ color: "var(--accent-ink)" }}>{formatMoneyExact(change)}</strong>
               <div style={{ fontSize: 12 }}>{t("checkout.changeHint")}</div>
             </div>
           )}

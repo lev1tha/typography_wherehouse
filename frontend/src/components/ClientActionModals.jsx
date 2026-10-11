@@ -6,8 +6,9 @@ import { apiError } from "../api/errors.js";
 import Field from "./Field.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
-import { formatMoney } from "../utils/format.js";
+import { formatMoney, formatMoneyExact } from "../utils/format.js";
 import { useIdempotency } from "../utils/idempotency.js";
+import { parseNumber } from "../utils/pasteTable.js";
 
 const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, местная дата
 
@@ -15,6 +16,11 @@ const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD, ме�
 // Каждое — маленькая форма: сервер всё проверяет сам (права, закрытый период,
 // суммы), а окно показывает его ответ рядом с полем или тостом — «кнопка не
 // нажимается» из-за молчаливого 400 здесь невозможна.
+//
+// Сумма — текстовое поле (RU-N14): «5 000» и «5 000,50» так, как их пишут и
+// копируют из Excel; number-поле браузера пробел и запятую не принимает.
+// Разбор — тот же `parseNumber`, что во «Входящих остатках»; тыйыны и потолок
+// суммы проверяет сервер.
 
 /** Принять аванс без заказа: приход в кассу + сальдо в пользу клиента.
  *  У клиента есть долг — по умолчанию деньги сначала гасят его (D-165), авансом
@@ -34,12 +40,13 @@ export function AdvanceModal({ client, isAdmin, onClose, onDone }) {
   const idem = useIdempotency();
 
   async function submit() {
-    if (!(Number(amount) > 0)) return setErr(t("clients.advanceBad"));
+    const value = parseNumber(amount);
+    if (!(value > 0)) return setErr(t("clients.advanceBad"));
     setErr("");
     setBusy(true);
     try {
       const body = {
-        amount, method, note, offset_debt: debt > 0 && offset,
+        amount: String(value), method, note, offset_debt: debt > 0 && offset,
         ...(isAdmin ? { paid_on: paidOn } : {}),
       };
       const { data } = await api.post(`/clients/clients/${client.id}/advances/`, body, {
@@ -77,7 +84,7 @@ export function AdvanceModal({ client, isAdmin, onClose, onDone }) {
       <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("clients.advanceHint")}</p>
       <Field label={t("clients.advanceAmount")} error={err}>
         <input
-          type="number" min="0" inputMode="decimal" value={amount} autoFocus
+          type="text" inputMode="decimal" value={amount} autoFocus placeholder="5 000"
           onChange={(e) => setAmount(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && submit()}
         />
@@ -106,7 +113,7 @@ export function AdvanceModal({ client, isAdmin, onClose, onDone }) {
             checked={offset} onChange={(e) => setOffset(e.target.checked)}
           />
           <span>
-            <strong>{t("clients.advanceOffset", { debt: formatMoney(debt) })}</strong>
+            <strong>{t("clients.advanceOffset", { debt: formatMoneyExact(debt) })}</strong>
             <span className="muted" style={{ display: "block", fontSize: 12 }}>
               {offset ? t("clients.advanceOffsetHint") : t("clients.advanceOffsetOff")}
             </span>
@@ -130,15 +137,16 @@ export function WriteOffModal({ client, onClose, onDone }) {
   async function submit() {
     const errs = {};
     if (!note.trim()) errs.note = t("clients.writeOffReasonNeeded");
-    if (amount !== "" && !(Number(amount) > 0)) errs.amount = t("clients.advanceBad");
+    const value = amount.trim() === "" ? null : parseNumber(amount);
+    if (amount.trim() !== "" && !(value > 0)) errs.amount = t("clients.advanceBad");
     setErr(errs);
     if (Object.keys(errs).length) return;
-    const sum = amount === "" ? debt : Number(amount);
-    if (!(await confirm(t("clients.writeOffConfirm", { sum: formatMoney(sum), name: client.display_name })))) return;
+    const sum = value == null ? debt : value;
+    if (!(await confirm(t("clients.writeOffConfirm", { sum: formatMoneyExact(sum), name: client.display_name })))) return;
     setBusy(true);
     try {
       const { data } = await api.post(`/clients/clients/${client.id}/pay-debt/`, {
-        method: "WRITE_OFF", note: note.trim(), ...(amount === "" ? {} : { amount }),
+        method: "WRITE_OFF", note: note.trim(), ...(value == null ? {} : { amount: String(value) }),
       });
       toast(t("clients.writeOffDone", { sum: formatMoney(data.paid) }));
       onDone?.(data);
@@ -161,8 +169,8 @@ export function WriteOffModal({ client, onClose, onDone }) {
       }
     >
       <p className="muted" style={{ fontSize: 13, marginTop: -6 }}>{t("clients.writeOffHint")}</p>
-      <Field label={t("clients.writeOffAmount", { sum: formatMoney(debt) })} error={err.amount}>
-        <input type="number" min="0" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
+      <Field label={t("clients.writeOffAmount", { sum: formatMoneyExact(debt) })} error={err.amount}>
+        <input type="text" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} />
       </Field>
       <Field label={t("clients.writeOffReason")} required error={err.note}>
         <input

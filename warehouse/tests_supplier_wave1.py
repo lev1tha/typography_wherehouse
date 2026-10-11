@@ -307,13 +307,15 @@ class SupplierReturnTests(Base):
         data = self._return()
         self.sheet.refresh_from_db()
         self.assertEqual(self.sheet.quantity, D("5.9536"))  # 2 листа по 2.9768 кв.м
-        self.assertEqual(D(str(data["total_cost"])), D("16800.00"))
+        # Накладная — как в бумаге, возврат строкой с минусом (RU-N23, D-171).
+        self.assertEqual(D(str(data["total_cost"])), D("25200.00"))
+        self.assertEqual(D(str(data["returned_after"])), D("8400.00"))
         self.assertEqual(D(str(data["debt"])), D("0"))
         self.assertEqual(CashEntry.balance(BANK), D("-16800"), "8 400 вернулись")
         roll = Roll.objects.get(material=self.sheet)
-        self.assertEqual(roll.purchase_cost, D("16800.00"))
-        self.assertEqual(roll.sheet_count, D("2"))
-        self.assertEqual(roll.remaining_area, roll.initial_area)
+        self.assertEqual(roll.purchase_cost, D("25200.00"))
+        self.assertEqual(roll.sheet_count, D("3"))
+        self.assertEqual(roll.remaining_area, roll.initial_area - D("2.9768"))
 
     def test_no_loss_in_the_pnl_and_purchases_drop(self):
         self._return()
@@ -340,7 +342,8 @@ class SupplierReturnTests(Base):
             "lines": [{"line": line.id, "quantity": "40"}], "mode": "CREDIT",
         }, format="json")
         self.assertEqual(r.status_code, 200, r.data)
-        self.assertEqual(D(str(r.data["total_cost"])), D("600.00"))
+        self.assertEqual(D(str(r.data["total_cost"])), D("1000.00"))
+        self.assertEqual(D(str(r.data["returned_after"])), D("400.00"))
         self.assertEqual(D(str(r.data["debt"])), D("600.00"))
         self.bolts.refresh_from_db()
         self.assertEqual(self.bolts.quantity, D("60"))
@@ -386,7 +389,9 @@ class SupplierReturnTests(Base):
             "lines": [{"line": line.id, "quantity": "3"}], "mode": "REFUND", "account": CASH,
         }, format="json")
         self.assertEqual(r.status_code, 200, r.data)
-        self.assertEqual(D(str(r.data["total_cost"])), D("0"))
+        self.assertEqual(D(str(r.data["total_cost"])), D("25200.00"))
+        self.assertEqual(D(str(r.data["returned_after"])), D("25200.00"))
+        self.assertEqual(D(str(r.data["debt"])), D("0"))
         self.sheet.refresh_from_db()
         self.assertEqual(self.sheet.quantity, D("0"))
         self.assertEqual(CashEntry.balance(CASH), D("25200"))

@@ -122,8 +122,9 @@ class JournalTests(ShopCase):
         lines = list(AuditLog.objects.order_by("id").values_list("action", flat=True))
         joined = "\n".join(lines)
         self.assertIn("Изменена скидка клиента «ОсОО «Ак Жол»»: 0 → 5%", joined)
-        self.assertIn("5 → 7.5%", joined)
-        self.assertIn("лимит долга клиента «ОсОО «Ак Жол»»: не задан → 30000", joined)
+        # Новые записи — с запятой и разрядами (RU-N22, D-189).
+        self.assertIn("5 → 7,5%", joined)
+        self.assertIn("лимит долга клиента «ОсОО «Ак Жол»»: не задан → 30 000 сом", joined)
         self.assertIn("+996555112233 → +996555998877", joined)
         self.assertIn("реферер клиента «ОсОО «Ак Жол»»: нет → Привёл", joined)
 

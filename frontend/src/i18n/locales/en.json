@@ -336,7 +336,9 @@
     "staffFloorHint": "A storekeeper's hand-typed work price is not below this share of the catalogue. 0 — no floor.",
     "debtWarnDays": "Warn about debt older than, days",
     "debtWarnDaysHint": "An order on credit to a client with an old debt makes the till ask to confirm. 0 — no warning.",
-    "percentMax": "No more than 100"
+    "percentMax": "No more than 100",
+    "staffWarn": "Warn when a storekeeper's price is below, % of catalogue",
+    "staffWarnHint": "Not a block: the till shows a warning and the journal records it. 0 — no warning."
   },
   "serviceKind": {
     "CUTTING": "Cutting",
@@ -811,7 +813,9 @@
     "debtOrders": "Debt on orders",
     "debtOrdersNote": "excluding opening debts from before the migration",
     "debtAllInClients": "All client debt — in “Clients” →",
-    "editPairHint": "Cut material: its area is recalculated together with the cut line's size and parts."
+    "editPairHint": "Cut material: its area is recalculated together with the cut line's size and parts.",
+    "filtersBtn": "Filters",
+    "moreActions": "More actions"
   },
   "fulfillment": {
     "PROCESSING": "Processing",
@@ -898,7 +902,9 @@
     "allTypes": "All operations",
     "allMaterials": "All materials",
     "empty": "No movements yet",
-    "pageOf": "Page {{page}} of {{pages}} · {{count}} total"
+    "pageOf": "Page {{page}} of {{pages}} · {{count}} total",
+    "supplierReturn": "Return to supplier",
+    "cost": "Value"
   },
   "lotFix": {
     "title": "Correct intake",
@@ -972,7 +978,10 @@
     "rowNo": "Row {{row}}",
     "groupRoll": "Roll",
     "rollWidth": "width, m",
-    "rollPrice": "per running m"
+    "rollPrice": "per running m",
+    "missingSites": "Production {{names}} is not in the list — the batch was not saved.",
+    "createSites": "Create {{names}} for all rows and save",
+    "sitesCreated": "Production added: {{names}}"
   },
   "writeoffReason": {
     "DAMAGE": "Damage",
@@ -1476,7 +1485,12 @@
     "pasteNothing": "The clipboard has no “material · quantity · price” rows.",
     "pasted": "Lines added: {{n}}",
     "pasteUnknown": "Material not found: {{names}} — pick it in the line.",
-    "pasteSkipped": "Skipped rows without numbers: {{n}}"
+    "pasteSkipped": "Skipped rows without numbers: {{n}}",
+    "returnedAfter": "Returned to supplier",
+    "netTotal": "left on the invoice {{sum}}",
+    "debtClosed": "Debt closed",
+    "paidMoney": "Paid in money (from the till)",
+    "paidSomHint": "Som from the till; at the invoice rate ≈ {{fc}} {{cur}}"
   },
   "waste": {
     "tabIntake": "Intake",
@@ -1645,7 +1659,9 @@
     "docsCount": "Documents on credit: {{n}} — click to see what for",
     "none": "No debts",
     "acceptedBy": "received by {{name}}",
-    "docMoney": "Document total {{total}}, paid {{paid}}"
+    "docMoney": "Document total {{total}}, paid {{paid}}",
+    "advancesTitle": "Advances to suppliers",
+    "advancesNone": "No advances or overpayments"
   },
   "statements": {
     "tabSummary": "Monthly summary",
@@ -1960,12 +1976,13 @@
     "applied": "Advance offset against the invoice",
     "applyDo": "Offset",
     "applyHint": "Free in the advance: {{left}}. No money moves — the invoice debt drops by the same amount.",
-    "applyTo": "Against invoice"
+    "applyTo": "Against invoice",
+    "rateFar": "Rate {{rate}} differs from the invoice rate {{base}} by {{pct}} % — a typo? The system will ask to confirm before paying."
   },
   "supplyReturn": {
     "title": "Return to supplier",
     "confirm": "Return",
-    "hint": "The stock drops by this invoice's lot at the lot price — no loss in profit. Purchases and the invoice total drop by the value returned. What is already sold or written off cannot be returned.",
+    "hint": "The stock drops by this invoice's lot at the lot price — no loss in profit. The invoice stays as on paper: the return goes as a separate minus row on the return date — that day's purchases and the invoice debt drop by the value returned. What is already sold or written off cannot be returned.",
     "onShelf": "On the shelf",
     "qty": "Return",
     "value": "Value, som",
@@ -2137,7 +2154,15 @@
     "metric_WORK_AMOUNT": "Value of work done, som",
     "metricShort_RUNNING_METERS": "run. m",
     "metricShort_WORK_AMOUNT": "som of work",
-    "bonusLine": "bonus {{amount}} when output exceeds {{threshold}} {{metric}}"
+    "bonusLine": "bonus {{amount}} when output exceeds {{threshold}} {{metric}}",
+    "warn_over_to_pay": "The payment of {{amount}} is more than “to pay” for {{period}}: {{toPay}}.",
+    "warn_future_month": "The payment is for {{period}}, a month that has not started yet.",
+    "warn_inactive": "The employee is deactivated — they no longer work for you.",
+    "warnAsk": "Pay anyway?",
+    "carryIn": "Carried over from last month",
+    "carryInHint": "Deduction the previous accrual did not cover",
+    "carryOut": "Deductions exceed the accrual: {{sum}} is carried over to next month.",
+    "carryOutShort": "{{sum}} — to next month"
   },
   "payrollSettings": {
     "title": "Payroll and margin",
@@ -2189,7 +2214,9 @@
     "advanceKept": "The advance stays on the client's account.",
     "advanceUsed": "Covered by advance",
     "adminOnlyConfirm": "Only an administrator can confirm this.",
-    "quoteLoadedExpired": "Quote #{{n}} is in the cart, but it has expired: prices are today's, and checkout will show \"was / now\""
+    "quoteLoadedExpired": "Quote #{{n}} is in the cart, but it has expired: prices are today's, and checkout will show \"was / now\"",
+    "warnLowPrice": "“{{name}}”: price {{price}} is below {{pct}} % of the catalogue ({{catalog}}). Check the price.",
+    "stockShortBlock": "The order can't be placed while stock is short: reduce the quantity or pick another material."
   },
   "quote": {
     "title": "Commercial quote",
@@ -2255,14 +2282,15 @@
     "scenario": "Scenario",
     "diff": "Difference",
     "margin": "Net margin: now {{now}}, in the scenario {{scenario}}.",
-    "assumptions": "Service prices and purchases change by the given percentages; material revenue, expenses, depreciation and interest do not; tax is recalculated at the month's rate. This is a projection, not bookkeeping.",
+    "assumptions": "Service prices and purchases change by the given percentages; masters' percentage grows with service prices (by payroll rules, or the average rate where there are none); material revenue, other expenses, depreciation and loan interest do not; tax is recalculated at the month's rate. This is a projection, not bookkeeping.",
     "row_revenue": "Revenue",
     "row_cogs": "Cost of sales",
     "row_gross": "Gross profit",
     "row_ebitda": "EBITDA",
     "row_operating": "Operating profit",
     "row_tax": "Tax",
-    "row_net": "Net profit"
+    "row_net": "Net profit",
+    "row_masters": "Masters' percentage"
   },
   "recurring": {
     "title": "Recurring expenses",
@@ -2333,7 +2361,8 @@
     "kind_price": "Prices and services",
     "kind_client": "Clients",
     "kind_staff": "Staff",
-    "kind_other": "Other"
+    "kind_other": "Other",
+    "showLogins": "Show logins"
   },
   "receiptsV2": {
     "searchPh": "Number, client, material, service, comment",
@@ -2380,8 +2409,8 @@
     "editParts": "Parts, pcs",
     "editPasses": "Passes",
     "editMachine": "Machine",
-    "editServerCalc": "The quantity and price after changing sizes, parts, passes or the machine are recalculated by the server — the total here is approximate.",
-    "editDimsHint": "Sizes, parts, passes and the machine recalculate quantity and price by the order's rules. The cut length (run m) is in the quantity field: it changes proportionally when the number of parts changes. The material of the cut is a separate line; its quantity is edited there.",
+    "editServerCalc": "The server is recalculating quantity and price by the order's rules — the total will update in a second.",
+    "editDimsHint": "Sizes, parts, passes and the machine recalculate quantity and price by the order's rules. The cut length of one part is in “Run m per part”: the line's run m = it × parts. The material of the cut is recalculated together with parts and sizes.",
     "confirmIntro": "Check the order:",
     "priceChanged": "“{{name}}”: the price changed — was {{was}}, now {{now}}",
     "parts": "Parts, pcs",
@@ -2389,7 +2418,11 @@
     "passes": "Passes",
     "passesHint": "The rate is multiplied by the number of passes.",
     "editExecutor": "Work executor",
-    "refundQty": "How many to return (empty — all)"
+    "refundQty": "How many to return (empty — all)",
+    "editRunM": "Run m per part",
+    "accountAdvance": "To the client's advance",
+    "refundAdvanceBack": "The advance applied to the order ({{sum}}) goes back to the client's advance, the rest is paid out.",
+    "refundQtyOver": "More than the line holds: at most {{n}}."
   },
   "workOrder": {
     "title": "Work order",
@@ -2524,7 +2557,7 @@
     "kim": "Nesting yield, %",
     "kimHint": "A cut piece takes parts area ÷ yield from stock: at 62 % a 0.77 sq.m part takes 1.24 sq.m, offcuts go into the order cost. Whole sheets as they are. Empty — exactly the parts area.",
     "minStock": "Minimum stock, {{unit}}",
-    "minStockHint": "Below it — the “running low” badge, a Telegram alert and a row in “To order” (top up to twice the minimum).",
+    "minStockHint": "Below it — the “running low” badge, a Telegram alert and a row in “To order” (top up to “Order up to”, empty — to twice the minimum).",
     "reorderTitle": "To order: {{count}}",
     "toExcel": "To Excel",
     "stockNow": "In stock",
@@ -2553,7 +2586,13 @@
     "fifoSince": "Recalculate sales from",
     "fifoNothing": "Already FIFO — nothing to recalculate.",
     "fifoDelta": "Cost of sales changes by",
-    "fifoDone": "Lines recalculated: {{count}}"
+    "fifoDone": "Lines recalculated: {{count}}",
+    "reorderTo": "Order up to",
+    "reorderToPh": "empty — up to {{n}} (2× minimum)",
+    "reorderToPhEmpty": "empty — up to 2× minimum",
+    "orderUpTo": "Order up to",
+    "ruleField": "from the card",
+    "ruleDouble": "2× minimum"
   },
   "opening": {
     "title": "Client opening balances",

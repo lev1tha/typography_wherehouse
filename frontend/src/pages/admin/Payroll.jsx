@@ -209,7 +209,13 @@ export default function Payroll() {
                             </div>
                           </td>
                           <td>{som(r.gross)}</td>
-                          <td>{Number(r.deductions) > 0 ? <span style={{ color: "var(--danger-ink)" }}>− {som(r.deductions)}</span> : <span className="muted">—</span>}</td>
+                          <td>
+                            {Number(r.deductions) > 0 ? <span style={{ color: "var(--danger-ink)" }}>− {som(r.deductions)}</span> : <span className="muted">—</span>}
+                            {/* Удержание больше начисленного не пропадает (RF-N4): остаток — на следующий месяц. */}
+                            {Number(r.carry_out) > 0 && (
+                              <div className="muted" style={{ fontSize: 12 }}>{t("payroll.carryOutShort", { sum: som(r.carry_out) })}</div>
+                            )}
+                          </td>
                           <td>
                             {som(r.accrued)}
                             {r.posted
@@ -364,7 +370,16 @@ function Breakdown({ r, t, readOnly, onRules, onRemovePayment, onRemoveAdjustmen
       </div>
       <div>
         <div className="mat-sub">{t("payroll.deductionsTitle")}</div>
-        {r.adjustments.length === 0 && <p className="muted" style={{ fontSize: 13 }}>{t("payroll.none")}</p>}
+        {r.adjustments.length === 0 && !(Number(r.carry_in) > 0) && <p className="muted" style={{ fontSize: 13 }}>{t("payroll.none")}</p>}
+        {Number(r.carry_in) > 0 && (
+          <div className="crow">
+            <span className="k">
+              {t("payroll.carryIn")}
+              <div className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{t("payroll.carryInHint")}</div>
+            </span>
+            <span style={{ color: "var(--danger-ink)" }}>− {som(r.carry_in)}</span>
+          </div>
+        )}
         {r.adjustments.map((a) => (
           <div className="crow" key={a.id}>
             <span className="k">
@@ -382,6 +397,9 @@ function Breakdown({ r, t, readOnly, onRules, onRemovePayment, onRemoveAdjustmen
             </span>
           </div>
         ))}
+        {Number(r.carry_out) > 0 && (
+          <p className="muted" style={{ fontSize: 12, margin: "6px 0 0" }}>{t("payroll.carryOut", { sum: som(r.carry_out) })}</p>
+        )}
       </div>
       <div>
         <div className="mat-sub">{t("payroll.paymentsTitle")}</div>

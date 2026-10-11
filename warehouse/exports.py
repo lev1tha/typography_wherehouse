@@ -55,11 +55,14 @@ def csv_response(rows, filename: str) -> HttpResponse:
 
 
 def reorder_csv(rows: list[dict]):
-    yield ["Материал", "Единица", "Остаток", "Минимум", "Заказать", "Поставщик", "Закуп за единицу", "Сумма"]
+    # «Заказывать до» — последней колонкой (S3, STK-06): порядок прежних не
+    # меняется, файл, который уже разбирают в Excel, не съезжает.
+    yield ["Материал", "Единица", "Остаток", "Минимум", "Заказать", "Поставщик", "Закуп за единицу",
+           "Сумма", "Заказывать до"]
     for r in rows:
         yield [
             r["name"], r["unit_label"], num(r["stock"]), num(r["min"]), num(r["to_order"]),
-            r["supplier"] or "", num(r["unit_cost"]), num(r["sum"]),
+            r["supplier"] or "", num(r["unit_cost"]), num(r["sum"]), num(r.get("target")),
         ]
 
 
@@ -100,8 +103,13 @@ def journal_csv(logs, *, money: bool):
            "Заказ", "Причина", "Кто"]
     for log in logs:
         m = log.material
+        # Возврат поставщику — своя операция, как в «Движении» (RU-N23).
+        supplier_return = (
+            log.type == log.Type.CORRECTION and (log.reason or "").startswith("Возврат поставщику")
+        )
         yield [
-            cell(log.happened_at), log.get_type_display(), m.name, num(log.quantity_changed, QTY),
+            cell(log.happened_at), "Возврат поставщику" if supplier_return else log.get_type_display(),
+            m.name, num(log.quantity_changed, QTY),
             "кв.м" if m.is_roll_material else m.get_unit_display(),
             num(log.metres_changed, QTY), num(log.cost) if money else "",
             str(log.receipt.order_number or "") if log.receipt_id else "",

@@ -13,14 +13,15 @@ from audit.models import AuditLog
 
 
 def fmt(value) -> str:
-    """Значение для журнала: деньги с пробелом-разделителем, даты по-русски."""
+    """Значение для журнала: деньги с пробелом-разделителем и запятой
+    («12 000,50», без «,00»), даты по-русски (RU-N22: раньше «12 000.50»)."""
     if value is None or value == "":
         return "—"
     if isinstance(value, bool):
         return "да" if value else "нет"
     if isinstance(value, Decimal):
-        text = f"{value:,.2f}".replace(",", " ")
-        return text[:-3] if text.endswith(".00") else text
+        text = f"{value:,.2f}".replace(",", " ").replace(".", ",")
+        return text[:-3] if text.endswith(",00") else text
     if isinstance(value, datetime):
         return value.strftime("%d.%m.%Y %H:%M")
     if isinstance(value, date):

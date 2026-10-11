@@ -14,6 +14,8 @@ import { downloadFile } from "../utils/download.js";
 // Вкладка «Журнал действий» (XL-07, F3, STAFF-06): кто, когда и что сделал, с
 // «было → стало» по тратам, выплатам зарплаты, кассе, настройкам финансов и
 // налога. Фильтры — по дате, пользователю, типу и тексту; страницы по 50.
+// Входы в систему — шум (RU-N22): по умолчанию скрыты, галочка «Показать
+// входы» или тип «Вход» их возвращают (сервер: `?logins=1`).
 
 const KINDS = ["login", "order", "cash", "expense", "payroll", "tax", "settings", "stock", "price", "client", "staff", "other"];
 const ICONS = {
@@ -42,6 +44,7 @@ export default function AuditJournal() {
   const [username, setUsername] = useState("");
   const [kind, setKind] = useState("");
   const [search, setSearch] = useState("");
+  const [logins, setLogins] = useState(false);
   const dUser = useDebounced(username.trim(), 350);
   const dSearch = useDebounced(search.trim(), 350);
   const filters = {
@@ -50,6 +53,7 @@ export default function AuditJournal() {
     ...(dUser ? { username: dUser } : {}),
     ...(kind ? { kind } : {}),
     ...(dSearch ? { search: dSearch } : {}),
+    ...(logins ? { logins: 1 } : {}),
   };
   const filtered = Object.keys(filters).length > 0;
   const [page, setPage] = usePage(JSON.stringify(filters));
@@ -74,7 +78,7 @@ export default function AuditJournal() {
   useEffect(load, [page, JSON.stringify(filters)]);
 
   function reset() {
-    setDateFrom(""); setDateTo(""); setUsername(""); setKind(""); setSearch("");
+    setDateFrom(""); setDateTo(""); setUsername(""); setKind(""); setSearch(""); setLogins(false);
   }
 
   if (failed && !rows.length) return <LoadError onRetry={load} />;
@@ -94,6 +98,13 @@ export default function AuditJournal() {
         </select>
         <input className="search" type="search" value={search} placeholder={t("auditLog.searchPh")}
           aria-label={t("common.search")} onChange={(e) => setSearch(e.target.value)} />
+        {!kind && (
+          <label className="row" style={{ gap: 6, margin: 0, alignItems: "center", cursor: "pointer", fontSize: 13 }}>
+            <input type="checkbox" style={{ width: 16, height: 16, minHeight: 0 }}
+              checked={logins} onChange={(e) => setLogins(e.target.checked)} />
+            {t("auditLog.showLogins")}
+          </label>
+        )}
         {filtered && <button type="button" className="secondary" onClick={reset}>{t("common.resetFilters")}</button>}
         {/* CSV с теми же фильтрами — все страницы сразу (волна 2). */}
         <button

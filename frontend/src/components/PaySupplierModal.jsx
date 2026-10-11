@@ -20,9 +20,38 @@ const som = (n) => formatMoney(n);
 //
 // Счёт НЕ подставляем: заказчик платит поставщикам по-разному, и
 // подставленное «наличные» врало бы кассе (то же правило, что в приёмке).
+// Тот же раздел денег, что на сервере (`supplier_ledger.record_payment`, RU-N17):
+// курсовая разница — целыми сомами, «закрыто долга» — остальное; платёж,
+// закрывающий долг, закрывает его до тыйына, а из кассы уходит долг + целая
+// разница. Тогда строки кассы (до сома) складываются ровно в «С кассы уйдёт».
+const cents = (n) => Math.round(n * 100) / 100;
+const halfUp = (n) => Math.sign(n) * Math.round(Math.abs(n));
+
+function splitForeignPayment({ amountFc, rate, supplyRate, debtFc, debt }) {
+  let cash = cents(amountFc * rate);
+  const closing = amountFc >= debtFc - 0.005;
+  const exact = Math.min(closing ? debt : cents(amountFc * supplyRate), debt);
+  let fx = halfUp(cash - exact);
+  let settled;
+  if (closing) {
+    settled = exact;
+    cash = cents(settled + fx);
+  } else {
+    settled = cents(cash - fx);
+    if (settled > debt) {
+      settled = debt;
+      fx = cents(cash - settled);
+    }
+  }
+  return { cash, settled, fx };
+}
+
+// Курс оплаты дальше этой доли от курса накладной — похоже на опечатку (RU-N18).
+const RATE_TOLERANCE = 0.1;
+
 export default function PaySupplierModal({ row, onClose, onPaid }) {
   const { t } = useTranslation();
-  const { toast } = useUI();
+  const { toast, confirm } = useUI();
   const advance = row.kind === "ADVANCE";
   const foreign = row.kind === "SUPPLY" && row.currency && row.currency !== "KGS";
   const debt = foreign ? Number(row.debt_foreign) || 0 : Number(row.debt) || 0;
@@ -37,11 +66,16 @@ export default function PaySupplierModal({ row, onClose, onPaid }) {
   const r = Number(rate);
   const valid = a > 0 && (advance || a <= debt) && !!account && (!foreign || r > 0);
   const left = debt - a;
-  // Сколько сом уйдёт и сколько долга по курсу накладной это закроет.
-  const cash = foreign ? a * r : a;
-  const settled = foreign ? a * Number(row.supply_rate || 0) : a;
-  const fx = foreign && a > 0 && r > 0 ? cash - settled : 0;
+  // Сколько сом уйдёт и сколько долга по курсу накладной это закроет — тем же
+  // правилом, что и сервер (иначе окно и касса расходились на сом).
+  const supplyRate = Number(row.supply_rate || 0);
+  const split = foreign && a > 0 && r > 0
+    ? splitForeignPayment({ amountFc: a, rate: r, supplyRate, debtFc: debt, debt: Number(row.debt) || 0 })
+    : { cash: a, settled: a, fx: 0 };
+  const { cash, settled, fx } = split;
   const unit = foreign ? row.currency : "сом";
+  // Опечатка в курсе (RU-N18): «881» вместо «88,1» — видно до кнопки.
+  const rateFar = foreign && r > 0 && supplyRate > 0 && Math.abs(r - supplyRate) > supplyRate * RATE_TOLERANCE;
 
   async function submit() {
     if (!valid) return;
@@ -53,9 +87,17 @@ export default function PaySupplierModal({ row, onClose, onPaid }) {
         });
         toast(t("suppliers.advancePaid"));
       } else if (row.kind === "SUPPLY") {
-        await api.post(`/warehouse/supplies/${row.id}/pay/`, {
-          amount: a, account, paid_on: paidOn, note, ...(foreign ? { rate: r } : {}),
+        const send = (extra = {}) => api.post(`/warehouse/supplies/${row.id}/pay/`, {
+          amount: a, account, paid_on: paidOn, note, ...(foreign ? { rate: r } : {}), ...extra,
         });
+        try {
+          await send();
+        } catch (e) {
+          // Курс далеко от курса накладной — сервер просит подтверждения (409).
+          if (!(e.response?.status === 409 && e.response.data?.needs_confirmation)) throw e;
+          if (!(await confirm(e.response.data.detail))) return;
+          await send({ confirm_rate: true });
+        }
         toast(t("suppliersDebt.paid"));
       } else {
         await api.post(`/warehouse/rolls/${row.id}/pay-supplier/`, { amount: a, account, paid_on: paidOn });
@@ -107,6 +149,15 @@ export default function PaySupplierModal({ row, onClose, onPaid }) {
         <Field label={t("supplies.rate", { cur: row.currency })} hint={t("suppliers.payRateHint", { rate: formatNumber(row.supply_rate, { max: 4 }) })}>
           <input type="number" step="any" inputMode="decimal" value={rate} onChange={(e) => setRate(e.target.value)} />
         </Field>
+      )}
+      {rateFar && (
+        <p role="alert" style={{ fontSize: 12, margin: "-4px 0 8px", color: "var(--danger-ink)" }}>
+          {t("suppliers.rateFar", {
+            rate: formatNumber(r, { max: 4 }),
+            base: formatNumber(supplyRate, { max: 4 }),
+            pct: formatNumber(((r - supplyRate) / supplyRate) * 100, { max: 0 }),
+          })}
+        </p>
       )}
       <div className="row">
         <Field className="grow" style={{ margin: 0 }} label={t("clients.payDate")}>

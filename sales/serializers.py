@@ -882,9 +882,11 @@ class RefundSerializer(serializers.Serializer):
     item_ids = serializers.ListField(
         child=serializers.IntegerField(), required=False, allow_empty=True
     )
-    # С какого счёта отдали деньги (cash-02): пусто — с того, куда они пришли.
+    # С какого счёта отдали деньги (cash-02): пусто — с того, куда они пришли
+    # (зачтённый аванс — обратно в аванс); «ADVANCE» — на аванс клиента (RM-N7).
     method = serializers.ChoiceField(
-        choices=Receipt.PaymentMethod.choices, required=False, allow_null=True, allow_blank=True,
+        choices=list(Receipt.PaymentMethod.choices) + [("ADVANCE", "На аванс клиента")],
+        required=False, allow_null=True, allow_blank=True,
     )
     # Причина возврата — обязательна для не-админа, если заказ оплачен (STAFF-08);
     # пишется в журнал действий.

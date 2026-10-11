@@ -237,6 +237,7 @@ export default function Pricing() {
     confirm_line_total: "",
     staff_line_cap: "",
     staff_min_price_percent: "",
+    staff_price_warn_percent: "",
     debt_warn_days: "",
   });
   const [rulesErr, setRulesErr] = useState({});
@@ -262,6 +263,7 @@ export default function Pricing() {
         confirm_line_total: clean(r.data.confirm_line_total),
         staff_line_cap: clean(r.data.staff_line_cap),
         staff_min_price_percent: clean(r.data.staff_min_price_percent),
+        staff_price_warn_percent: clean(r.data.staff_price_warn_percent),
         debt_warn_days: clean(r.data.debt_warn_days),
       });
     });
@@ -289,10 +291,11 @@ export default function Pricing() {
     const bad = {};
     if (rules.min_line_amount === "" || !(Number(rules.min_line_amount) >= 0)) bad.min_line_amount = t("common.needValue");
     if (rules.urgency_percent === "" || !(Number(rules.urgency_percent) >= 0)) bad.urgency_percent = t("common.needValue");
-    ["confirm_line_total", "staff_line_cap", "staff_min_price_percent", "debt_warn_days"].forEach((key) => {
+    ["confirm_line_total", "staff_line_cap", "staff_min_price_percent", "staff_price_warn_percent", "debt_warn_days"].forEach((key) => {
       if (rules[key] === "" || !(Number(rules[key]) >= 0)) bad[key] = t("common.needValue");
     });
     if (Number(rules.staff_min_price_percent) > 100) bad.staff_min_price_percent = t("pricing.percentMax");
+    if (Number(rules.staff_price_warn_percent) > 100) bad.staff_price_warn_percent = t("pricing.percentMax");
     setRulesErr(bad);
     if (Object.keys(bad).length) return focusFirstInvalid();
     setSavingR(true);
@@ -389,6 +392,11 @@ export default function Pricing() {
           <Field className="grow" label={t("pricing.staffFloor")} error={rulesErr.staff_min_price_percent} hint={t("pricing.staffFloorHint")}>
             <input type="number" inputMode="decimal" min="0" max="100" value={rules.staff_min_price_percent}
               onChange={(e) => setRules({ ...rules, staff_min_price_percent: e.target.value })} />
+          </Field>
+          {/* Предупреждение, а не запрет (CALC-08, S3): по умолчанию 50 %. */}
+          <Field className="grow" label={t("pricing.staffWarn")} error={rulesErr.staff_price_warn_percent} hint={t("pricing.staffWarnHint")}>
+            <input type="number" inputMode="decimal" min="0" max="100" value={rules.staff_price_warn_percent}
+              onChange={(e) => setRules({ ...rules, staff_price_warn_percent: e.target.value })} />
           </Field>
           <Field className="grow" label={t("pricing.debtWarnDays")} error={rulesErr.debt_warn_days} hint={t("pricing.debtWarnDaysHint")}>
             <input type="number" inputMode="numeric" min="0" step="1" value={rules.debt_warn_days}

@@ -54,6 +54,36 @@ def _label(supply: Supply) -> str:
     return supply.number or f"#{supply.pk}"
 
 
+def _n(value) -> str:
+    """Число для описания: без хвоста нулей, с запятой — «87,45», «150»."""
+    text = format(Decimal(value).normalize(), "f")
+    return text.replace(".", ",")
+
+
+# Курс оплаты дальше этой доли от курса накладной — похоже на опечатку
+# (RU-N18): «881» вместо «88,1» списывал из кассы в десять раз больше молча.
+RATE_TOLERANCE = Decimal("0.10")
+
+
+class RateNeedsConfirmation(SupplyError):
+    """Курс оплаты далеко от курса накладной — нужен явный «да» (409)."""
+
+    code = "rate_far"
+
+
+def _check_rate(supply: Supply, used_rate: Decimal) -> None:
+    base = supply.rate or ZERO
+    if base <= 0:
+        return
+    if abs(used_rate - base) > base * RATE_TOLERANCE:
+        pct = ((used_rate - base) / base * 100).quantize(Decimal("1"))
+        raise RateNeedsConfirmation(
+            f"Курс оплаты {_n(used_rate)} отличается от курса накладной {_n(base)} на "
+            f"{'+' if pct > 0 else ''}{pct} % — это не опечатка? Курсовая разница уйдёт в расходы "
+            "или доходы. Проверьте курс или подтвердите."
+        )
+
+
 # --- Курсовая разница -----------------------------------------------------------
 
 
@@ -121,11 +151,21 @@ def _check_account(account):
 
 @transaction.atomic
 def record_payment(*, supply=None, supplier=None, amount, account, paid_on=None,
-                   rate=None, note="", user=None) -> SupplierPayment:
+                   rate=None, note="", user=None, confirm_rate=False) -> SupplierPayment:
     """Заплатить поставщику: по накладной либо авансом (supply не указана).
 
     ``amount`` — в сомах; у накладной в валюте — В ВАЛЮТЕ накладной, и тогда
-    обязателен ``rate`` (сом за единицу валюты на день оплаты).
+    обязателен ``rate`` (сом за единицу валюты на день оплаты). Курс дальше
+    10 % от курса накладной — `RateNeedsConfirmation`, пока не передан
+    ``confirm_rate`` (RU-N18).
+
+    Деньги в валюте (RU-N17): курсовая разница — ЦЕЛЫМИ сомами, «закрыто
+    долга» — остальное. Тогда «Оплата поставщику» + «Курсовая разница» в кассе
+    на экране (до сома) дают ровно «С кассы уйдёт …» из окна оплаты; раньше
+    13 117,50 + 97,50 показывались как 13 118 + 98 = 13 216 при 13 215 в окне.
+    Платёж, закрывающий долг, закрывает его до тыйына (долг в сомах), а сумма
+    по кассе — долг + целая разница: отличается от валюта × курс меньше чем
+    на полсома.
     """
     from finance import cash
     from finance.periods import ensure_open
@@ -158,12 +198,23 @@ def record_payment(*, supply=None, supplier=None, amount, account, paid_on=None,
                 raise SupplyError(
                     f"По накладной долг {debt_fc} {supply.currency} — больше заплатить нельзя."
                 )
+            if not confirm_rate:
+                _check_rate(supply, used_rate)
             currency = supply.currency
             cash_amount = q2(amount_fc * used_rate)
+            closing = amount_fc >= debt_fc - TINY
             # Закрываем остаток целиком — берём весь долг в сомах, без копеечных хвостов.
-            settled = debt if amount_fc >= debt_fc - TINY else q2(amount_fc * supply.rate)
-            settled = min(settled, debt)
-            fx = cash_amount - settled
+            exact = debt if closing else q2(amount_fc * supply.rate)
+            exact = min(exact, debt)
+            fx = (cash_amount - exact).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            if closing:
+                settled = exact
+                cash_amount = settled + fx
+            else:
+                settled = cash_amount - fx
+                if settled > debt:
+                    settled = debt
+                    fx = cash_amount - settled
         else:
             if value > debt:
                 raise SupplyError(f"По накладной долг {debt} — больше заплатить нельзя.")
@@ -182,10 +233,13 @@ def record_payment(*, supply=None, supplier=None, amount, account, paid_on=None,
         settled if fx > 0 else cash_amount, account, supply=supply,
         happened_on=paid_on, note=text[:255], user=user,
     )
+    # Без «Курсовая разница:» впереди — касса сама ставит вид расхода перед
+    # названием, и строка выходила «Курсовая разница: Курсовая разница: …»;
+    # курсы — без хвоста нулей («87,45», а не «87.450000»).
     expense = _book_fx(
         fx, account, paid_on,
-        f"Курсовая разница: {head} ({amount_fc} {currency} по {used_rate} вместо {supply.rate})"
-        if fx else "", user,
+        f"{head}: {_n(amount_fc)} {currency} по {_n(used_rate)} вместо {_n(supply.rate)}",
+        user,
     ) if fx else None
     return SupplierPayment.objects.create(
         supplier=supplier, supply=supply, kind=SupplierPayment.Kind.PAYMENT,

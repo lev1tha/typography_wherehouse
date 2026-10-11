@@ -161,9 +161,34 @@ class ExpenseKindViewSet(viewsets.ModelViewSet):
         if kind.entries.exists():
             kind.is_archived = True
             kind.save(update_fields=["is_archived"])
+            auditing.record(request.user, f"Вид расхода скрыт: {self._describe(kind)}", "expense")
             return Response({"archived": True}, status=status.HTTP_200_OK)
+        text = self._describe(kind)
         kind.delete()
+        auditing.record(request.user, f"Вид расхода удалён: {text}", "expense")
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # Журнал «было → стало» по видам расхода (XL-07, D-187): название, блок,
+    # роль и «входит в прибыль» меняют строки ОПиУ всех месяцев вида.
+    LABELS = {"name": "название", "block": "блок", "role": "роль", "in_profit": "входит в прибыль"}
+
+    @staticmethod
+    def _snapshot(kind) -> dict:
+        return {
+            "name": kind.name, "block": kind.get_block_display(), "role": kind.get_role_display(),
+            "in_profit": kind.in_profit,
+        }
+
+    @staticmethod
+    def _describe(kind) -> str:
+        return (
+            f"«{kind.name}» ({kind.get_block_display()}, {kind.get_role_display().lower()}"
+            + ("" if kind.in_profit else ", не входит в прибыль") + ")"
+        )
+
+    def perform_create(self, serializer):
+        kind = serializer.save()
+        auditing.record(self.request.user, f"Вид расхода добавлен: {self._describe(kind)}", "expense")
 
     def perform_update(self, serializer):
         # «Входит в прибыль» и блок меняют прибыль ВСЕХ месяцев, где есть траты
@@ -189,7 +214,12 @@ class ExpenseKindViewSet(viewsets.ModelViewSet):
                 min(days) if days else None,
                 "Менять блок или роль вида, когда по нему есть траты закрытого периода,",
             )
-        serializer.save()
+        before = self._snapshot(kind)
+        name = kind.name
+        kind = serializer.save()
+        diff = auditing.changes(before, self._snapshot(kind), self.LABELS)
+        if diff:
+            auditing.record(self.request.user, f"Вид расхода «{name}» изменён: {diff}", "expense")
 
     @action(detail=True, methods=["post"])
     def restore(self, request, pk=None):
@@ -197,6 +227,7 @@ class ExpenseKindViewSet(viewsets.ModelViewSet):
         kind = self.get_object()
         kind.is_archived = False
         kind.save(update_fields=["is_archived"])
+        auditing.record(request.user, f"Вид расхода возвращён в отчёт: {self._describe(kind)}", "expense")
         return Response(self.get_serializer(kind).data)
 
 

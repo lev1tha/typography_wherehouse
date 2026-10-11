@@ -437,8 +437,20 @@ def _plan(*, roll: Roll | None, line: SupplyLine | None, data) -> dict:
         u0=(cost0 / area0) if area0 else Decimal("0"),
         u1=(cost1 / area1) if area1 else Decimal("0"),
     )
+    # Возвращено поставщику датой возврата (D-171, RU-N23): ушло из партии, но
+    # это не «мимо продаж» — возврат пересчитывается по новой цене вместе с
+    # накладной (`_reprice_returns`), и закуп дня возврата — тоже.
+    returns_after = []
+    if line is not None:
+        from .models import SupplierReturnLine
+
+        returns_after = list(
+            SupplierReturnLine.objects.filter(supply_line=line, ret__in_place=False)
+            .values_list("area", "ret__returned_on")
+        )
+    returned_area = sum((a for a, _day in returns_after), Decimal("0"))
     if roll is not None and cps1 != cps0:
-        untracked = used - recorded_area - inferred_area - sum(
+        untracked = used - recorded_area - inferred_area - returned_area - sum(
             (_legacy_area(it, roll) for it in legacy if it.roll_id == roll.id), Decimal("0"))
         if untracked > TINY:
             warnings.append({
@@ -462,6 +474,8 @@ def _plan(*, roll: Roll | None, line: SupplyLine | None, data) -> dict:
     receipts, days = [], set()
     if cost1 != cost0 or qty_delta:
         days.add(purchase_day)
+        # Возврат датой возврата пересчитается — закуп его дня тоже меняется.
+        days.update(day for _area, day in returns_after)
     for rec in by_receipt.values():
         receipt = rec["receipt"]
         day = _local(receipt.revenue_recognized_at)
@@ -561,6 +575,14 @@ def _plan(*, roll: Roll | None, line: SupplyLine | None, data) -> dict:
     if supply is not None:
         total_before = supply.total_cost
         total_after = total_before - line.cost + cost1
+        # Долг — от суммы за вычетом возвратов датой возврата (D-171, RU-N23), а
+        # возвраты этой строки пойдут за новой ценой (`_reprice_returns`).
+        back_before = supply.returned_after
+        back_after = back_before
+        if returns_after and area1:
+            back_after += sum((_money(cost1 * a / area1) for a, _day in returns_after), Decimal("0")) - sum(
+                (r.cost for r in line.return_lines.filter(ret__in_place=False)), Decimal("0"))
+        net_before, net_after = total_before - back_before, total_after - back_after
         # Оплачено = старое поле накладной + платежи-строки (2026-10-10).
         paid = supply.paid_total or Decimal("0")
         plan["supply"] = {
@@ -568,10 +590,10 @@ def _plan(*, roll: Roll | None, line: SupplyLine | None, data) -> dict:
             "total_before": total_before, "total_after": total_after,
             "paid": paid,
             # Начальные остатки долга не имеют (STK-09): склад на дату переезда.
-            "debt_before": Decimal("0") if supply.is_opening else max(total_before - paid, Decimal("0")),
-            "debt_after": Decimal("0") if supply.is_opening else max(total_after - paid, Decimal("0")),
-            "overpaid_before": Decimal("0") if supply.is_opening else max(paid - total_before, Decimal("0")),
-            "overpaid_after": Decimal("0") if supply.is_opening else max(paid - total_after, Decimal("0")),
+            "debt_before": Decimal("0") if supply.is_opening else max(net_before - paid, Decimal("0")),
+            "debt_after": Decimal("0") if supply.is_opening else max(net_after - paid, Decimal("0")),
+            "overpaid_before": Decimal("0") if supply.is_opening else max(paid - net_before, Decimal("0")),
+            "overpaid_after": Decimal("0") if supply.is_opening else max(paid - net_after, Decimal("0")),
             "stated_total": supply.stated_total,
             "discrepancy_before": (supply.stated_total - total_before) if supply.stated_total is not None else None,
             "discrepancy_after": (supply.stated_total - total_after) if supply.stated_total is not None else None,
@@ -615,8 +637,8 @@ def preview(*, roll=None, line=None, data) -> dict:
 
 @transaction.atomic
 def _reprice_returns(line: SupplyLine, after: dict) -> None:
-    """Возвраты поставщику по этой строке (правленные на месте) — по новой цене
-    единицы (RS-N2, перепроверка 10.10). Выписка поставщика показывает
+    """Возвраты поставщику по этой строке — правленные на месте (RS-N2) и
+    датой возврата (D-171, RU-N23) — по новой цене единицы (перепроверка 10.10). Выписка поставщика показывает
     накладную в первоначальной сумме = сумма строки + возвращённое; после
     исправления цены возврат оставался по старой, и «первоначальная» накладная
     выходила ни по старой, ни по новой цене. Сальдо от этого не меняется: в
@@ -626,15 +648,41 @@ def _reprice_returns(line: SupplyLine, after: dict) -> None:
     if not after["quantity"]:
         return
     touched = set()
-    for row in SupplierReturnLine.objects.select_for_update().filter(supply_line=line, ret__in_place=True):
+    rows = SupplierReturnLine.objects.select_for_update(of=("self",)).select_related("ret").filter(supply_line=line)
+    for row in rows:
         cost = _money(after["purchase_cost"] * row.area / after["quantity"])
-        if cost != row.cost:
-            row.cost = cost
-            row.save(update_fields=["cost"])
-            touched.add(row.ret_id)
+        if row.ret.in_place:
+            if cost != row.cost:
+                row.cost = cost
+                row.save(update_fields=["cost"])
+                touched.add(row.ret_id)
+            continue
+        # Возврат датой возврата (D-171, RU-N23): строка накладной не
+        # уменьшалась, и возврат — доля ЕЁ новой суммы. Без этого закуп
+        # месяца возврата и стоимость, ушедшая со склада, оставались по старой
+        # цене, и склад расходился с закупом на возвращённое × разницу цены.
+        fc = (_money(line.cost_fc * row.area / after["quantity"])
+              if line.cost_fc is not None else row.cost_fc)
+        if cost == row.cost and fc == row.cost_fc:
+            continue
+        entry = InventoryLog.objects.filter(
+            type=InventoryLog.Type.CORRECTION, supply_id=line.supply_id, roll_id=line.roll_id,
+            material_id=line.material_id, quantity_changed=-row.area, cost=row.cost,
+            reason__startswith="Возврат поставщику",
+        ).order_by("id").first()
+        if entry is not None:
+            entry.cost = cost
+            entry.save(update_fields=["cost"])
+        row.cost, row.cost_fc = cost, fc
+        row.save(update_fields=["cost", "cost_fc"])
+        touched.add(row.ret_id)
     for ret in SupplierReturn.objects.filter(pk__in=touched).prefetch_related("lines"):
         ret.amount = sum((r.cost for r in ret.lines.all()), Decimal("0"))
-        ret.save(update_fields=["amount"])
+        fields = ["amount"]
+        if not ret.in_place and ret.amount_fc is not None:
+            ret.amount_fc = sum((r.cost_fc or Decimal("0") for r in ret.lines.all()), Decimal("0"))
+            fields.append("amount_fc")
+        ret.save(update_fields=fields)
 
 
 @transaction.atomic

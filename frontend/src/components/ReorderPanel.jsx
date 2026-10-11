@@ -1,8 +1,9 @@
 /**
  * «К заказу» (STK-06, волна 2): материалы, упавшие до минимума, — сколько
- * докупить до двух минимумов, в листах/метрах/штуках, у кого брали в прошлый
- * раз и на какую сумму по последнему закупу. Раньше был только бейдж «на
- * исходе», а «сколько и что заказать» владелец считал в Excel.
+ * докупить до «заказывать до» из карточки (пусто — до двух минимумов), в
+ * листах/метрах/штуках, у кого брали в прошлый раз и на какую сумму по
+ * последнему закупу. Раньше был только бейдж «на исходе», а «сколько и что
+ * заказать» владелец считал в Excel.
  */
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -59,6 +60,7 @@ export default function ReorderPanel({ reloadKey }) {
               <th>{t("common.name")}</th>
               <th>{t("stock2.stockNow")}</th>
               <th>{t("stock2.minimum")}</th>
+              <th>{t("stock2.orderUpTo")}</th>
               <th>{t("stock2.toOrder")}</th>
               <th>{t("stock2.supplier")}</th>
               <th>{t("stock2.sum")}</th>
@@ -70,6 +72,15 @@ export default function ReorderPanel({ reloadKey }) {
                 <td>{r.name}</td>
                 <td>{q(r.stock)} {r.unit_label}</td>
                 <td>{q(r.min)} {r.unit_label}</td>
+                {/* Формула подписана (S3, STK-06): «до 24 · 2× минимума» или
+                    «до 12 · из карточки» — «к заказу 14» без неё читалось как
+                    ошибка («в Excel 12 − 10 = 2»). */}
+                <td>
+                  {r.target != null ? `${q(r.target)} ${r.unit_label}` : "—"}
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    {r.target_rule === "field" ? t("stock2.ruleField") : t("stock2.ruleDouble")}
+                  </div>
+                </td>
                 <td><strong>{q(r.to_order)} {r.unit_label}</strong></td>
                 <td>{r.supplier || "—"}</td>
                 <td>{r.sum != null ? formatMoney(r.sum) : "—"}</td>

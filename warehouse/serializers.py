@@ -247,6 +247,7 @@ class MaterialSerializer(serializers.ModelSerializer):
             "pricing",
             "kim_percent",
             "min_stock",
+            "reorder_to",
             "stock_units",
             "by_site",
             "roll_width",
@@ -313,6 +314,11 @@ class MaterialSerializer(serializers.ModelSerializer):
         markup = attrs.get("markup_percent")
         if markup is not None and not (Decimal("-90") <= markup <= Decimal("1000")):
             raise serializers.ValidationError({"markup_percent": "Наценка — от −90 до 1000 %."})
+        reorder_to = attrs.get("reorder_to")
+        if reorder_to is not None and reorder_to < 0:
+            raise serializers.ValidationError(
+                {"reorder_to": "«Заказывать до» не может быть меньше нуля. Пусто — до двух минимумов."}
+            )
 
         is_roll = current("is_roll_material")
         form = current("intake_form")
@@ -523,8 +529,15 @@ class InventoryLogSerializer(serializers.ModelSerializer):
     # Рулонный ли материал — ленте отходов нужна единица без второго запроса.
     material_is_roll = serializers.BooleanField(source="material.is_roll_material", read_only=True)
 
+    # Возврат поставщику — своя строка «Движения» с минусом и стоимостью
+    # (RU-N23); тип в базе — корректировка, экран подписывает его отдельно.
+    supplier_return = serializers.SerializerMethodField()
+
     def get_cost(self, obj):
         return obj.cost if _sees_money(self.context) else None
+
+    def get_supplier_return(self, obj):
+        return obj.type == InventoryLog.Type.CORRECTION and (obj.reason or "").startswith("Возврат поставщику")
 
     class Meta:
         model = InventoryLog
@@ -532,6 +545,7 @@ class InventoryLogSerializer(serializers.ModelSerializer):
             "id",
             "type",
             "type_display",
+            "supplier_return",
             "material",
             "material_name",
             "material_unit",
@@ -988,8 +1002,10 @@ class RollStocktakeInputSerializer(serializers.Serializer):
         return attrs
 
 
-class MaterialMonthOpeningSerializer(serializers.ModelSerializer):
+class MaterialMonthOpeningSerializer(_NumbersMixin, serializers.ModelSerializer):
     """Остаток материала на начало месяца — ручной ввод, как в Excel."""
+
+    NUMERIC = ("quantity",)
 
     material_name = serializers.CharField(source="material.name", read_only=True)
 
@@ -1111,7 +1127,12 @@ NEGATIVE_LINE = (
 )
 
 
-class SupplyLineSerializer(serializers.ModelSerializer):
+class SupplyLineSerializer(_NumbersMixin, serializers.ModelSerializer):
+    # Сумма и размеры строки — как их пишет русский Excel (S3): «6 500,00»,
+    # «6 500», «6500,5», «2,0» листа. Было 400 «Требуется численное значение»,
+    # хотя та же ячейка во «Вставить из Excel» проходила (D-121).
+    NUMERIC = ("width", "height", "length", "sheet_count", "quantity", "cost", "cost_fc")
+
     material_name = serializers.CharField(source="material.name", read_only=True)
     unit_cost = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     # Единица, в которой лежит `quantity`: у площадных — кв.м, у штучных — своя.
@@ -1251,10 +1272,13 @@ class SupplierOpeningDebtSerializer(serializers.ModelSerializer):
 _MONEY_FIELDS = (
     "stated_total", "paid_amount", "paid_account", "total_cost", "discrepancy", "debt",
     "paid_total", "overpaid", "total_foreign", "paid_foreign", "debt_foreign", "returned_after",
+    "paid_cash",
 )
 
 
-class SupplySerializer(serializers.ModelSerializer):
+class SupplySerializer(_NumbersMixin, serializers.ModelSerializer):
+    NUMERIC = ("stated_total", "paid_amount", "rate")
+
     lines = SupplyLineSerializer(many=True)
     supplier_name = serializers.CharField(source="supplier.name", read_only=True)
     # Реквизиты поставщика нужны печатной форме: лист приёмки без них — просто
@@ -1266,6 +1290,8 @@ class SupplySerializer(serializers.ModelSerializer):
     discrepancy = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     debt = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     paid_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    # Деньгами из кассы (RU-N16) — у валютной накладной не равно «закрыто долга».
+    paid_cash = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     overpaid = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     total_foreign = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     paid_foreign = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
@@ -1285,7 +1311,7 @@ class SupplySerializer(serializers.ModelSerializer):
             "supplier_inn", "supplier_phone", "received_on",
             "stated_total", "paid_amount", "paid_account", "note", "lines",
             "is_opening", "currency", "rate",
-            "total_cost", "discrepancy", "debt", "paid_total", "overpaid",
+            "total_cost", "discrepancy", "debt", "paid_total", "paid_cash", "overpaid",
             "total_foreign", "paid_foreign", "debt_foreign", "returned_after", "period_closed",
             "payments", "returns", "possible_duplicate_of",
             "created_by", "created_by_name", "created_at",

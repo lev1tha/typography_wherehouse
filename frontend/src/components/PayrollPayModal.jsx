@@ -6,6 +6,7 @@ import { apiError } from "../api/errors.js";
 import Field, { focusFirstInvalid } from "./Field.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
+import { formatMoney } from "../utils/format.js";
 
 const today = () => new Date().toLocaleDateString("sv-SE");
 
@@ -14,7 +15,7 @@ const today = () => new Date().toLocaleDateString("sv-SE");
 // уже начислена за месяц. Месяц по умолчанию — тот, что открыт в ведомости.
 export default function PayrollPayModal({ employee, employees, month, onClose, onDone }) {
   const { t } = useTranslation();
-  const { toast } = useUI();
+  const { toast, confirm } = useUI();
   const [form, setForm] = useState({
     employee: employee?.id ?? "",
     kind: "PAYOUT",
@@ -34,11 +35,26 @@ export default function PayrollPayModal({ employee, employees, month, onClose, o
     setErrors(next);
     if (Object.keys(next).length) return focusFirstInvalid();
     setBusy(true);
+    const body = {
+      employee: Number(form.employee), kind: form.kind, amount: form.amount,
+      paid_on: form.paid_on, period: form.period || undefined, account: form.account, note: form.note,
+    };
     try {
-      await api.post("/finance/payroll/payments/", {
-        employee: Number(form.employee), kind: form.kind, amount: form.amount,
-        paid_on: form.paid_on, period: form.period || undefined, account: form.account, note: form.note,
-      });
+      try {
+        await api.post("/finance/payroll/payments/", body);
+      } catch (e) {
+        // Больше «к выдаче», за будущий месяц или отключённому (RF-N3, D-185):
+        // сервер спрашивает — показываем его вопрос, «да» уходит повтором.
+        const ask = e.response?.status === 409 && e.response.data?.needs_confirmation;
+        if (!ask) throw e;
+        const text = (e.response.data.warnings || []).map((w) => t(`payroll.warn_${w.code}`, {
+          defaultValue: w.message,
+          period: w.period ? `${w.period.slice(5, 7)}.${w.period.slice(0, 4)}` : "",
+          amount: formatMoney(w.amount), toPay: formatMoney(w.to_pay),
+        }));
+        if (!(await confirm([...text, t("payroll.warnAsk")].join(" ")))) return;
+        await api.post("/finance/payroll/payments/", { ...body, confirm_warnings: true });
+      }
       toast(t("payroll.paid"));
       onDone();
     } catch (e) {

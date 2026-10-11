@@ -563,6 +563,9 @@ export default function Checkout() {
   // предупреждения и — админу — себестоимость и маржа до оформления.
   const [preview, setPreview] = useState(null);
   const [previewErr, setPreviewErr] = useState("");
+  // Отказ предпросмотра из-за нехватки склада (RU-N20): «Оформить» закрыто,
+  // пока это сообщение на экране.
+  const [previewShort, setPreviewShort] = useState(false);
   const nextPreview = useLatest();
   // Имя покупателя для заказа в долг без карточки клиента.
   const [buyerName, setBuyerName] = useState("");
@@ -940,6 +943,7 @@ export default function Checkout() {
       nextPreview();
       setPreview(null);
       setPreviewErr("");
+      setPreviewShort(false);
       return undefined;
     }
     const id = setTimeout(() => {
@@ -948,6 +952,7 @@ export default function Checkout() {
         .then((r) => {
           setPreview({ key: previewKey, data: r.data });
           setPreviewErr("");
+          setPreviewShort(false);
         })
         .catch((e) => {
           if (isCanceled(e)) return;
@@ -955,6 +960,7 @@ export default function Checkout() {
           // Причина отказа до оформления: размеры, ставка, остаток — как её
           // потом назвал бы «Оформить», только раньше.
           setPreviewErr(apiError(e, ""));
+          setPreviewShort(e?.response?.data?.code === "stock_short");
         });
     }, 450);
     return () => clearTimeout(id);
@@ -2381,6 +2387,13 @@ export default function Checkout() {
               <p key={`${w.code}-${i}`} className="callout" role="status" style={{ fontSize: 13, margin: "6px 0" }}>
                 {w.code === "below_cost"
                   ? t("checkout.warnBelowCost", { name: w.name, sum: formatMoney(w.line_total) })
+                  : w.code === "low_manual_price"
+                  ? t("checkout2.warnLowPrice", {
+                      name: w.name,
+                      price: formatMoney(w.price),
+                      catalog: formatMoney(w.catalog_price),
+                      pct: formatNumber(w.percent, { max: 2 }),
+                    })
                   : w.code === "cost_unknown"
                   ? t("checkout.warnCostUnknown")
                   : w.message || w.code}
@@ -2390,7 +2403,13 @@ export default function Checkout() {
               </p>
             ))}
           {!fresh && previewErr && cart.length > 0 && (
-            <p className="muted" style={{ fontSize: 12, margin: "6px 0" }} role="status">{previewErr}</p>
+            previewShort ? (
+              <p className="callout" role="alert" style={{ fontSize: 13, margin: "6px 0", color: "var(--danger-ink)" }}>
+                {previewErr} {t("checkout2.stockShortBlock")}
+              </p>
+            ) : (
+              <p className="muted" style={{ fontSize: 12, margin: "6px 0" }} role="status">{previewErr}</p>
+            )
           )}
 
           <div className="pos-total"><span>{t("common.total")}</span><span>{formatMoney(total)}</span></div>
@@ -2753,7 +2772,11 @@ export default function Checkout() {
               </button>
             </div>
           )}
-          <button style={{ marginTop: 0, width: "100%", height: 52 }} onClick={() => submit()} disabled={busy || !cart.length}>
+          <button
+            style={{ marginTop: 0, width: "100%", height: 52 }}
+            onClick={() => submit()}
+            disabled={busy || !cart.length || (!fresh && previewShort && !!previewErr)}
+          >
             {busy
               ? t("common.loading")
               : `${t("checkout.submit")} · ${formatMoney(total)}` +
