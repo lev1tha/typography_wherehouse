@@ -386,6 +386,62 @@ docker compose -f docker-compose.prod.yml up -d --build
 - [ ] https://chpucenter.com открывается, вход выполняется, `/django-admin/` со стилями;
 - [ ] в `docker compose … logs --since 10m web` нет трейсбеков (500).
 
+### Выкладка 10–11.10: шаги до и после
+
+Код аудитов 10–11.10 (`f77e7a7…dba3240`) на проде уже стоит — 19.10 это видно
+снаружи: `/api/health/` отвечает, `/api/warehouse/leftovers/` даёт 401, а не
+404. Не подтверждено, выполнены ли шаги вокруг выкладки. Все команды
+однострочные — работают и в fish.
+
+**1. Приходы без оплаты (решение D-195: такой приход — долг поставщику).**
+На копии прода от 26.09 «Долг поставщикам» вырос из-за этого с 28 000 до
+1 722 516 (88 приходов). Список:
+
+```bash
+docker compose -f docker-compose.prod.yml exec web python manage.py lots_without_payment
+```
+
+Те, что на деле оплачены мимо кассы, провести оплатой в карточке поставщика
+(Склад → «Приходы» → «Поставщики») датой выдачи денег.
+
+**2. Оплаты поставщику, которых нет в кассе (ошибка F1).** Сначала список:
+
+```bash
+docker compose -f docker-compose.prod.yml exec web python manage.py supplies_unpaid_cash
+```
+
+Дописать расход по выбранным накладным (номера — из списка, счёт — откуда
+платили):
+
+```bash
+docker compose -f docker-compose.prod.yml exec web python manage.py supplies_unpaid_cash --fix --account CASH --ids 12 15
+```
+
+**3. Снимки склада закрытых месяцев (D-170: снимок — на конец месяца).** По
+какой день закрыт период:
+
+```bash
+docker compose -f docker-compose.prod.yml exec web python manage.py shell -c "from finance.models import PeriodLock; print(list(PeriodLock.objects.values_list('closed_through', flat=True)))"
+```
+
+Для каждого закрытого месяца (цифра склада в нём может измениться — это
+исправление):
+
+```bash
+docker compose -f docker-compose.prod.yml exec web python manage.py stock_snapshot --month 2026-09
+```
+
+Новые закрытия периода снимок снимают сами.
+
+**4. Пароли боевых учёток** — сменить все (прежние лежали в документах и в
+истории git): «Сотрудники» → «Учётные записи».
+
+**5. Защита входа** — строго парой, раздел «Включение защиты входа» выше.
+
+**6. Периодические задачи** (по желанию, в `sudo crontab -e` рядом с бэкапом —
+см. «Резервные копии»): чистка просроченных токенов и страховка повторяющихся
+трат (они и так заводятся при открытии «Финансов»).
+
 ### Откат
 
 Откат кода — это пересборка предыдущей версии:
@@ -481,6 +537,16 @@ sudo /usr/local/bin/chpu-restore-check # и что она восстанавли
 MAILTO=you@example.com
 0 3 * * *  /usr/local/bin/chpu-backup >> /var/log/chpu-backup.log 2>&1
 30 4 * * 0 /usr/local/bin/chpu-restore-check >> /var/log/chpu-restore-check.log 2>&1
+```
+
+Необязательно, тем же `crontab` (cron запускает строки через `sh`, так что fish
+не мешает): раз в неделю чистка просроченных токенов из чёрного списка
+(таблицы `token_blacklist` иначе растут без предела) и раз в день — повторяющиеся
+траты на случай, если «Финансы» долго никто не открывает (повтор не задваивает).
+
+```
+15 5 * * 0 cd /opt/chpucenter && docker compose -f docker-compose.prod.yml exec -T web python manage.py flushexpiredtokens >> /var/log/chpu-jobs.log 2>&1
+20 5 * * *  cd /opt/chpucenter && docker compose -f docker-compose.prod.yml exec -T web python manage.py generate_recurring >> /var/log/chpu-jobs.log 2>&1
 ```
 
 > **Почему скриптом, а не строкой в cron.** Однострочник
@@ -635,16 +701,15 @@ $DC up -d                                     # migrate докатит схем�
 - [ ] `/admin/finance` после ПОЛНОЙ перезагрузки открывает систему, а не форму
       входа Django (`/admin/*` — экраны React, Django туда лезть не должен)
 - [ ] Загрузка фото материала работает и картинка видна (значит `/media/` отдаётся)
-- [ ] Клиентский портал: вход по телефону + код, выданный из карточки
+- [ ] Клиентский портал: вход по телефону + пароль, выданный из карточки клиента
 - [ ] Финансовые экраны просят отдельный пароль
 
 ## Известные ограничения на старте
 
 - **Платёжный шлюз в режиме `mock`** — реальные онлайн-оплаты не проводятся.
-  Пока `PAYMENT_GATEWAY=mock`, доступен служебный эндпоинт «оплата прошла»
-  без авторизации (он же нужен для тестов). Перед приёмом настоящих денег:
-  выставить `PAYMENT_GATEWAY=freedompay` и заполнить ключи — эндпоинт при этом
-  автоматически исчезнет.
+  Служебный эндпоинт «оплата прошла» без авторизации существует только при
+  `DEBUG=True` (`integrations/urls.py`), на проде его нет. Перед приёмом
+  настоящих денег: выставить `PAYMENT_GATEWAY=freedompay` и заполнить ключи.
 - **Telegram-уведомления молчат**, пока не заполнены токены. После заполнения
   бот клиентов поднимается отдельно:
   `docker compose -f docker-compose.prod.yml --profile bot up -d`

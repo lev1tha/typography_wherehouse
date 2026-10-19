@@ -1,6 +1,21 @@
 # ЧПУ Система — склад, продажи и финансы для мастерской ЧПУ-резки
 
 Бэкенд: **Django 6.0 + DRF + JWT**. Фронтенд: **React 18 + Vite** (`./frontend`).
+Прод: https://chpucenter.com (Docker + PostgreSQL + nginx, см. [DEPLOY.md](DEPLOY.md)).
+
+## Карта документации
+
+| Файл | Для кого и зачем |
+|------|------------------|
+| [CONTINUE_HERE.md](CONTINUE_HERE.md) | Текущий статус: что выложено, что ждёт выкладки, что делать дальше. Начинать с него |
+| [HANDOVER.md](HANDOVER.md) | Полное техническое описание: архитектура по приложениям, бизнес-правила, открытые вопросы, хронология |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Журнал решений владельца и следствий из них (D-1…D-205). Окончательные — не пересматривать без владельца |
+| [DEPLOY.md](DEPLOY.md) | Сервер, выкладка, бэкапы, откат, восстановление |
+| [ИНСТРУКЦИЯ.md](ИНСТРУКЦИЯ.md) | Инструкция для владельца: как вести склад, продажи и деньги |
+| [ТЕСТИРОВАНИЕ.md](ТЕСТИРОВАНИЕ.md) | Ручные сценарии проверки по разделам и ролям |
+| [frontend/DESIGN.md](frontend/DESIGN.md) | Дизайн-система и правила интерфейса |
+| [GEMINI.md](GEMINI.md) | Контекст для ИИ-ассистента (Gemini CLI): правила работы с проектом в одном файле |
+| `docs/*AUDIT*.md`, `docs/OWNER_RECHECK_*.md`, `docs/FINANCE_*.md` | Отчёты аудитов и план переделки финансов — история, почему сделано так |
 
 ## Запуск бэкенда
 
@@ -11,9 +26,10 @@ pip install -r requirements.txt
 
 cp .env.example .env          # заполнить реальные токены при необходимости
 python manage.py migrate
+python manage.py createcachetable                           # без неё вход отдаёт 500
 SEED_PASSWORD='<придумайте пароль>' python manage.py seed   # 3 учётки + базовый каталог + услуги
-python manage.py runserver
-``` 
+python manage.py runserver                                  # сам встаёт на 127.0.0.1:8710
+```
 
 ### Учётные записи (`seed`)
 
@@ -28,183 +44,190 @@ python manage.py runserver
 > отдельно (см. `CONTINUE_HERE.md`). Пароли храните в менеджере паролей, не в
 > репозитории.
 
-Отдельно от логина, экраны **«Финансы»** и **«Обзор»** в админке закрыты
-вторым паролем (`FINANCE_PASSWORD` в `.env`, по умолчанию `finance123`) — проверяется
-на бэкенде (`POST /api/finance/unlock/`), в бандл фронтенда не попадает. Разблокировка
+Отдельно от логина, экраны **«Финансы»**, **«Касса»**, **«Ведомость»** и **«Обзор»**
+закрыты вторым паролем (`FINANCE_PASSWORD` в `.env`, по умолчанию `finance123` — на проде
+обязательно сменить, иначе при старте в лог идёт ERROR) — проверяется на бэкенде
+(`POST /api/finance/unlock/`), в бандл фронтенда не попадает. Разблокировка
 держится 30 минут (метка времени в `localStorage`).
+
+## Роли
+
+| Роль | Раздел | Что может |
+|------|--------|-----------|
+| Администратор (`ADMIN`) | `/admin/*` | Всё. Меню «Каждый день»: Продажа, Чеки, Клиенты, Склад, Финансы, Касса, Ведомость; «Реже»: Обзор, Цены и услуги, Сотрудники, Входящие остатки |
+| Складовщик (`STOREKEEPER`) | `/app/*` | Продажа, Чеки, Клиенты, Склад, Приём товара, Полка остатков. Закупочных цен не видит (в API вместо них `null`) |
+| Бухгалтер (`ACCOUNTANT`) | `/acc/*` | Проверяющий, всё только на просмотр: чеки с себестоимостью, клиенты и акт сверки, финансы, касса, ведомость, обзор, полка |
+| Клиент | `/me` | Портал: свои заказы, долг, выписка. Вход по телефону + паролю, который выдаёт админ |
+
+Разграничение держит сервер, а не меню: `python manage.py check_roles` проверяет
+его запросами к API.
 
 ## Структура (Django-приложения)
 
 | App | Назначение |
 |-----|------------|
-| `accounts` | Кастомный `User` (роли Admin/Storekeeper), `Profile`, JWT-авторизация |
-| `warehouse` | `Material`, `Roll` (партии рулонов/листов), `MaterialImage`, `InventoryLog` + сервисы `stock.py` (остатки) и `rolls.py` (приём и FIFO-списание площади) |
-| `services` | `PrintingService` (резка/установка), `ServiceRecipe` (техкарты), `PricingSettings` (% ЗП мастера — справочно) |
-| `clients` | `Client` (CRM, живой поиск по имени/телефону, LTV, рефералы) + клиентский портал (`customer.py`) |
-| `sales` | `Receipt`, `TransactionItem` + бизнес-логика `sale_service.py` |
-| `audit` | `AuditLog` (скрытый след действий персонала) + финансовый дашборд/аналитика |
-| `integrations` | Telegram (алерты персоналу + чеки клиентам), платёжный шлюз, вебхуки |
-| `finance` | Ручные P&L-вводные (`FinanceSettings`), «Расходы/Инвестиции» (`Expense`), отчёты |
+| `accounts` | `User` (роли ADMIN/STOREKEEPER/ACCOUNTANT), `Profile`, `Employee` (сотрудник ≠ учётка: ФИО, должность, станок), JWT с версией учётных данных, лимит входа, команды `seed`, `seed_demo`, `check_roles` |
+| `warehouse` | Каталог (`Material`, `MaterialType`, ступени опта `MaterialPriceTier`), партии `Roll` (лист/рулон/штучный), журнал `InventoryLog`, поставщики и накладные (`Supplier`, `Supply`, `SupplierPayment`, `SupplierReturn`, `SupplierOpeningDebt`), площадки и перемещения (`ProductionSite`, `StockTransfer`), снимки склада (`StockSnapshot`), полка остатков (`Leftover`). Сервисы: `stock.py`, `rolls.py` (FIFO), `supplies.py`, `supplier_ledger.py`, `supplier_returns.py`, `lot_correction.py`, `fifo_recalc.py`, `snapshots.py`, `sites.py`, `reorder.py`, `reprice.py`, `leftovers.py` |
+| `services` | `PrintingService` (резка по станкам, гравировка, «Отходы»), `ServiceRecipe` (техкарты), `PricingSettings` (минимум, округление, срочность), `RateMatrixEntry`, `ThicknessCoefficient` |
+| `clients` | `Client` (CRM, рефералы, скидка, лимит долга), авансы (`ClientAdvance`), входящие остатки (`OpeningBalance`), договорные цены (`ClientPrice`), реферальные бонусы, акт сверки (`statement.py`), портал клиента (`customer.py`) |
+| `sales` | `Receipt`, `TransactionItem`, `Payment`, `TransactionItemLot` (из каких партий взята строка), `Quote` (КП), `IdempotencyRecord`. Вся логика — `sale_service.py`, правила прайса — `pricing_rules.py` |
+| `finance` | Виды и записи расходов (`ExpenseKind`, `ExpenseEntry`), касса (`CashEntry`), замок периода, ставки налога, повторяющиеся траты, ведомость зарплаты (`payroll*.py`). Отчёты ОПиУ/ОДДС/сверка/«Обзор» — слой `finance/reports/`, справочник статей — `chart.py` |
+| `audit` | `AuditLog` — журнал действий «было → стало» с типами, финансовый дашборд/аналитика |
+| `integrations` | Telegram (алерты персоналу + бот клиентов), платёжный шлюз (mock / FreedomPay), вебхуки |
 
 ## Ключевые эндпоинты API
 
+Полный список — `config/urls.py` и `*/urls.py`. Здесь — то, с чего начинать.
+
 | Метод | Путь | Описание |
 |-------|------|----------|
-| POST | `/api/token/` | Вход персонала (логин+пароль) → JWT + роль |
-| GET | `/api/me/` | Текущий пользователь |
-| GET/POST | `/api/warehouse/materials/` | Каталог (`?search=`, `?ordering=`, `?category=`) |
-| PATCH | `/api/warehouse/materials/{id}/update-price/` | Изменение розничной цены (только админ) |
-| POST | `/api/warehouse/materials/supply/` | Поступление товара (материалы без площади) |
-| POST | `/api/warehouse/materials/receive-roll/` | Приём партии рулона/листов (кв.м, себестоимость, наценка) |
-| POST | `/api/warehouse/materials/adjust/` | Инвентаризация |
-| POST | `/api/warehouse/materials/write-off/` | Списание (порча/брак/утеря/срок); рулонный материал — только по рулону |
-| GET | `/api/warehouse/rolls/` | Партии рулонов/листов по материалу |
-| POST | `/api/warehouse/rolls/{id}/write-off/` | Списание метров с конкретного рулона |
-| GET/POST | `/api/services/services/` | Услуги и тарификация |
-| GET/PATCH | `/api/services/settings/` | Настройки ценообразования (% ЗП мастера) |
-| GET/POST | `/api/clients/clients/` | CRM (`?search=<имя/телефон>` для автоподстановки) |
-| POST | `/api/clients/clients/{id}/set-password/` | Выдать клиенту пароль от кабинета (только админ) |
-| POST | `/api/clients/clients/{id}/request-referral-change/` | Заявка на смену реферера (не-админ) |
-| POST/GET | `/api/clients/referral-requests/`, `/{id}/approve/`, `/{id}/reject/` | Очередь модерации смены реферера (админ) |
-| POST | `/api/sales/receipts/checkout/` | Оформление продажи |
-| POST | `/api/sales/receipts/{id}/refund/` | Возврат (весь чек или отдельные позиции), со списанием обратно на склад |
-| POST | `/api/sales/receipts/{id}/pay/` | Приём оплаты долга (полной/частичной) |
-| POST | `/api/sales/receipts/{id}/unpay/` | Откат ошибочно принятой оплаты |
-| POST | `/api/sales/receipts/{id}/add-items/` | Дозаказ — добавить позиции в открытый чек |
-| POST | `/api/sales/receipts/{id}/mark-ready/` | Услуга «Готово к выдаче» → уведомление клиента |
-| POST | `/api/sales/receipts/{id}/mark-issued/` | Услуга «Выдан» → уведомление клиента |
-| GET | `/api/sales/receipts/stats/` | Сводка над списком чеков (всего/в работе/готово/долг) |
-| GET | `/api/audit/dashboard/` | Финансовая сводка и аналитика (только админ) |
-| GET | `/api/audit/client-purchases/` | Аналитика покупок по клиентам (только админ) |
-| GET | `/api/audit/logs/` | Аудит-лог (только админ) |
-| GET | `/api/finance/report/` | P&L-отчёт (`?date_from=&date_to=`) |
-| GET | `/api/finance/material-report/` | Резка/продажи по материалам |
-| GET | `/api/finance/daily/` | Посуточная прибыль за месяц (`?year=&month=`) |
-| GET/PATCH | `/api/finance/settings/` | Ручные P&L-вводные (аренда, коммуналка, ЗП, бонус реферала…) |
+| POST | `/api/token/`, `/api/token/refresh/` | Вход персонала → JWT + роль; обновление (refresh ротируется с чёрным списком) |
+| GET | `/api/me/`, `/api/health/` | Текущий пользователь; проверка живости для мониторинга |
+| GET/POST | `/api/staff/users/`, `/api/staff/employees/` | Учётки и сотрудники (админ) |
+| GET/POST | `/api/warehouse/materials/` | Каталог (`?search=`, `?ordering=`, `?category=`); `bulk/` — ввод пачкой |
+| POST | `/api/warehouse/materials/receive-roll/`, `supply/` | Приход партии (лист/рулон/штучный) |
+| POST | `/api/warehouse/materials/adjust/`, `write-off/`, `/api/warehouse/waste/` | Инвентаризация, списание, отход (брак) |
+| GET | `/api/warehouse/materials/on-date/`, `reorder/` | Склад на дату; «К заказу» |
+| POST | `/api/warehouse/materials/reprice/` | Цены пачкой (× %) |
+| GET/POST | `/api/warehouse/supplies/` (+ `{id}/pay/`, `{id}/return/`) | Накладные, оплата, возврат поставщику |
+| GET/POST | `/api/warehouse/suppliers/` (+ `{id}/statement/`), `supplier-payments/`, `supplier-opening-debts/` | Поставщики: сальдо, платежи, начальный долг |
+| POST | `/api/warehouse/lot-correction/preview/`, `apply/` | «Исправить приход» (опечатка в цене/количестве партии) |
+| GET/POST | `/api/warehouse/transfers/`, `production-sites/` | Площадки хранения и перемещение |
+| GET/POST | `/api/warehouse/leftovers/` (+ `from-receipt/`, `{id}/write-off/`, `summary/`, `sales/`, `export/`) | Полка остатков |
+| GET/POST | `/api/services/services/`, `settings/`, `rate-matrix/`, `thickness-coefficients/` | Услуги, правила прайса, матрица ставок |
+| GET/POST | `/api/clients/clients/` | CRM (`?search=<имя/телефон>`); `aging/`, `export/` |
+| GET | `/api/clients/clients/{id}/statement/` | Акт сверки клиента |
+| POST | `/api/clients/clients/{id}/pay-debt/`, `advances/`, `set-password/`, `merge/` | Общая выплата, аванс, пароль портала, склейка карточек |
+| GET/POST | `/api/clients/opening-balances/` (+ `preview/`) | Входящие остатки клиентов (переезд из Excel) |
+| POST | `/api/sales/receipts/preview/`, `checkout/` | Расчёт без записи; оформление продажи (`Idempotency-Key`) |
+| POST | `/api/sales/receipts/{id}/pay/`, `cancel-payment/`, `write-off/` | Оплата, отмена оплаты, списание долга |
+| POST | `/api/sales/receipts/{id}/add-items/`, `edit-items/` | Дозаказ; правка состава (`dry_run` — предпросмотр) |
+| POST | `/api/sales/receipts/{id}/refund/`, `undo-refund/` | Возврат (полный или по количеству) и его отмена |
+| POST | `/api/sales/receipts/{id}/issue/`, `mark-ready/`, `mark-issued/` | Выдача по позициям; статусы выполнения |
+| GET | `/api/sales/receipts/stats/`, `export/`, `titles/` | Сводка над списком; CSV; подсказки наименований |
+| GET/POST | `/api/sales/quotes/` | Коммерческие предложения (КП) |
+| GET | `/api/finance/report/`, `pnl/`, `cash-flow/`, `bridge/` | Сводка за месяц, ОПиУ, ОДДС, сверка «прибыль → поток» |
+| GET/POST | `/api/finance/expense-kinds/`, `expense-entries/`, `recurring/`, `tax-rates/` | Виды и записи расходов, повторяющиеся траты, ставки налога |
+| GET/POST | `/api/finance/cash/` (+ `balance/`, `count/`, `export/`) | Касса |
+| GET/POST | `/api/finance/payroll/`, `pay-schemes/` | Ведомость зарплаты, схемы оплаты |
 | POST | `/api/finance/unlock/` | Проверка пароля доступа к финансовым экранам |
-| GET/POST | `/api/finance/fixed-expenses/` | Постоянные расходы записями (`?year=&month=`) |
-| GET/POST | `/api/finance/salaries/` | Зарплаты по сотрудникам (`?year=&month=`) |
-| GET | `/api/sales/receipts/titles/` | Подсказки наименований заказов для кассы |
-| GET/POST | `/api/finance/expenses/` | Расходы/инвестиции (фреза, оборудование, улучшение цеха, прочее) |
-| POST | `/api/integrations/payments/webhook/` | Вебхук платёжного шлюза |
-| POST | `/api/integrations/telegram/customer/webhook/` | Привязка клиента по контакту (бот клиентов) |
-| POST | `/api/customer/login/` | Вход клиента в портал (телефон + свой пароль) |
-| GET | `/api/customer/orders/` | Заказы вошедшего клиента (свой JWT-scope, изолирован от персонала) |
+| GET | `/api/audit/logs/` (+ `export/`), `/api/audit/dashboard/` | Журнал действий; аналитика (админ) |
+| POST | `/api/integrations/payments/webhook/`, `/api/integrations/telegram/customer/webhook/` | Вебхуки шлюза и бота клиентов |
+| POST/GET | `/api/customer/login/`, `orders/`, `summary/`, `statement/` | Портал клиента (свой JWT-scope, изолирован от персонала) |
 
-## Логика продаж
+## Логика продаж (коротко)
+
+Подробно — `HANDOVER.md`, раздел 5, и `docs/DECISIONS.md`.
 
 - Способы оплаты: **Наличные / MBank / DemirBank** — чек сразу принимает деньги
-  (списание материалов мгновенно, предоплата опциональна — остаток становится
-  долгом на чеке). **Онлайн** — чек `PENDING` + платёжная ссылка/QR; списание со
-  склада только после подтверждения оплаты (вебхук `confirm_payment`).
-- **Долг**: `Receipt.debt` = сумма − предоплата − возвраты, для незакрытых чеков.
-  Погашается через `pay` (полностью или частично), ошибочная оплата откатывается
-  через `unpay`.
-- **Дозаказ** (`add-items`) — можно доложить позиции в уже открытый заказ;
-  склад списывается тогда же, когда и по остальным строкам чека (наличный —
-  сразу, оплачен он или в долг), а доплата по оплаченному заказу становится
-  долгом (статус снова «ожидает оплаты»), который принимают через `pay`.
-- **Резка** всегда даёт две строки в чеке: материал (площадь × цена/кв.м) +
-  работа мастера (погонный метр × ставка резки материала). Услуги наружной/
-  внутренней установки в каталоге деактивированы по решению заказчика (код
-  сохранён, история чеков не рвётся), но не удалены.
-- **Возврат** возвращает метры/кв.м/шт обратно на склад (рулонные материалы —
-  по FIFO, в том же порядке, в каком списывались) и меняет статусы позиций/чека.
+  (склад списывается сразу, предоплата необязательна — остаток становится
+  долгом). **Онлайн** — чек `PENDING` + ссылка/QR; склад списывается после
+  подтверждения оплаты. Отдельных счетов MBank/Demir в кассе нет (исключено
+  владельцем): касса — наличные и банк.
+- **Долг** = сумма − оплачено − возвраты. Гасится `pay` (по чеку) или «Общей
+  выплатой» в карточке клиента; ошибочная оплата отменяется встречной записью
+  (`cancel-payment`), прошлое не переписывается. Безнадёжный долг списывает админ
+  (`WRITE_OFF`, с причиной).
+- **Резка** — две строки: материал (площадь × цена/кв.м) + работа (погонный метр
+  × ставка станка). Рулон продаётся погонными метрами или по кв.м изделия, лист —
+  площадью или целиком.
+- **Правила прайса** (минимум, округление заказа, срочность, скидка клиента,
+  договорные цены) по умолчанию выключены — пока владелец их не задаст, цена
+  считается как раньше.
+- **Возврат** возвращает материал в те партии, откуда он был взят.
+- **Себестоимость** — FIFO по партиям, фиксируется при продаже.
 - Все денежные строки чека округляются **вверх до целого сома**.
-- Падение остатка ниже `critical_balance` шлёт алерт в Telegram персонала.
-- У каждого чека — человеческий сквозной `order_number` (UUID остаётся
-  внутренним ключом).
-
-## Клиенты и рефералы
-
-- Клиентский портал — вход по **телефону + паролю, который выдаёт админ** из
-  карточки клиента (клиент себе пароль не заводит; складовщику недоступно).
-  Пароль показывается один раз, «забыл» решается выдачей нового. Отдельный
-  JWT-scope (`scope=customer`) полностью изолирует токены клиента от токенов
-  персонала.
-- **Реферальная программа**: фиксированная сумма бонуса за каждого приведённого
-  клиента (`FinanceSettings.referral_bonus`, редактируется в Финансах) — только
-  показывается в карточке клиента, в расходы автоматически не списывается.
-- Реферер (`Client.referred_by`) фиксируется один раз. Складовщик не может
-  изменить/снять его напрямую — только подать заявку (`ReferralChangeRequest`),
-  которую администратор одобряет или отклоняет; администратор может менять
-  реферера напрямую.
-
-## Интеграции
-
-Токены и ключи читаются из окружения (`.env`) — см. `.env.example`.
-Платёжный шлюз абстрагирован (`integrations/payments.py`): по умолчанию `mock`
-для разработки; реальный провайдер регистрируется в `get_gateway()`.
+- Закрытый месяц (замок периода) не правится задним числом — ни деньги, ни склад.
 
 ## Запуск фронтенда (React + Vite)
 
 ```bash
 cd frontend
 npm install
-npm run dev          # http://localhost:5710 (проксирует /api на Django :8710)
+npm run dev          # http://localhost:5710 (проксирует /api и /media на Django :8710)
 ```
 
-Сначала поднимите Django (`python manage.py runserver` — сам встаёт на
-`127.0.0.1:8710`) — Vite проксирует туда `/api` и `/media`. Порты у проекта
-свои, не 8000/5173: рядом работают другие проекты. Заняты и эти —
-`BACKEND_PORT=… python manage.py runserver` и `BACKEND_PORT=… npm run dev`
-(фронт найдёт бэкенд по той же переменной), фронт — `FRONTEND_PORT=…`. Вход — под учётками, созданными `seed` (пароль — тот, что вы задали в `SEED_PASSWORD`).
+Порты у проекта свои, не 8000/5173: рядом работают другие проекты. Заняты и
+эти — `BACKEND_PORT=… python manage.py runserver` и `BACKEND_PORT=… npm run dev`
+(фронт найдёт бэкенд по той же переменной), фронт — `FRONTEND_PORT=…`.
 
-**Реализовано:** JWT-вход с роль-маршрутизацией (Админ / Складовщик / Клиент),
-переключатель языков (RU/KY/EN, i18next), адаптивный layout (бургер-меню,
-таблицы→карточки <600px, тач-цели 48px на телефонах / плотные контролы на
-десктопе). Навигация админа разбита на секции «Каждый день» (Продажа, Чеки,
-Клиенты, Склад, Финансы) и «Реже» (Обзор/аналитика, Цены и услуги,
-Заявки на рефералов). Склад и приём товара объединены на одной странице
-(вкладки «Материалы» / «Движение»). Дизайн — тёплая тема на базе Notion
-(`DESIGN.md` — исходный анализ; актуальные токены цвета — персик/терракота —
-заданы в `frontend/src/index.css`). Axios-инстанс с JWT-перехватчиком —
-`frontend/src/api/api.js`.
+Интерфейс: JWT-вход с роль-маршрутизацией, языки RU/KY/EN (i18next), адаптивная
+вёрстка (таблицы → карточки на телефоне), тёмная тема, PWA-манифест и баннер
+«нет связи». Дизайн — `frontend/DESIGN.md`, токены цвета — `frontend/src/index.css`.
+Axios-инстанс с JWT-перехватчиком — `frontend/src/api/api.js`.
 
-## Telegram-боты
+> Django-админка живёт на **`/django-admin/`**, не на `/admin/`: префикс `/admin/*`
+> занят экранами самой системы. Почему и где ещё прописан — `HANDOVER.md`, раздел 2.
 
-```bash
-# Бот клиентов (long polling): верификация по контакту, «Мои чеки/заказы»
-python manage.py run_customer_bot
-```
+## Команды обслуживания
 
-Алерты персонала о низком остатке отправляются автоматически из бэкенда
-(`integrations/telegram.py`) — нужен `TELEGRAM_STAFF_BOT_TOKEN` и
-`TELEGRAM_STAFF_CHAT_IDS` в `.env`. Без токенов вызовы тихо логируются (no-op).
+| Команда | Зачем |
+|---------|-------|
+| `seed`, `seed_demo` | Заготовка каталога и учёток / демо-месяц. **Не на боевой базе** |
+| `check_roles` | Проверить разграничение ролей запросами к API (только чтение) |
+| `run_customer_bot` | Telegram-бот клиентов (long polling) |
+| `generate_recurring` | Завести траты по расписанию (аренда каждого 10-го и т.п.); повтор не задваивает |
+| `stock_snapshot --month ГГГГ-ММ` | Снимок склада на конец месяца |
+| `lots_without_payment` | Приходы без оплаты и без отметки «в долг» (перед выкладкой 10–11.10) |
+| `supplies_unpaid_cash` | Накладные с оплатой, которой нет в кассе (`--fix` дописывает расход) |
+| `fix_lot_cost`, `cancel_lot` | Исправить цену партии / отменить ошибочный приход |
+| `find_duplicate_clients` | Клиенты-двойники (номер или имя) |
+| `flushexpiredtokens` | Чистка просроченных JWT из чёрного списка (simplejwt) |
 
-## Платёжный шлюз
+## Переменные окружения
 
-`PAYMENT_GATEWAY=mock` (по умолчанию, для разработки) или `freedompay` —
-реальная интеграция FreedomPay/PayBox (подпись + XML-ack вебхука). Для
-`freedompay` укажите `PAYMENT_API_KEY` (pg_merchant_id) и `PAYMENT_API_SECRET`.
+Читаются из `.env` (`django-environ`); образцы — `.env.example` (разработка) и
+`.env.prod.example` (прод, с пояснениями к каждой строке).
+
+| Переменная | Зачем |
+|------------|-------|
+| `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS` | Базовые настройки Django. Оставленные по умолчанию `SECRET_KEY` и `ALLOWED_HOSTS=*` дают ERROR в лог при старте |
+| `DATABASE_URL` | PostgreSQL на проде; пусто — SQLite (`db.sqlite3`) |
+| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | База в `docker-compose.prod.yml` |
+| `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS`, `SITE_BASE_URL` | Адреса фронта; базовый адрес для ссылок на оплату и QR |
+| `FINANCE_PASSWORD` | Второй пароль финансовых экранов |
+| `TRUSTED_PROXY_COUNT` | Сколько прокси перед приложением — для настоящего адреса клиента в лимите входа. Включать только вместе с новым nginx (`DEPLOY.md`) |
+| `SECURE_SSL_REDIRECT`, `SECURE_HSTS_SECONDS` | На проде `False` и `0` намеренно: редирект и HSTS делает nginx |
+| `TELEGRAM_STAFF_BOT_TOKEN`, `TELEGRAM_STAFF_CHAT_IDS` | Алерты персоналу |
+| `TELEGRAM_CUSTOMER_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` | Бот клиентов; пустой секрет — вебхук закрыт |
+| `PAYMENT_GATEWAY`, `PAYMENT_API_KEY`, `PAYMENT_API_SECRET`, `PAYMENT_WEBHOOK_SECRET` | Платёжный шлюз и подпись его вебхука |
+
+## Интеграции
+
+Без токенов Telegram молча логирует (no-op).
+
+- **Telegram:** алерты персоналу о низком остатке (`TELEGRAM_STAFF_BOT_TOKEN`,
+  `TELEGRAM_STAFF_CHAT_IDS`); бот клиентов — `run_customer_bot`, привязка только к
+  своему контакту.
+- **Платёжный шлюз:** `PAYMENT_GATEWAY=mock` (по умолчанию) или `freedompay`
+  (FreedomPay/PayBox: подпись + XML-ack вебхука; `PAYMENT_API_KEY`,
+  `PAYMENT_API_SECRET`). Заглушка «оплата прошла» живёт только при `DEBUG`.
 
 ## Мультиязычность
 
 `django-modeltranslation` для динамического текста (название/категория материала,
-название услуги) на RU / KY / EN. Статика интерфейса — на фронтенде (i18next).
+название услуги) на RU / KY / EN. Статика интерфейса — на фронтенде (i18next,
+`frontend/src/i18n/locales/{ru,ky,en}.json`).
 
 ## Тесты
 
 ```bash
-python manage.py test                       # SQLite, ~25 с (PostgreSQL ~80 с)
-python manage.py test --parallel 4          # быстрее (на PostgreSQL ~20 с)
-python manage.py test --shuffle 1           # случайный порядок (семя 1): тесты не должны зависеть друг от друга
+python manage.py test                       # SQLite, ~60 с
+python manage.py test --parallel 4          # ~35 с
+python manage.py test --shuffle 1           # случайный порядок: тесты не должны зависеть друг от друга
 
 # На PostgreSQL (как на проде; двухпоточные тесты гонок идут только тут):
 DATABASE_URL=postgres://user@127.0.0.1:5432/postgres python manage.py test --parallel 4
 ```
 
-Около 1400 тестов (на 2026-10-10 — 1428; на PostgreSQL ни один не пропускается, на
-SQLite несколько тестов гонок пропускаются): модели, сервисы продаж/склада,
-edge-кейсы возвратов/долга/FIFO, себестоимость, ОПиУ/ОДДС/сверка, золотой набор
-операций за квартал (`finance/tests_golden.py`), фильтры клиентов, лимиты входа,
-идемпотентность `seed` — все должны быть зелёными. Число проверяйте прогоном, а не
-этой строкой.
+На 2026-10-19 — **2406 тестов, все зелёные** (на SQLite 7 тестов гонок
+пропускаются, на PostgreSQL — ни одного). Число проверяйте прогоном, а не этой
+строкой. Золотой набор операций за квартал с итогами, посчитанными руками, —
+`finance/tests_golden.py`.
 
 Тесты не зависят от текущей даты: даты, привязанные к «сегодня», либо считаются
 от середины месяца, либо часы фиксируются в самом тесте (`freeze_now` в
-`warehouse/tests_stock_on_date.py`) — раньше часть тестов падала 1-го и 2-го
-числа месяца.
+`warehouse/tests_stock_on_date.py`).
 
 **CI** (`.github/workflows/ci.yml`): на каждый push и pull request — миграции
 совпадают с моделями, тесты на PostgreSQL, сборка фронтенда, `shellcheck` скриптов
