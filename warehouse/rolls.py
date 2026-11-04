@@ -145,10 +145,12 @@ def receive_lot(
         actual_price=roll.cost_per_sqm,
         # Площадь до двух знаков и сумма с разрядами: «(14.88 кв.м), 12 000 сом»
         # читается, «(14.8840 кв.м), 12000.00 сом» — нет.
+        # У штучной партии площадь — это штуки: «15 шт (15.00 кв.м)» врало.
         reason=(
-            f"Поступление: {roll.dimensions_label} "
-            f"({Decimal(area).quantize(Decimal('0.01'))} кв.м), "
-            f"{_som(purchase_cost)} сом"
+            f"Поступление: {roll.dimensions_label}"
+            + ("" if roll.form == Roll.Form.PIECE
+               else f" ({Decimal(area).quantize(Decimal('0.01'))} кв.м)")
+            + f", {_som(purchase_cost)} сом"
         ),
         created_by=user,
         # Накладная, если приход пришёл документом, а не одиночной кнопкой.

@@ -96,6 +96,26 @@ class SurplusTests(APITestCase):
         self.count(bolts, counted_quantity="100")
         self.assertEqual(self.month()["losses"], Decimal("0.00"))
 
+    def test_piece_surplus_refills_emptied_lot(self):
+        """Прод 03.11: скотч 15 шт одной партией, «−15», затем «+15». Недостача
+        опустошила партию, и излишек шёл мимо неё — числом остатка: 15 шт на
+        складе при пустой партии, следующая продажа брала цену не из партии."""
+        tape = Material.objects.create(name="Скотч", unit=Material.Unit.PIECE)
+        lot = receive_lot(tape, form=Roll.Form.PIECE, area=Decimal("15"),
+                          purchase_cost=Decimal("1473.75"), received_at=noon(self.first))
+        tape.refresh_from_db()
+        self.count(tape, counted_quantity="0")
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_area, Decimal("0"))
+        self.count(tape, counted_quantity="15")
+        lot.refresh_from_db()
+        self.assertEqual(lot.remaining_area, Decimal("15"))
+        self.assertEqual(tape.quantity, Decimal("15"))
+        up = InventoryLog.objects.get(material=tape, quantity_changed__gt=0,
+                                      type=InventoryLog.Type.ADJUSTMENT)
+        self.assertEqual(up.cost, Decimal("1473.75"))
+        self.assertEqual(self.month()["losses"], Decimal("0.00"))
+
     def test_roll_stocktake_surplus_offsets_shortage(self):
         film = Material.objects.create(
             name="Баннер", unit=Material.Unit.SQM, is_roll_material=True,

@@ -695,6 +695,19 @@ class MaterialViewSet(viewsets.ModelViewSet):
                 happened_at=moment,
             )
             material.refresh_from_db()
+        elif delta > 0 and material.rolls.exists():
+            # Излишек у штучного с партиями — обратно в партию, как у площадного.
+            # Проверять «непустую» партию тут нельзя: недостача до нуля её и
+            # опустошила, и «−15, +15» оставлял 15 шт на складе при пустой
+            # партии (прод 03.11).
+            from .rolls import restore_area
+
+            restore_area(
+                material, delta, user=request.user,
+                reason=reason, log_type=InventoryLog.Type.ADJUSTMENT,
+                happened_at=moment, newest_first=True,
+            )
+            material.refresh_from_db()
         else:
             material = apply_stock_change(
                 material,

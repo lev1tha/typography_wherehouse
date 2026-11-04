@@ -378,10 +378,12 @@ export default function Dashboard() {
               label={t("dashboard.profitBeforeExpenses")}
               value={som(data.breakdown.profit_before_expenses)}
               color={Number(data.breakdown.profit_before_expenses) >= 0 ? "ok" : "danger"}
-              sub={t("dashboard.profitBeforeExpensesFormula", {
+              sub={t(Number(data.breakdown.losses || 0) < 0
+                ? "dashboard.profitBeforeExpensesFormulaSurplus" : "dashboard.profitBeforeExpensesFormula", {
                 revenue: som(revTotal),
                 cogs: som(data.breakdown.cogs_total),
                 losses: som(data.breakdown.losses || 0),
+                surplus: som(-(data.breakdown.losses || 0)),
               })}
             />
             <Stat label={t("dashboard.workRevenue")} value={som(data.breakdown.work_revenue)} />

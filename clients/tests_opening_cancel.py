@@ -79,7 +79,7 @@ class CancelOpeningPaymentTests(OpeningCase):
         self.assertEqual(Decimal(st["closing"]), D("4000"))
 
         # Сверка ОПиУ→ОДДС за октябрь: «Не объяснено» 0, строка — 3 000.
-        month = (date(2026, 10, 1), date(2026, 10, 31))
+        month = (date(2026, 10, 1), max(timezone.localdate(), date(2026, 10, 31)))  # оплата и отмена — «сегодня»
         b = bridge_mod.bridge(*month)
         self.assertEqual(b["unexplained"], D("0"))
         self.assertEqual({x["key"]: x["amount"] for x in b["lines"]}["opening_balances"], D("3000"))
@@ -125,7 +125,7 @@ class CancelOpeningPaymentTests(OpeningCase):
         st = self.statement(self.c)
         self.assertIn("opening_write_off_cancelled", [x["kind"] for x in st["rows"]])
         self.assertEqual(Decimal(st["closing"]), D("12000"))
-        month = (date(2026, 10, 1), date(2026, 10, 31))
+        month = (date(2026, 10, 1), max(timezone.localdate(), date(2026, 10, 31)))  # оплата и отмена — «сегодня»
         self.assertEqual(bridge_mod.bridge(*month)["unexplained"], D("0"))
 
     def test_write_off_in_closed_month_cannot_be_cancelled(self):
@@ -143,7 +143,7 @@ class CancelOpeningPaymentTests(OpeningCase):
         self.assertEqual(r.status_code, 200, r.data)
         self.assertEqual(self.debt(), D("0"))
         self.assertEqual(self.statement(self.c)["rows"], [])
-        month = (date(2026, 10, 1), date(2026, 10, 31))
+        month = (date(2026, 10, 1), max(timezone.localdate(), date(2026, 10, 31)))  # оплата и отмена — «сегодня»
         b = bridge_mod.bridge(*month)
         self.assertEqual(b["unexplained"], D("0"))
         self.assertEqual({x["key"]: x["amount"] for x in b["lines"]}["opening_balances"], D("0"))

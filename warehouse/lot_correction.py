@@ -774,9 +774,10 @@ def apply(*, roll=None, line=None, data, user=None) -> dict:
         if roll.form == Roll.Form.ROLL:
             log.metres_changed = roll.metres_initial
         log.reason = (
-            f"Поступление: {roll.dimensions_label} "
-            f"({after['quantity'].quantize(CENT)} кв.м), {_som(after['purchase_cost'])} сом "
-            f"(исправлено {today:%d.%m.%Y})"
+            f"Поступление: {roll.dimensions_label}"
+            + ("" if roll.form == Roll.Form.PIECE
+               else f" ({after['quantity'].quantize(CENT)} кв.м)")
+            + f", {_som(after['purchase_cost'])} сом (исправлено {today:%d.%m.%Y})"
         )
     log.save(update_fields=["quantity_changed", "actual_price", "roll", "metres_changed", "reason"])
 

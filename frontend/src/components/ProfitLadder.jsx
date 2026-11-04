@@ -21,7 +21,11 @@ export default function ProfitLadder({ pnl }) {
     ["cogs", t("ladder.cogs"), -(Number(pnl.cogs_material) + Number(pnl.cogs_services))],
     // Гарантийные переделки (волна 2) — часть себестоимости своей строкой.
     ["cogs_warranty", t("ladder.warranty"), -(Number(pnl.cogs_warranty) || 0), false, null, true],
-    ["losses", t("ladder.losses"), -pnl.losses, false, null, true],
+    // Потери нетто: излишек больше недостачи — это уже доход, и «Потери … +967»
+    // читалось как ошибка знака (прод 03.11).
+    Number(pnl.losses) < 0
+      ? ["surplus", t("ladder.surplus"), -pnl.losses, false, null, true]
+      : ["losses", t("ladder.losses"), -pnl.losses, false, null, true],
     ["gross", t("ladder.gross"), pnl.gross_profit, true, pnl.margins?.gross],
     ["opex", t("ladder.opex"), -pnl.opex?.total],
     ["opex_cash_manual", t("ladder.manual"), -pnl.opex_cash_manual, false, null, true],

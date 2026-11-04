@@ -481,10 +481,11 @@ export default function Finance() {
           hint={t("terms.gross")}
           value={som(report.gross_margin)}
           color={Number(report.gross_margin) >= 0 ? "ok" : "danger"}
-          sub={t("finance.grossProfitFormula", {
+          sub={t(Number(report.losses?.cost || 0) < 0 ? "finance.grossProfitFormulaSurplus" : "finance.grossProfitFormula", {
             revenue: som(report.revenue),
             cogs: som(report.cogs),
             losses: som(report.losses?.cost || 0),
+            surplus: som(-(report.losses?.cost || 0)),
           })}
         />
         <Stat label={t("finance.expenses")} hint={t("terms.opex")} value={som(report.total_expenses)} />
@@ -582,6 +583,15 @@ export default function Finance() {
                     <Hint text={t("terms.losses")} />
                   </span>
                   <span style={{ color: "var(--danger-ink)" }}>− {som(report.losses.cost)}</span>
+                </div>
+              )}
+              {Number(report.losses?.cost || 0) < 0 && (
+                <div className="crow">
+                  <span className="k">
+                    {t("ladder.surplus")}
+                    <Hint text={t("terms.surplus")} />
+                  </span>
+                  <span>+ {som(-report.losses.cost)}</span>
                 </div>
               )}
               <div className="crow mat-result">

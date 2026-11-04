@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import api from "../../api/api.js";
+import CountWarning, { needsZeroConfirm } from "../../components/CountWarning.jsx";
 import StockJournal from "../../components/StockJournal.jsx";
 import { useUI } from "../../components/UIProvider.jsx";
 import Tabs from "../../components/Tabs.jsx";
@@ -69,7 +70,7 @@ export default function Supply({ embedded = false }) {
   const [materials, setMaterials] = useState([]);
   const [busy, setBusy] = useState(false);
 
-  const INV0 = { material: "", counted_quantity: "", reason: "", inSheets: true, day: today() };
+  const INV0 = { material: "", counted_quantity: "", reason: "", inSheets: true, day: today(), zeroOk: false };
   const WO0 = { material: "", roll: "", quantity: "", reason_code: "DAMAGE", note: "", inSheets: true, day: today() };
   const [inv, setInv] = useState(INV0);
   const [writeoff, setWriteoff] = useState(WO0);
@@ -104,6 +105,8 @@ export default function Supply({ embedded = false }) {
   const invSheets = bySheet(invMat) && inv.inSheets;
   const invQty = num(inv.counted_quantity);
   const invArea = invQty == null ? null : invSheets ? invQty * Number(invMat.piece_area) : invQty;
+  const invCur = Number(invMat?.quantity) || 0;
+  const invBlocked = needsZeroConfirm(invCur, invArea) && !inv.zeroOk;
   useEffect(() => {
     if (!writeoffByRoll) {
       setRolls([]);
@@ -212,7 +215,7 @@ export default function Supply({ embedded = false }) {
             <UnitToggle value={inv.inSheets} onChange={(v) => setInv({ ...inv, inSheets: v, counted_quantity: "" })} t={t} />
           )}
           <Field label={`${t("supply.counted")}${invSheets ? `, ${t("warehouse.unitSheet")}` : ""}`}>
-            <Num value={inv.counted_quantity} onChange={(v) => setInv({ ...inv, counted_quantity: v })} />
+            <Num value={inv.counted_quantity} onChange={(v) => setInv({ ...inv, counted_quantity: v, zeroOk: false })} />
           </Field>
           <Field label={t("stock2.countedOn")}>
             <input type="date" value={inv.day} max={today()} onChange={(e) => setInv({ ...inv, day: e.target.value })} />
@@ -222,10 +225,19 @@ export default function Supply({ embedded = false }) {
               <div className="crow"><span className="k">{t("supply.becomes")}</span><strong>{stockOf(inv.material)} → {q4(invArea)}</strong></div>
             </div>
           )}
+          {inv.material && (
+            <CountWarning
+              material={invMat}
+              cur={invCur}
+              target={invArea}
+              confirmed={inv.zeroOk}
+              onConfirm={(v) => setInv({ ...inv, zeroOk: v })}
+            />
+          )}
           <Field label={t("supply.reason")}>
             <input value={inv.reason} onChange={(e) => setInv({ ...inv, reason: e.target.value })} />
           </Field>
-          <button style={{ width: "100%", height: 50 }} onClick={submitInventory} disabled={busy || !inv.material || invQty == null || invQty < 0}>
+          <button style={{ width: "100%", height: 50 }} onClick={submitInventory} disabled={busy || !inv.material || invQty == null || invQty < 0 || invBlocked}>
             {t("supply.inventory")}
           </button>
         </div>

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import api from "../api/api.js";
 import { apiError } from "../api/errors.js";
+import CountWarning, { needsZeroConfirm } from "./CountWarning.jsx";
 import Modal from "./Modal.jsx";
 import { useUI } from "./UIProvider.jsx";
 import { formatNumber } from "../utils/format.js";
@@ -45,6 +46,7 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
   // лечь в сентябрь, а не в октябрь.
   const [day, setDay] = useState(today());
   const [busy, setBusy] = useState(false);
+  const [zeroOk, setZeroOk] = useState(false);
 
   const cur = Number(material.quantity) || 0;
   const enteredUnit = roll ? (inSheets ? wholeUnit : t("unit.SQM")) : unit;
@@ -54,11 +56,12 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
   const target =
     countedNum == null ? null : inSheets ? countedNum * sheetArea : countedNum;
   const delta = target == null ? 0 : target - cur;
+  const blocked = needsZeroConfirm(cur, target) && !zeroOk;
   // Кв.м показываем до 4 знаков: лист 1.22×2.44 = 2.9768, и «6 листов» с
   // двумя знаками превращались в 17.86 — последний лист было не продать (XL-03).
 
   async function submit() {
-    if (target == null || target < 0) return;
+    if (target == null || target < 0 || blocked) return;
     setBusy(true);
     try {
       await api.post("/warehouse/materials/adjust/", {
@@ -87,7 +90,7 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
       footer={
         <>
           <button className="secondary" onClick={onClose}>{t("common.cancel")}</button>
-          <button onClick={submit} disabled={busy || target == null || target < 0}>
+          <button onClick={submit} disabled={busy || target == null || target < 0 || blocked}>
             {t("common.save")}
           </button>
         </>
@@ -130,7 +133,7 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
           autoFocus
           value={counted}
           aria-invalid={counted !== "" && countedNum == null ? "true" : undefined}
-          onChange={(e) => setCounted(e.target.value)}
+          onChange={(e) => { setCounted(e.target.value); setZeroOk(false); }}
         />
       </Field>
 
@@ -162,6 +165,7 @@ export default function AdjustStockModal({ material, onClose, onDone }) {
           </div>
         </div>
       )}
+      <CountWarning material={material} cur={cur} target={target} confirmed={zeroOk} onConfirm={setZeroOk} />
     </Modal>
   );
 }

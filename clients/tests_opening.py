@@ -123,7 +123,7 @@ class OwnerScenarioTests(OpeningCase):
         self.assertTrue(AuditLog.objects.filter(action__startswith="Проведены входящие остатки").exists())
 
         # Не выручка, не налог, не прибыль, не касса.
-        month = (date(2026, 10, 1), date(2026, 10, 31))
+        month = (date(2026, 10, 1), max(timezone.localdate(), date(2026, 10, 31)))  # оплата и отмена — «сегодня»
         p = pnl(*month)
         self.assertEqual((p["revenue"], p["tax"], p["net_profit"]), (D("0"), D("0"), D("0")))
         self.assertEqual(cash_total(), cash_before)
@@ -214,7 +214,7 @@ class OwnerScenarioTests(OpeningCase):
         self.assertEqual(r.status_code, 200, r.data)
         self.assertEqual(cash_total(), cash_before)
         self.assertTrue(ExpenseEntry.objects.filter(kind__code="BAD_DEBT", amount=D("12000")).exists())
-        month = (date(2026, 10, 1), date(2026, 10, 31))
+        month = (date(2026, 10, 1), max(timezone.localdate(), date(2026, 10, 31)))  # оплата и отмена — «сегодня»
         self.assertEqual(bridge_mod.bridge(*month)["unexplained"], D("0"))
         # Отменить можно только нетронутый остаток.
         ob = OpeningBalance.objects.get(client=c)
