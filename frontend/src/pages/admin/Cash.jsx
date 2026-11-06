@@ -230,7 +230,9 @@ export default function Cash() {
       });
       setCounting(null);
       load();
-      toast(Number(data.diff) === 0 ? t("cash.countMatches") : t("cash.countDiff", { sum: som(data.diff) }));
+      toast(Number(data.diff) === 0 ? t("cash.countMatches")
+        : data.opening ? t("cash.countOpening", { sum: som(data.diff) })
+        : t("cash.countDiff", { sum: som(data.diff) }));
     } catch (e) {
       toast(apiError(e, t("common.error")), "error");
     } finally {

@@ -1564,6 +1564,7 @@
     "countSave": "Save the count",
     "countMatches": "Matches — no difference",
     "countDiff": "Difference recorded: {{sum}}",
+    "countOpening": "The account had no opening balance — recorded as opening balance: {{sum}}. Profit is not affected.",
     "needCounted": "Enter how much you counted",
     "deleteConfirm": "Delete this entry from the cash book?",
     "article_DEPOSIT": "Owner's contribution",

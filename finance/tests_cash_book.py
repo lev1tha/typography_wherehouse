@@ -256,3 +256,34 @@ class SettingsAuditTests(CashBookCase):
     def test_payroll_day_is_validated(self):
         r = self.client.patch("/api/finance/settings/", {"payroll_prev_month_until_day": 40}, format="json")
         self.assertEqual(r.status_code, 400)
+
+
+class FirstCountIsOpeningTests(CashBookCase):
+    """Первый пересчёт счёта без начального остатка: «лишнее» — это остаток
+    до начала учёта, а не излишек в прибыль (2026-11-06, банк −65 934)."""
+
+    def count(self, **body):
+        return self.client.post(URL + "count/", {"account": "BANK", **body}, format="json")
+
+    def test_first_count_up_is_written_as_opening_on_the_first_day(self):
+        first = self.today - timedelta(days=2)
+        entry(first, "OUT", "62250", account="BANK", article="SUPPLY")
+        r = self.count(counted="0")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertTrue(r.data["opening"])
+        made = CashEntry.objects.get(article="OPENING")
+        self.assertEqual((made.happened_on, made.kind, made.amount), (first, "IN", D("62250")))
+        self.assertFalse(CashEntry.objects.filter(article="COUNT").exists())
+        self.assertEqual(CashEntry.balance("BANK"), D("0"))
+
+    def test_after_opening_a_surplus_is_a_count(self):
+        entry(self.today, "IN", "100", account="BANK", article="OPENING")
+        r = self.count(counted="150")
+        self.assertFalse(r.data["opening"])
+        self.assertEqual(CashEntry.objects.get(article="COUNT").amount, D("50"))
+
+    def test_shortage_without_opening_stays_a_shortage(self):
+        entry(self.today, "IN", "100", account="BANK", article="DEPOSIT")
+        r = self.count(counted="90")
+        self.assertFalse(r.data["opening"])
+        self.assertEqual(CashEntry.objects.get(article="COUNT").kind, "OUT")

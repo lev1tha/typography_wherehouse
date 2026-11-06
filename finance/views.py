@@ -43,7 +43,8 @@ from .models import (
 from .exports import csv_response
 from .filters import CashEntryFilter
 from .periods import (
-    PeriodClosed, add_months, ensure_month_open, ensure_open, is_closed, month_end, month_start,
+    PeriodClosed, add_months, closed_through, ensure_month_open, ensure_open, is_closed, month_end,
+    month_start,
 )
 from .serializers import (
     CashEntrySerializer,
@@ -1375,13 +1376,35 @@ class CashEntryViewSet(viewsets.ModelViewSet):
         diff = counted - current
         if diff == 0:
             return Response({"diff": "0", "detail": "Сошлось — расхождения нет."})
+        # Первый пересчёт счёта, у которого начальный остаток так и не внесли
+        # (2026-11-06): «лишние» деньги — это не излишек, а то, что лежало на
+        # счёте до начала учёта. Банк ушёл в −65 934 оттого, что оплаты
+        # поставщикам списались с нуля, и пересчёт «насчитали 0» записывал
+        # +65 934 излишком — прямо в прибыль месяца. Пишем ввод начального
+        # остатка: он вне потока и вне ОПиУ. Только в плюс: начальный остаток
+        # отрицательным не бывает, а «насчитали меньше» — это недостача.
+        # Датой — день первой записи счёта: тогда история не уходит в минус.
+        opening = diff > 0 and not CashEntry.objects.filter(
+            account=account, article=CashEntry.Article.OPENING
+        ).exists()
+        entry_day = day
+        if opening:
+            first = (CashEntry.objects.filter(account=account, happened_on__lte=day)
+                     .order_by("happened_on").values_list("happened_on", flat=True).first())
+            limit = closed_through()
+            if first and not (limit and first <= limit):
+                entry_day = first
         entry = CashEntry.objects.create(
             account=account,
             kind=CashEntry.Kind.IN if diff > 0 else CashEntry.Kind.OUT,
-            article=CashEntry.Article.COUNT,
+            article=CashEntry.Article.OPENING if opening else CashEntry.Article.COUNT,
             amount=abs(diff),
-            happened_on=day,
-            note=request.data.get("note") or f"Пересчёт на {day:%d.%m.%Y}: было {current}, насчитали {counted}",
+            happened_on=entry_day,
+            note=request.data.get("note") or (
+                f"Начальный остаток по первому пересчёту на {day:%d.%m.%Y}: было {current}, насчитали {counted}"
+                if opening else
+                f"Пересчёт на {day:%d.%m.%Y}: было {current}, насчитали {counted}"
+            ),
             created_by=request.user,
             is_auto=False,
         )
@@ -1392,7 +1415,7 @@ class CashEntryViewSet(viewsets.ModelViewSet):
             "cash",
         )
         return Response(
-            {"diff": str(diff), "entry": CashEntrySerializer(entry).data},
+            {"diff": str(diff), "opening": opening, "entry": CashEntrySerializer(entry).data},
             status=status.HTTP_201_CREATED,
         )
 
