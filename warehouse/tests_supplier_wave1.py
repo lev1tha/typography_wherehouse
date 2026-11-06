@@ -16,7 +16,7 @@ from accounts.models import User
 from audit.models import AuditLog
 from finance.models import CashEntry, ExpenseEntry, ExpenseKind, PeriodLock
 from finance.reports.bridge import bridge
-from finance.reports.summary import supplier_debts
+from finance.reports.summary import finance_summary, supplier_debts
 from finance.material_sheet import purchases_from_stock
 from warehouse.models import (
     InventoryLog,
@@ -611,6 +611,15 @@ class OpeningStockTests(Base):
         self.assertFalse(CashEntry.objects.exists())
         self.assertEqual(supplier_debts()["total"], D("0"))
         self.assertEqual(self.unexplained(), D("0.00"))
+
+    def test_opening_supply_closes_the_stock_chain(self):
+        """Копия прода 06.11: «Начальные остатки» внутри месяца рвали цепочку
+        «было + пришло − продано = лежит» в Сводке на свою сумму."""
+        self.post_supply([self.sheet_line("25200", "3")], is_opening=True, number="Остаток")
+        rec = finance_summary(*MONTH)["stock"]["reconcile"]
+        self.assertEqual(rec["opening_in_period"], D("25200.00"))
+        self.assertEqual(rec["purchases"], D("0.00"))
+        self.assertEqual(rec["gap"], D("0.00"))
 
     def test_opening_supply_refuses_payment(self):
         r = self.client.post(SUPPLIES, {

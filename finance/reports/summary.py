@@ -407,6 +407,9 @@ def finance_summary(d_from=None, d_to=None) -> dict:
         if d_from else Decimal("0.00")
     )
     all_purchases = purchases_from_stock(d_from, d_to)
+    from finance.material_sheet import opening_stock_in_period
+
+    opening_in_period = opening_stock_in_period(d_from, d_to)
     all_cogs = cogs
     all_loss, all_loss_unknown = loss_cost, loss_unknown
 
@@ -433,7 +436,7 @@ def finance_summary(d_from=None, d_to=None) -> dict:
     # август, где ни продаж, ни приходов, — везде нули, а склад 1 184 614.
     # Цифра из другого времени стояла среди месячных.
     value_period = stock_value_total(d_to).quantize(Decimal("0.01"))
-    expected = opening + all_purchases - all_cogs - all_loss
+    expected = opening + opening_in_period + all_purchases - all_cogs - all_loss
     stock = {
         "purchases": stock_purchases,
         "value_now": value_period,
@@ -447,6 +450,8 @@ def finance_summary(d_from=None, d_to=None) -> dict:
         "reconcile": {
             # Сколько лежало на складе в день перед началом периода.
             "opening": opening,
+            # Начальные остатки, внесённые накладной внутри периода.
+            "opening_in_period": opening_in_period.quantize(Decimal("0.01")),
             "purchases": all_purchases.quantize(Decimal("0.01")),
             "cogs": all_cogs,
             "losses": all_loss,

@@ -649,6 +649,14 @@ export default function Finance() {
                   <span className="k">{t("finance.stockOpening")}</span>
                   <span>{som(report.stock.reconcile.opening)}</span>
                 </div>
+                {/* Накладная «Начальные остатки» внутри периода — не закуп,
+                    но на склад легла: без строки цепочка не сходилась. */}
+                {Number(report.stock.reconcile.opening_in_period || 0) !== 0 && (
+                  <div className="crow">
+                    <span className="k">{t("finance.stockOpeningInPeriod")}</span>
+                    <span>+ {som(report.stock.reconcile.opening_in_period)}</span>
+                  </div>
+                )}
                 <div className="crow">
                   <span className="k">{t("finance.stockPurchases")}</span>
                   <span>+ {som(report.stock.reconcile.purchases)}</span>

@@ -1122,6 +1122,7 @@
     "investmentBlockHint": "Machines, workshop repairs and improvements. A purchase from the capitalisation threshold is an asset: it reaches profit through depreciation from next month, while the cash leaves in full on the payment day. Cheaper ones are expensed at once.",
     "cogsRowHint": "By lots at the moment of sale. This is working capital, not an expense: material bought — material sold.",
     "stockTitle": "Stock (working capital)",
+    "stockOpeningInPeriod": "Opening stock entered in the period",
     "stockPurchases": "Material purchased this period",
     "stockOpening": "On hand at the start of the period",
     "stockPurchasesAll": "Material purchases, all time",

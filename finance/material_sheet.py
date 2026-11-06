@@ -185,6 +185,25 @@ def purchases_from_stock(d_from=None, d_to=None):
     return sum(purchases_from_stock_by_day(d_from, d_to).values(), ZERO)
 
 
+def opening_stock_in_period(d_from=None, d_to=None):
+    """Накладные «Начальные остатки», принятые в периоде, по их сумме.
+
+    Это не закуп (`purchases_from_stock` их пропускает), но и в остатке на
+    начало их нет — они датированы внутри периода. Без своей строки цепочка
+    «было + пришло − продано = лежит» в Сводке рвалась ровно на их сумму
+    (копия прода 06.11: 100 болтов на 3 000 — «разрыв −3 000»).
+    """
+    lines = SupplyLine.objects.filter(supply__is_opening=True)
+    back = SupplierReturnLine.objects.filter(ret__in_place=False, ret__supply__is_opening=True)
+    if d_from:
+        lines = lines.filter(supply__received_on__gte=d_from)
+        back = back.filter(ret__returned_on__gte=d_from)
+    if d_to:
+        lines = lines.filter(supply__received_on__lte=d_to)
+        back = back.filter(ret__returned_on__lte=d_to)
+    return (lines.aggregate(v=Sum("cost"))["v"] or ZERO) - (back.aggregate(v=Sum("cost"))["v"] or ZERO)
+
+
 def purchases_from_stock_by_day(d_from=None, d_to=None) -> dict:
     """То же, что `purchases_from_stock`, но по дням: {дата: сумма}.
 
