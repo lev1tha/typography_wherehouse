@@ -642,9 +642,12 @@ class SaleItemInputSerializer(serializers.Serializer):
         ):
             # Рулон по кв.м изделия: количество строки — площадь изделия.
             qty = _area(attrs["width"], attrs["length"])
+        # Целым числом — лист/рулон целиком (mode=PIECE у листового) и материал
+        # в штуках. Касса шлёт mode=PIECE и для штучного материала в кг, л и
+        # пог.м — «2,5 л клея» и «12,5 м провода» отказывались как «целыми штуками».
         piecewise = material is not None and (
-            attrs.get("mode") == TransactionItem.SaleMode.PIECE
-            or material.unit == Material.Unit.PIECE
+            material.unit == Material.Unit.PIECE
+            or (material.is_roll_material and attrs.get("mode") == TransactionItem.SaleMode.PIECE)
         )
         if piecewise and qty != qty.to_integral_value():
             unit = "листами" if material.is_roll_material else "штуками"

@@ -382,6 +382,11 @@ def check_card_numbers(attrs) -> None:
                 f"{format(value.normalize(), 'f')} м — больше 4 м. Размер вводится в метрах: "
                 "122 см — это 1.22."
             )
+            if name == "roll_width":
+                errors[name] += (
+                    " Если это длина бухты (провод, шнур), заведите товар штучным "
+                    "с единицей «пог.м» — ширина ему не нужна."
+                )
     if errors:
         raise serializers.ValidationError(errors)
 
