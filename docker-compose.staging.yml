@@ -1,0 +1,90 @@
+# Тестовый стенд (test.chpucenter.com) на том же сервере, что и прод.
+# Как поднять и обновить — STAGING.md.
+#
+#   docker compose -f docker-compose.staging.yml up -d --build
+#
+# Это отдельная копия docker-compose.prod.yml, а не надстройка над ним: при
+# слиянии двух compose-файлов списки ports складываются, и стенд занял бы
+# заодно прод-порт 8001. Отдельный файл не может задеть прод ни при какой
+# опечатке. Цена — при правке прод-файла не забыть повторить её здесь.
+#
+# Что обязано отличаться от прода (иначе стенд портит прод):
+#   name / image  — свой проект compose и свой тег образа. С общим тегом
+#                   `chpucenter-app:latest` сборка стенда подменила бы образ
+#                   прода, и следующий `up -d` прода запустил бы тестовый код.
+#   /srv/chpucenter-staging — свои каталоги статики, медиа и фронтенда.
+#                   С прод-каталогами сервис migrate стенда выложил бы
+#                   тестовый фронтенд на chpucenter.com.
+#   127.0.0.1:8002 — свой порт (прод — 8001).
+#   .env.staging  — своя база, свой SECRET_KEY, пустые токены Telegram.
+#   pgdata        — том получает префикс проекта (chpucenter-staging_pgdata),
+#                   прод-том chpucenter_pgdata не виден.
+# Сервиса клиентского бота здесь нет совсем: два бота на одном токене
+# отбирали бы друг у друга сообщения клиентов.
+
+name: chpucenter-staging
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    env_file: .env.staging
+    logging: *default-logging
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build: .
+    image: chpucenter-staging-app:latest
+    restart: "no"
+    env_file: .env.staging
+    command: ["release"]
+    logging: *default-logging
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - /srv/chpucenter-staging/static:/app/staticfiles
+      - /srv/chpucenter-staging/media:/app/media
+      - /srv/chpucenter-staging/frontend:/app/frontend_public
+
+  web:
+    build: .
+    image: chpucenter-staging-app:latest
+    restart: unless-stopped
+    env_file: .env.staging
+    logging: *default-logging
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Как CMD в Dockerfile, но два воркера вместо трёх: память на сервере
+    # общая с продом.
+    command: ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "60", "--access-logfile", "-", "--error-logfile", "-"]
+    ports:
+      - "127.0.0.1:8002:8000"
+    volumes:
+      - /srv/chpucenter-staging/static:/app/staticfiles
+      - /srv/chpucenter-staging/media:/app/media
+      - /srv/chpucenter-staging/frontend:/app/frontend_public
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H 'Host: test.chpucenter.com' http://127.0.0.1:8000/api/health/ -o /dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  pgdata:

@@ -2,6 +2,8 @@
 
 Домен: **chpucenter.com** · сервер: **167.233.170.216** · DNS: Cloudflare (proxy включён).
 
+Тестовый стенд **test.chpucenter.com** на этом же сервере — отдельная инструкция в [STAGING.md](STAGING.md).
+
 ## Как всё устроено
 
 ```

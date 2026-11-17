@@ -42,3 +42,4 @@ db.sqlite3-journal
 .vscode/
 .claude/
 *.md
+.env.staging
